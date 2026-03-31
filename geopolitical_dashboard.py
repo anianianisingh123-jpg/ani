@@ -146,7 +146,7 @@ st.markdown("""
         background: linear-gradient(90deg, #1a1a2e, #16213e);
         color: #e0e0e0;
     }
-    div[data-testid="stMetric"] {
+    div[data-testid='stMetric'] {
         background-color: #0e1117;
         border: 1px solid #262730;
         border-radius: 8px;
@@ -221,19 +221,20 @@ def render_metric_card(name, data):
     pct = data["pct_change"]
     direction = "up" if change >= 0 else "down"
     arrow = "+" if change >= 0 else ""
-    return f"""
-    <div class="metric-card {direction}">
-        <div style="font-size:0.85rem;color:#aaa;margin-bottom:2px;">{name}</div>
-        <div style="display:flex;justify-content:space-between;align-items:baseline;">
-            <span style="font-size:1.2rem;font-weight:700;color:#fff;">
-                {price:,.2f}
-            </span>
-            <span style="font-size:0.9rem;color:{'#00C853' if change >= 0 else '#FF1744'};">
-                {arrow}{change:,.2f} ({arrow}{pct:.2f}%)
-            </span>
-        </div>
-    </div>
-    """
+    change_color = "#00C853" if change >= 0 else "#FF1744"
+    return (
+        f'<div class="metric-card {direction}">'
+        f'<div style="font-size:0.85rem;color:#aaa;margin-bottom:2px;">{name}</div>'
+        f'<div style="display:flex;justify-content:space-between;align-items:baseline;">'
+        f'<span style="font-size:1.2rem;font-weight:700;color:#fff;">'
+        f'{price:,.2f}'
+        f'</span>'
+        f'<span style="font-size:0.9rem;color:{change_color};">'
+        f'{arrow}{change:,.2f} ({arrow}{pct:.2f}%)'
+        f'</span>'
+        f'</div>'
+        f'</div>'
+    )
 
 
 def make_sparkline(history, name):
@@ -393,9 +394,10 @@ with st.sidebar:
 
 # ─── Header ───────────────────────────────────────────────────────────────
 st.markdown('<div class="main-header">GEOPOLITICAL MARKET DASHBOARD</div>', unsafe_allow_html=True)
+timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
 st.markdown(
-    '<div class="sub-header">USA - IRAN - ISRAEL Conflict Monitor | '
-    f'Live Market Data | Last Updated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")}</div>',
+    f'<div class="sub-header">USA - IRAN - ISRAEL Conflict Monitor | '
+    f'Live Market Data | Last Updated: {timestamp}</div>',
     unsafe_allow_html=True,
 )
 
@@ -578,10 +580,11 @@ if len(corr_data) >= 2:
 
 # ─── Footer ──────────────────────────────────────────────────────────────
 st.markdown("---")
+total_instruments = sum(len(v) for v in ASSETS.values())
 st.markdown(
     f"<div style='text-align:center;color:#555;font-size:0.8rem;'>"
     f"Dashboard refreshes every 30 seconds | Data from Yahoo Finance | "
-    f"Tracking {sum(len(v) for v in ASSETS.values())} instruments | "
+    f"Tracking {total_instruments} instruments | "
     f"Built for geopolitical risk monitoring"
     f"</div>",
     unsafe_allow_html=True,
