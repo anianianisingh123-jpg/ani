@@ -240,14 +240,19 @@ def render_metric_card(name, data):
 def make_sparkline(history, name):
     """Create a small sparkline chart."""
     fig = go.Figure()
-    color = "#00C853" if history["Close"].iloc[-1] >= history["Close"].iloc[0] else "#FF1744"
+    if history["Close"].iloc[-1] >= history["Close"].iloc[0]:
+        color = "#00C853"
+        fill_color = "rgba(0, 200, 83, 0.1)"
+    else:
+        color = "#FF1744"
+        fill_color = "rgba(255, 23, 68, 0.1)"
     fig.add_trace(go.Scatter(
         x=history.index,
         y=history["Close"],
         mode="lines",
         line=dict(color=color, width=2),
         fill="tozeroy",
-        fillcolor=color.replace(")", ",0.1)").replace("rgb", "rgba") if "rgb" in color else f"{color}18",
+        fillcolor=fill_color,
         name=name,
     ))
     fig.update_layout(
