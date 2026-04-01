@@ -6,12 +6,11 @@ import yfinance as yf
 import plotly.graph_objects as go
 import pandas as pd
 from datetime import datetime
-import time
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import feedparser   # ← NEW: for automatic Iran-USA news (no API key)
+import feedparser   # for automatic Iran-USA news (no API key)
 
-# ─── Force Dark Theme (works locally and on deployed link) ─────────────────
+# ─── Force Dark Theme ─────────────────
 st.set_page_config(
     page_title="Geopolitical Market Dashboard | USA-Iran-Israel",
     page_icon="🌍",
@@ -25,16 +24,12 @@ st.markdown("""
     .st-emotion-cache-1g8v16d { background-color: #0E1117 !important; }
     .main-header { font-size: 2.2rem; font-weight: 800; color: #FF4B4B; text-align: center; margin-bottom: 0; }
     .sub-header { font-size: 1rem; color: #888; text-align: center; margin-bottom: 1.5rem; }
-    .metric-card { background: #1E1E1E; border-radius: 10px; padding: 12px 16px; margin: 4px 0; border-left: 4px solid #444; }
-    .metric-card.up { border-left-color: #00C853; }
-    .metric-card.down { border-left-color: #FF1744; }
     .section-title { font-size: 1.3rem; font-weight: 700; margin-top: 1.5rem; margin-bottom: 0.5rem; padding: 8px 12px; border-radius: 6px; background: linear-gradient(90deg, #1a1a2e, #16213e); color: #e0e0e0; }
-    div[data-testid='stMetric'] { background-color: #0e1117; border: 1px solid #262730; border-radius: 8px; padding: 10px 14px; }
     .news-card { background:#1E1E1E; border-radius:12px; padding:16px; margin:8px 0; border-left:5px solid #FF1744; }
 </style>
 """, unsafe_allow_html=True)
 
-# ─── Asset Definitions (your original) ─────────────────────────────────────
+# ─── Asset Definitions (unchanged) ─────────────────────────────────────
 ASSETS = {
     "Commodities": {"Crude Oil (WTI)": "CL=F", "Brent Crude": "BZ=F", "Natural Gas": "NG=F", "Gold": "GC=F", "Silver": "SI=F", "Platinum": "PL=F", "Palladium": "PA=F", "Wheat": "ZW=F", "Corn": "ZC=F", "Copper": "HG=F", "Uranium (Sprott)": "SRUUF"},
     "Defense & Energy Stocks": {"Lockheed Martin": "LMT", "Raytheon (RTX)": "RTX", "Northrop Grumman": "NOC", "General Dynamics": "GD", "L3Harris": "LHX", "Boeing": "BA", "ExxonMobil": "XOM", "Chevron": "CVX", "ConocoPhillips": "COP", "Halliburton": "HAL", "Schlumberger": "SLB", "Occidental Petroleum": "OXY"},
@@ -109,22 +104,20 @@ def get_top_movers(all_data, n=8):
     if df.empty: return pd.DataFrame(), pd.DataFrame()
     return df.nlargest(n, "Change %"), df.nsmallest(n, "Change %")
 
-# ─── NEW: Automatic Iran-USA War News (Google News RSS – no key, always live) ─────
-@st.cache_data(ttl=60)  # refresh every 60 seconds inside the cache
+# ─── Automatic Iran-USA War News (Google News RSS) ─────
+@st.cache_data(ttl=60)
 def fetch_iran_usa_news():
     rss_url = "https://news.google.com/rss/search?q=Iran+US+war+OR+Iran+USA+conflict+OR+Iran+United+States+tensions+OR+Iran+Trump+strike+OR+Iran+Israel+strike+OR+Hormuz+closure&hl=en-US&gl=US&ceid=US:en"
     feed = feedparser.parse(rss_url)
     articles = []
-    for entry in feed.entries[:12]:  # top 12 most recent
+    for entry in feed.entries[:12]:
         pub_time = ""
         if hasattr(entry, 'published_parsed') and entry.published_parsed:
             dt = datetime(*entry.published_parsed[:6])
             pub_time = dt.strftime("%b %d, %Y %I:%M %p")
         else:
             pub_time = entry.get('published', 'Just now')
-        
         source = entry.get('source', {}).get('title', 'Google News')
-        
         articles.append({
             'title': entry.title,
             'published': pub_time,
@@ -134,14 +127,19 @@ def fetch_iran_usa_news():
         })
     return articles
 
-# ─── Sidebar ───────────────────────────────────────────────────────────────
+# ─── Sidebar with Manual Refresh Button ─────────────────────────────────────
 with st.sidebar:
     st.markdown("## Dashboard Controls")
-    auto_refresh = st.checkbox("Auto-Refresh (30s)", value=True)
     selected_categories = st.multiselect("Categories to Display", options=list(ASSETS.keys()), default=list(ASSETS.keys()))
     chart_type = st.radio("Chart View", ["Bar Charts", "Sparklines", "Both"], index=2)
+    
     st.markdown("---")
-    st.caption("📰 News is now **100% automatic** (no API key ever needed)")
+    # BIG REFRESH BUTTON
+    if st.button("🔄 Refresh Dashboard Now", type="primary", use_container_width=True):
+        st.cache_data.clear()   # forces fresh data from Yahoo + Google News
+        st.rerun()
+    
+    st.caption("📰 News is 100% automatic • Click the button above to update everything instantly")
 
 # ─── Header + Tabs ─────────────────────────────────────────────────────────
 st.markdown('<div class="main-header">GEOPOLITICAL MARKET DASHBOARD</div>', unsafe_allow_html=True)
@@ -150,10 +148,10 @@ st.markdown(f'<div class="sub-header">USA - IRAN - ISRAEL Conflict Monitor | Liv
 
 tab_news, tab_markets, tab_risk = st.tabs(["🇮🇷 Iran-USA War & Tensions – LIVE", "📊 Markets", "⚠️ Risk & Correlations"])
 
-# ─── TAB 1: News (NOW AUTOMATIC – NO KEY REQUIRED) ────────────────────────
+# ─── TAB 1: News ────────────────────────
 with tab_news:
     st.markdown('<div class="section-title">Iran-USA War & Tensions – LIVE</div>', unsafe_allow_html=True)
-    st.caption("🔥 Most recent first • Powered by Google News RSS • Auto-refreshes every 30 seconds with the dashboard")
+    st.caption("🔥 Most recent first • Powered by Google News RSS • Click Refresh Now to get the latest headlines")
     
     articles = fetch_iran_usa_news()
     
@@ -170,9 +168,9 @@ with tab_news:
                 </div>
                 """, unsafe_allow_html=True)
     else:
-        st.warning("No current Iran-USA conflict news found (refreshing automatically...)")
+        st.warning("No current Iran-USA conflict news found.")
 
-# ─── Rest of the dashboard (Tabs 2 & 3) – completely unchanged ─────────────
+# ─── Markets & Risk tabs (unchanged) ─────────────────────────────────────
 with tab_markets:
     st.markdown("---")
     filtered_assets = {k: v for k, v in ASSETS.items() if k in selected_categories}
@@ -250,13 +248,9 @@ with tab_risk:
 st.markdown("---")
 st.markdown(
     f"<div style='text-align:center;color:#555;font-size:0.8rem;'>"
-    f"Dashboard refreshes every 30 seconds | Data from Yahoo Finance + Google News RSS | "
+    f"Click 'Refresh Dashboard Now' to update all data & news | "
     f"Tracking {sum(len(v) for v in ASSETS.values())} instruments | "
     f"Built for geopolitical risk monitoring"
     f"</div>",
     unsafe_allow_html=True,
 )
-
-if auto_refresh:
-    time.sleep(30)
-    st.rerun()
