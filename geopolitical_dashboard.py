@@ -6,9 +6,9 @@ import yfinance as yf
 import plotly.graph_objects as go
 import pandas as pd
 from datetime import datetime
-import requests
+import feedparser
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import feedparser   # for automatic Iran-USA news (no API key)
+import time
 
 # ─── Force Dark Theme ─────────────────
 st.set_page_config(
@@ -29,7 +29,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ─── Asset Definitions (unchanged) ─────────────────────────────────────
+# ─── Asset Definitions (your original 73 assets - unchanged) ─────────────────────────────────────
 ASSETS = {
     "Commodities": {"Crude Oil (WTI)": "CL=F", "Brent Crude": "BZ=F", "Natural Gas": "NG=F", "Gold": "GC=F", "Silver": "SI=F", "Platinum": "PL=F", "Palladium": "PA=F", "Wheat": "ZW=F", "Corn": "ZC=F", "Copper": "HG=F", "Uranium (Sprott)": "SRUUF"},
     "Defense & Energy Stocks": {"Lockheed Martin": "LMT", "Raytheon (RTX)": "RTX", "Northrop Grumman": "NOC", "General Dynamics": "GD", "L3Harris": "LHX", "Boeing": "BA", "ExxonMobil": "XOM", "Chevron": "CVX", "ConocoPhillips": "COP", "Halliburton": "HAL", "Schlumberger": "SLB", "Occidental Petroleum": "OXY"},
@@ -39,25 +39,50 @@ ASSETS = {
     "Currencies": {"USD Index (DXY)": "DX-Y.NYB", "EUR/USD": "EURUSD=X", "GBP/USD": "GBPUSD=X", "USD/JPY": "JPY=X", "USD/CHF": "CHF=X", "USD/TRY": "TRY=X", "USD/ILS": "ILS=X", "USD/SAR": "SAR=X", "USD/AED": "AED=X", "USD/INR": "INR=X", "USD/CNY": "CNY=X", "USD/RUB": "RUB=X", "USD/EGP": "EGP=X", "XAU/USD (Gold)": "XAUUSD=X"},
 }
 
-# ─── Helper Functions (unchanged) ──────────────────────────────────────────
-@st.cache_data(ttl=30)
+# ─── ROBUST DATA COLLECTION (Fixed) ─────────────────────────────
+@st.cache_data(ttl=30, show_spinner=False)
 def fetch_ticker_data(symbol, period="5d", interval="1d"):
-    try:
-        ticker = yf.Ticker(symbol)
-        hist = ticker.history(period=period, interval=interval)
-        if hist.empty: return None
-        current = hist["Close"].iloc[-1]
-        prev = hist["Close"].iloc[-2] if len(hist) >= 2 else current
-        change = current - prev
-        pct = (change / prev * 100) if prev != 0 else 0
-        return {"price": current, "change": change, "pct_change": pct, "history": hist}
-    except:
-        return None
+    for attempt in range(3):
+        try:
+            ticker = yf.Ticker(symbol)
+            # Try fast_info first (most accurate live price)
+            try:
+                info = ticker.fast_info
+                current = info.get('lastPrice') or info.get('regularMarketPrice') or info.get('regularMarketPreviousClose')
+                if current is not None:
+                    hist = ticker.history(period=period, interval=interval)
+                    if not hist.empty:
+                        prev = hist["Close"].iloc[-2] if len(hist) >= 2 else current
+                        change = current - prev
+                        pct = (change / prev * 100) if prev != 0 else 0
+                    else:
+                        prev = current
+                        change = 0
+                        pct = 0
+                    return {"price": round(float(current), 4), "change": float(change), "pct_change": round(float(pct), 2), "history": hist}
+            except:
+                pass
+
+            # Fallback to history
+            hist = ticker.history(period=period, interval=interval, prepost=True)
+            if hist.empty:
+                raise ValueError("Empty history")
+            current = hist["Close"].iloc[-1]
+            prev = hist["Close"].iloc[-2] if len(hist) >= 2 else current
+            change = current - prev
+            pct = (change / prev * 100) if prev != 0 else 0
+            return {"price": round(float(current), 4), "change": float(change), "pct_change": round(float(pct), 2), "history": hist}
+
+        except Exception:
+            if attempt < 2:
+                time.sleep(0.7 * (attempt + 1))
+                continue
+            return None
 
 def fetch_all_data(assets_dict):
     results = {}
     all_symbols = [(cat, name, sym) for cat, tickers in assets_dict.items() for name, sym in tickers.items()]
-    with ThreadPoolExecutor(max_workers=20) as executor:
+    with ThreadPoolExecutor(max_workers=25) as executor:
         futures = {executor.submit(fetch_ticker_data, sym): (cat, name) for cat, name, sym in all_symbols}
         for future in as_completed(futures):
             cat, name = futures[future]
@@ -66,6 +91,7 @@ def fetch_all_data(assets_dict):
             if data: results[cat][name] = data
     return results
 
+# ─── Other Helper Functions (unchanged) ──────────────────────────────────────────
 def make_sparkline(history, name):
     fig = go.Figure()
     color = "#00C853" if history["Close"].iloc[-1] >= history["Close"].iloc[0] else "#FF1744"
@@ -132,13 +158,10 @@ with st.sidebar:
     st.markdown("## Dashboard Controls")
     selected_categories = st.multiselect("Categories to Display", options=list(ASSETS.keys()), default=list(ASSETS.keys()))
     chart_type = st.radio("Chart View", ["Bar Charts", "Sparklines", "Both"], index=2)
-    
     st.markdown("---")
-    # BIG REFRESH BUTTON
     if st.button("🔄 Refresh Dashboard Now", type="primary", use_container_width=True):
-        st.cache_data.clear()   # forces fresh data from Yahoo + Google News
+        st.cache_data.clear()
         st.rerun()
-    
     st.caption("📰 News is 100% automatic • Click the button above to update everything instantly")
 
 # ─── Header + Tabs ─────────────────────────────────────────────────────────
@@ -152,9 +175,7 @@ tab_news, tab_markets, tab_risk = st.tabs(["🇮🇷 Iran-USA War & Tensions –
 with tab_news:
     st.markdown('<div class="section-title">Iran-USA War & Tensions – LIVE</div>', unsafe_allow_html=True)
     st.caption("🔥 Most recent first • Powered by Google News RSS • Click Refresh Now to get the latest headlines")
-    
     articles = fetch_iran_usa_news()
-    
     if articles:
         cols = st.columns(3)
         for i, art in enumerate(articles):
@@ -170,7 +191,7 @@ with tab_news:
     else:
         st.warning("No current Iran-USA conflict news found.")
 
-# ─── Markets & Risk tabs (unchanged) ─────────────────────────────────────
+# ─── MARKETS TAB ────────────────────────
 with tab_markets:
     st.markdown("---")
     filtered_assets = {k: v for k, v in ASSETS.items() if k in selected_categories}
@@ -211,6 +232,7 @@ with tab_markets:
                         st.plotly_chart(make_sparkline(data["history"], name), use_container_width=True)
         st.markdown("---")
 
+# ─── RISK TAB ────────────────────────
 with tab_risk:
     st.markdown('<div class="section-title">Geopolitical Risk Indicators</div>', unsafe_allow_html=True)
     risk_col1, risk_col2, risk_col3, risk_col4 = st.columns(4)
