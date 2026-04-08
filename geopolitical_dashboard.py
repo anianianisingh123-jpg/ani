@@ -29,7 +29,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ─── Asset Definitions (your original 73 assets - unchanged) ─────────────────────────────────────
+# ─── Asset Definitions ─────────────────────────────────────
 ASSETS = {
     "Commodities": {"Crude Oil (WTI)": "CL=F", "Brent Crude": "BZ=F", "Natural Gas": "NG=F", "Gold": "GC=F", "Silver": "SI=F", "Platinum": "PL=F", "Palladium": "PA=F", "Wheat": "ZW=F", "Corn": "ZC=F", "Copper": "HG=F", "Uranium (Sprott)": "SRUUF"},
     "Defense & Energy Stocks": {"Lockheed Martin": "LMT", "Raytheon (RTX)": "RTX", "Northrop Grumman": "NOC", "General Dynamics": "GD", "L3Harris": "LHX", "Boeing": "BA", "ExxonMobil": "XOM", "Chevron": "CVX", "ConocoPhillips": "COP", "Halliburton": "HAL", "Schlumberger": "SLB", "Occidental Petroleum": "OXY"},
@@ -39,20 +39,19 @@ ASSETS = {
     "Currencies": {"USD Index (DXY)": "DX-Y.NYB", "EUR/USD": "EURUSD=X", "GBP/USD": "GBPUSD=X", "USD/JPY": "JPY=X", "USD/CHF": "CHF=X", "USD/TRY": "TRY=X", "USD/ILS": "ILS=X", "USD/SAR": "SAR=X", "USD/AED": "AED=X", "USD/INR": "INR=X", "USD/CNY": "CNY=X", "USD/RUB": "RUB=X", "USD/EGP": "EGP=X", "XAU/USD (Gold)": "XAUUSD=X"},
 }
 
-# ─── ROBUST DATA COLLECTION (Fixed) ─────────────────────────────
+# ─── ROBUST DATA COLLECTION ─────────────────────────────
 @st.cache_data(ttl=30, show_spinner=False)
 def fetch_ticker_data(symbol, period="5d", interval="1d"):
     for attempt in range(3):
         try:
             ticker = yf.Ticker(symbol)
-            # Try fast_info first (most accurate live price)
             try:
                 info = ticker.fast_info
                 current = info.get('lastPrice') or info.get('regularMarketPrice') or info.get('regularMarketPreviousClose')
                 if current is not None:
-                    hist = ticker.history(period=period, interval=interval)
-                    if not hist.empty:
-                        prev = hist["Close"].iloc[-2] if len(hist) >= 2 else current
+                    hist = ticker.history(period="2d", interval=interval)
+                    if len(hist) >= 2:
+                        prev = hist["Close"].iloc[-2]
                         change = current - prev
                         pct = (change / prev * 100) if prev != 0 else 0
                     else:
@@ -63,19 +62,32 @@ def fetch_ticker_data(symbol, period="5d", interval="1d"):
             except:
                 pass
 
-            # Fallback to history
-            hist = ticker.history(period=period, interval=interval, prepost=True)
-            if hist.empty:
-                raise ValueError("Empty history")
-            current = hist["Close"].iloc[-1]
-            prev = hist["Close"].iloc[-2] if len(hist) >= 2 else current
-            change = current - prev
-            pct = (change / prev * 100) if prev != 0 else 0
+            hist = ticker.history(period="2d", interval=interval)
+            if len(hist) >= 2:
+                current = hist["Close"].iloc[-1]
+                prev = hist["Close"].iloc[-2]
+                change = current - prev
+                pct = (change / prev * 100) if prev != 0 else 0
+            elif not hist.empty:
+                current = hist["Close"].iloc[-1]
+                prev = current
+                change = 0
+                pct = 0
+            else:
+                hist = ticker.history(period=period, interval=interval)
+                if not hist.empty:
+                    current = hist["Close"].iloc[-1]
+                    prev = hist["Close"].iloc[-2] if len(hist) >= 2 else current
+                    change = current - prev
+                    pct = (change / prev * 100) if prev != 0 else 0
+                else:
+                    raise ValueError("Empty history")
+
             return {"price": round(float(current), 4), "change": float(change), "pct_change": round(float(pct), 2), "history": hist}
 
         except Exception:
             if attempt < 2:
-                time.sleep(0.7 * (attempt + 1))
+                time.sleep(0.8 * (attempt + 1))
                 continue
             return None
 
@@ -91,7 +103,7 @@ def fetch_all_data(assets_dict):
             if data: results[cat][name] = data
     return results
 
-# ─── Other Helper Functions (unchanged) ──────────────────────────────────────────
+# ─── Helper Functions ──────────────────────────────────────────
 def make_sparkline(history, name):
     fig = go.Figure()
     color = "#00C853" if history["Close"].iloc[-1] >= history["Close"].iloc[0] else "#FF1744"
@@ -130,7 +142,7 @@ def get_top_movers(all_data, n=8):
     if df.empty: return pd.DataFrame(), pd.DataFrame()
     return df.nlargest(n, "Change %"), df.nsmallest(n, "Change %")
 
-# ─── Automatic Iran-USA War News (Google News RSS) ─────
+# ─── Automatic Iran-USA War News ─────
 @st.cache_data(ttl=60)
 def fetch_iran_usa_news():
     rss_url = "https://news.google.com/rss/search?q=Iran+US+war+OR+Iran+USA+conflict+OR+Iran+United+States+tensions+OR+Iran+Trump+strike+OR+Iran+Israel+strike+OR+Hormuz+closure&hl=en-US&gl=US&ceid=US:en"
@@ -153,7 +165,7 @@ def fetch_iran_usa_news():
         })
     return articles
 
-# ─── Sidebar with Manual Refresh Button ─────────────────────────────────────
+# ─── Sidebar ─────────────────────────────────────
 with st.sidebar:
     st.markdown("## Dashboard Controls")
     selected_categories = st.multiselect("Categories to Display", options=list(ASSETS.keys()), default=list(ASSETS.keys()))
@@ -171,7 +183,7 @@ st.markdown(f'<div class="sub-header">USA - IRAN - ISRAEL Conflict Monitor | Liv
 
 tab_news, tab_markets, tab_risk = st.tabs(["🇮🇷 Iran-USA War & Tensions – LIVE", "📊 Markets", "⚠️ Risk & Correlations"])
 
-# ─── TAB 1: News ────────────────────────
+# ─── NEWS TAB ────────────────────────
 with tab_news:
     st.markdown('<div class="section-title">Iran-USA War & Tensions – LIVE</div>', unsafe_allow_html=True)
     st.caption("🔥 Most recent first • Powered by Google News RSS • Click Refresh Now to get the latest headlines")
@@ -227,12 +239,12 @@ with tab_markets:
         if chart_type in ["Sparklines", "Both"]:
             spark_cols = st.columns(min(len(cat_data), 4))
             for i, (name, data) in enumerate(cat_data.items()):
-                if data["history"] is not None and not data["history"].empty:
+                if data.get("history") is not None and not data["history"].empty:
                     with spark_cols[i % len(spark_cols)]:
                         st.plotly_chart(make_sparkline(data["history"], name), use_container_width=True)
         st.markdown("---")
 
-# ─── RISK TAB ────────────────────────
+# ─── RISK TAB (Improved) ────────────────────────
 with tab_risk:
     st.markdown('<div class="section-title">Geopolitical Risk Indicators</div>', unsafe_allow_html=True)
     risk_col1, risk_col2, risk_col3, risk_col4 = st.columns(4)
@@ -249,22 +261,51 @@ with tab_risk:
     with risk_col2: st.metric("Gold Flight", f"{gold_chg:+.2f}%" if gold_chg is not None else "N/A")
     with risk_col3: st.metric("VIX Fear Level", f"{vix_price:.1f}" if vix_price is not None else "N/A")
     with risk_col4: st.metric("USD Strength", f"{dxy_chg:+.2f}%" if dxy_chg is not None else "N/A")
+
     st.markdown('<div class="section-title">Key Conflict-Sensitive Correlations</div>', unsafe_allow_html=True)
-    key_assets = {"Oil (WTI)": ("Commodities", "Crude Oil (WTI)"), "Gold": ("Commodities", "Gold"), "Defense (ITA)": ("Sector ETFs", "Defense (ITA)"), "Energy (XLE)": ("Sector ETFs", "Energy (XLE)"), "S&P 500": ("Country Indices", "S&P 500 (USA)"), "VIX": ("Sovereign Bonds & Safe Havens", "VIX (Fear Index)")}
+
+    key_assets = {
+        "Oil (WTI)": ("Commodities", "Crude Oil (WTI)"),
+        "Gold": ("Commodities", "Gold"),
+        "Defense (ITA)": ("Sector ETFs", "Defense (ITA)"),
+        "Energy (XLE)": ("Sector ETFs", "Energy (XLE)"),
+        "S&P 500": ("Country Indices", "S&P 500 (USA)"),
+        "VIX": ("Sovereign Bonds & Safe Havens", "VIX (Fear Index)")
+    }
+
     corr_data = {}
     for label, (cat, name) in key_assets.items():
         try:
-            hist = all_data[cat][name]["history"]
-            if hist is not None and not hist.empty:
-                corr_data[label] = hist["Close"].pct_change().dropna()
+            if cat in all_data and name in all_data[cat]:
+                hist = all_data[cat][name].get("history")
+                if hist is not None and not hist.empty and len(hist) >= 4:   # need at least 4 points for meaningful correlation
+                    corr_data[label] = hist["Close"].pct_change().dropna()
         except:
             pass
-    if len(corr_data) >= 2:
+
+    if len(corr_data) >= 3:   # need at least 3 assets for a useful matrix
         corr_df = pd.DataFrame(corr_data)
         corr_matrix = corr_df.corr()
-        fig_corr = go.Figure(data=go.Heatmap(z=corr_matrix.values, x=corr_matrix.columns, y=corr_matrix.index, colorscale="RdYlGn", zmin=-1, zmax=1, text=corr_matrix.round(2).values, texttemplate="%{text}"))
-        fig_corr.update_layout(title="5-Day Return Correlations", height=450, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#ccc"))
+        fig_corr = go.Figure(data=go.Heatmap(
+            z=corr_matrix.values,
+            x=corr_matrix.columns,
+            y=corr_matrix.index,
+            colorscale="RdYlGn",
+            zmin=-1,
+            zmax=1,
+            text=corr_matrix.round(2).values,
+            texttemplate="%{text}"
+        ))
+        fig_corr.update_layout(
+            title="5-Day Return Correlations",
+            height=450,
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#ccc")
+        )
         st.plotly_chart(fig_corr, use_container_width=True)
+    else:
+        st.info("📊 Not enough historical data yet to generate the correlation matrix.\n\nClick 'Refresh Dashboard Now' a few times to collect more data points.")
 
 # ─── Footer ────────────────────────────────────────────────────────────────
 st.markdown("---")
