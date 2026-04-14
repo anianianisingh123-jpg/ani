@@ -181,9 +181,9 @@ with tab_news:
     st.caption("🔥 Most recent first • Powered by Google News RSS • Click Refresh Now to get the latest headlines")
     articles = fetch_iran_usa_news()
     if articles:
-        cols = st.columns(3)
+        cols = st.columns(2)
         for i, art in enumerate(articles):
-            with cols[i % 3]:
+            with cols[i % 2]:
                 st.markdown(f"""
                 <div class="news-card">
                     <div style="font-size:0.85rem;color:#FF1744;">{art['source']} • {art['published']}</div>
@@ -222,7 +222,7 @@ with tab_markets:
         if category not in all_data or not all_data[category]: continue
         cat_data = all_data[category]
         st.markdown(f'<div class="section-title">{category}</div>', unsafe_allow_html=True)
-        cols = st.columns(min(len(cat_data), 6))
+        cols = st.columns(min(len(cat_data), 2))
         for i, (name, data) in enumerate(cat_data.items()):
             with cols[i % len(cols)]:
                 st.metric(label=name, value=f"{data['price']:,.2f}", delta=f"{data['pct_change']:+.2f}%")
