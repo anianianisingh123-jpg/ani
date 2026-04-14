@@ -50,7 +50,7 @@ def fetch_ticker_data(symbol):
                 current = info.get('lastPrice') or info.get('regularMarketPrice') or info.get('regularMarketPreviousClose')
                 if current is not None:
                     current = float(current)
-                    hist = ticker.history(period="2d", interval="1d")
+                    hist = ticker.history(period="1mo", interval="1d")
                     if len(hist) >= 2:
                         prev = float(hist["Close"].iloc[-2])
                     else:
@@ -61,7 +61,7 @@ def fetch_ticker_data(symbol):
             except:
                 pass
 
-            hist = ticker.history(period="2d", interval="1d")
+            hist = ticker.history(period="1mo", interval="1d")
             if len(hist) >= 2:
                 current = float(hist["Close"].iloc[-1])
                 prev = float(hist["Close"].iloc[-2])
@@ -234,7 +234,6 @@ with tab_markets:
 # ─── RISK TAB (Fixed - shows with less data) ────────────────────────
 with tab_risk:
     st.markdown('<div class="section-title">Geopolitical Risk Indicators</div>', unsafe_allow_html=True)
-    risk_col1, risk_col2, risk_col3, risk_col4 = st.columns(4)
     def safe_get(category, name, field="pct_change"):
         try:
             return all_data[category][name][field]
@@ -244,10 +243,12 @@ with tab_risk:
     gold_chg = safe_get("Commodities", "Gold")
     vix_price = safe_get("Sovereign Bonds & Safe Havens", "VIX (Fear Index)", "price")
     dxy_chg = safe_get("Currencies", "USD Index (DXY)")
-    with risk_col1: st.metric("Oil Stress", f"{oil_chg:+.2f}%" if oil_chg is not None else "N/A")
-    with risk_col2: st.metric("Gold Flight", f"{gold_chg:+.2f}%" if gold_chg is not None else "N/A")
-    with risk_col3: st.metric("VIX Fear Level", f"{vix_price:.1f}" if vix_price is not None else "N/A")
-    with risk_col4: st.metric("USD Strength", f"{dxy_chg:+.2f}%" if dxy_chg is not None else "N/A")
+    risk_row1_col1, risk_row1_col2 = st.columns(2)
+    with risk_row1_col1: st.metric("Oil Stress", f"{oil_chg:+.2f}%" if oil_chg is not None else "N/A")
+    with risk_row1_col2: st.metric("Gold Flight", f"{gold_chg:+.2f}%" if gold_chg is not None else "N/A")
+    risk_row2_col1, risk_row2_col2 = st.columns(2)
+    with risk_row2_col1: st.metric("VIX Fear Level", f"{vix_price:.1f}" if vix_price is not None else "N/A")
+    with risk_row2_col2: st.metric("USD Strength", f"{dxy_chg:+.2f}%" if dxy_chg is not None else "N/A")
 
     st.markdown('<div class="section-title">Key Conflict-Sensitive Correlations</div>', unsafe_allow_html=True)
     key_assets = {"Oil (WTI)": ("Commodities", "Crude Oil (WTI)"), "Gold": ("Commodities", "Gold"), "Defense (ITA)": ("Sector ETFs", "Defense (ITA)"), "Energy (XLE)": ("Sector ETFs", "Energy (XLE)"), "S&P 500": ("Country Indices", "S&P 500 (USA)"), "VIX": ("Sovereign Bonds & Safe Havens", "VIX (Fear Index)")}
