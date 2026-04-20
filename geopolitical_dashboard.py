@@ -5,6 +5,8 @@ import streamlit as st
 import yfinance as yf
 import plotly.graph_objects as go
 import pandas as pd
+import requests
+from io import StringIO
 from datetime import datetime
 import feedparser
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -39,8 +41,79 @@ ASSETS = {
 }
 
 # ─── ROBUST DATA COLLECTION ─────────────────────────────
+
+# Stooq symbols (near real-time, no 15-min exchange delay like Yahoo imposes on futures).
+STOOQ_MAP = {
+    "CL=F": "cl.f", "BZ=F": "bz.f", "NG=F": "ng.f",
+    "GC=F": "gc.f", "SI=F": "si.f", "PL=F": "pl.f", "PA=F": "pa.f",
+    "ZW=F": "zw.f", "ZC=F": "zc.f", "HG=F": "hg.f",
+    "^GSPC": "^spx", "^DJI": "^dji", "^IXIC": "^ndq", "^VIX": "^vix",
+    "^TNX": "^tnx", "^TYX": "^tyx", "^FVX": "^fvx",
+    "^FTSE": "^ftm", "^GDAXI": "^dax", "^FCHI": "^cac", "^N225": "^nkx",
+    "BTC-USD": "btcusd",
+    "EURUSD=X": "eurusd", "GBPUSD=X": "gbpusd", "JPY=X": "usdjpy",
+    "CHF=X": "usdchf", "TRY=X": "usdtry", "ILS=X": "usdils",
+    "INR=X": "usdinr", "CNY=X": "usdcny", "RUB=X": "usdrub",
+    "XAUUSD=X": "xauusd",
+    "DX-Y.NYB": "^dxy",
+}
+
+_STOOQ_SESSION = requests.Session()
+_STOOQ_SESSION.headers.update({"User-Agent": "Mozilla/5.0 (compatible; GeopoliticalDashboard/1.0)"})
+
+def _fetch_stooq_quote(symbol):
+    """Pull the latest live quote + % change from Stooq. Returns None on failure."""
+    stooq_sym = STOOQ_MAP.get(symbol)
+    if not stooq_sym:
+        return None
+    try:
+        # Bust any intermediary cache with a timestamp query param.
+        url = f"https://stooq.com/q/l/?s={stooq_sym}&f=sd2t2ohlcvp&h&e=csv&_={int(time.time())}"
+        r = _STOOQ_SESSION.get(url, timeout=6)
+        r.raise_for_status()
+        lines = [x for x in r.text.splitlines() if x.strip()]
+        if len(lines) < 2:
+            return None
+        # Header: Symbol,Date,Time,Open,High,Low,Close,Volume,Change%
+        fields = [f.strip() for f in lines[1].split(",")]
+        if len(fields) < 7 or fields[6] in ("N/D", "", "0"):
+            return None
+        current = float(fields[6])
+        pct = None
+        if len(fields) >= 9 and fields[8] not in ("N/D", ""):
+            try:
+                pct = float(fields[8].replace("%", "").replace("+", ""))
+            except ValueError:
+                pct = None
+        prev = None
+        if pct is not None and (1 + pct / 100) != 0:
+            prev = current / (1 + pct / 100)
+        return {"price": current, "prev_close": prev, "pct": pct}
+    except Exception:
+        return None
+
+def _fetch_stooq_history(symbol):
+    """Pull daily OHLCV history from Stooq for sparklines/correlation."""
+    stooq_sym = STOOQ_MAP.get(symbol)
+    if not stooq_sym:
+        return pd.DataFrame()
+    try:
+        url = f"https://stooq.com/q/d/l/?s={stooq_sym}&i=d&_={int(time.time())}"
+        r = _STOOQ_SESSION.get(url, timeout=8)
+        r.raise_for_status()
+        if not r.text or "Date,Open" not in r.text:
+            return pd.DataFrame()
+        df = pd.read_csv(StringIO(r.text))
+        if df.empty or "Close" not in df.columns:
+            return pd.DataFrame()
+        df["Date"] = pd.to_datetime(df["Date"])
+        df = df.set_index("Date").sort_index().tail(30)
+        return df
+    except Exception:
+        return pd.DataFrame()
+
 def _fast_info_get(fi, *names):
-    """Safely pull a value from yfinance FastInfo using attribute or dict access."""
+    """Safely pull a value from yfinance FastInfo via attribute or dict access."""
     for n in names:
         try:
             val = fi[n] if hasattr(fi, "__getitem__") else None
@@ -55,69 +128,90 @@ def _fast_info_get(fi, *names):
                 continue
     return None
 
-@st.cache_data(ttl=30, show_spinner=False)
+def _yf_session():
+    """Return a plain requests.Session so yfinance doesn't reuse its cached HTTP client."""
+    s = requests.Session()
+    s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; GeopoliticalDashboard/1.0)"})
+    return s
+
+@st.cache_data(ttl=20, show_spinner=False)
 def fetch_ticker_data(symbol):
     for attempt in range(3):
         try:
-            ticker = yf.Ticker(symbol)
+            # ── PRIMARY (live, un-delayed): Stooq for mapped symbols.
+            stooq_quote = _fetch_stooq_quote(symbol)
+            stooq_hist = _fetch_stooq_history(symbol) if stooq_quote else pd.DataFrame()
 
-            # 1) Pull fresh intraday data to capture the latest live print.
-            intraday = pd.DataFrame()
-            for period, interval in (("1d", "1m"), ("5d", "5m"), ("1mo", "1h")):
+            # ── yfinance for the rest, bypassing its internal HTTP cache.
+            ticker = yf.Ticker(symbol, session=_yf_session())
+
+            yf_intraday = pd.DataFrame()
+            if stooq_quote is None:
+                for period, interval in (("1d", "1m"), ("5d", "5m"), ("1mo", "1h")):
+                    try:
+                        yf_intraday = ticker.history(period=period, interval=interval, prepost=True, auto_adjust=False)
+                        if yf_intraday is not None and not yf_intraday.empty:
+                            break
+                    except Exception:
+                        continue
+
+            yf_hist = pd.DataFrame()
+            if stooq_hist.empty:
                 try:
-                    intraday = ticker.history(period=period, interval=interval, prepost=True, auto_adjust=False)
-                    if intraday is not None and not intraday.empty:
-                        break
+                    yf_hist = ticker.history(period="1mo", interval="1d", auto_adjust=False)
                 except Exception:
-                    continue
+                    pass
 
-            # 2) Pull daily history for the sparkline + reliable prev close.
-            hist = pd.DataFrame()
-            try:
-                hist = ticker.history(period="1mo", interval="1d", auto_adjust=False)
-            except Exception:
-                pass
-
-            # 3) Determine the current live price (prefer intraday, then fast_info, then daily).
+            # ── Resolve current price: Stooq first (live), then yfinance intraday, then fast_info, then daily.
             current = None
-            if intraday is not None and not intraday.empty:
-                current = float(intraday["Close"].dropna().iloc[-1])
+            if stooq_quote and stooq_quote.get("price") is not None:
+                current = float(stooq_quote["price"])
+            elif yf_intraday is not None and not yf_intraday.empty:
+                current = float(yf_intraday["Close"].dropna().iloc[-1])
 
-            prev = None
-            try:
-                fi = ticker.fast_info
-                if current is None:
-                    current = _fast_info_get(fi, "last_price", "lastPrice", "regular_market_price", "regularMarketPrice")
-                prev = _fast_info_get(fi, "previous_close", "previousClose", "regular_market_previous_close", "regularMarketPreviousClose")
-            except Exception:
-                pass
+            prev = stooq_quote["prev_close"] if (stooq_quote and stooq_quote.get("prev_close")) else None
+            if current is None or prev is None:
+                try:
+                    fi = ticker.fast_info
+                    if current is None:
+                        current = _fast_info_get(fi, "last_price", "lastPrice", "regular_market_price", "regularMarketPrice")
+                    if prev is None:
+                        prev = _fast_info_get(fi, "previous_close", "previousClose", "regular_market_previous_close", "regularMarketPreviousClose")
+                except Exception:
+                    pass
 
-            if current is None and not hist.empty:
-                current = float(hist["Close"].dropna().iloc[-1])
-
+            if current is None and not yf_hist.empty:
+                current = float(yf_hist["Close"].dropna().iloc[-1])
             if current is None:
                 raise ValueError("no price available")
 
-            # 4) Previous close: fast_info -> daily history fallback.
-            if prev is None and not hist.empty:
-                closes = hist["Close"].dropna()
-                if len(closes) >= 2:
-                    prev = float(closes.iloc[-2])
-                elif len(closes) == 1:
-                    prev = float(closes.iloc[-1])
-
+            if prev is None:
+                src = yf_hist if not yf_hist.empty else stooq_hist
+                if not src.empty:
+                    closes = src["Close"].dropna()
+                    if len(closes) >= 2:
+                        prev = float(closes.iloc[-2])
+                    elif len(closes) == 1:
+                        prev = float(closes.iloc[-1])
             if prev is None:
                 prev = current
 
             change = current - prev
             pct = (change / prev * 100) if prev != 0 else 0.0
 
-            # 5) Make sure the daily history reflects today's live print for charts.
+            # ── Pick the best history dataframe for charts.
+            hist = stooq_hist if not stooq_hist.empty else yf_hist
             if not hist.empty:
-                today = pd.Timestamp.utcnow().tz_convert(hist.index.tz) if hist.index.tz is not None else pd.Timestamp.utcnow().tz_localize(None)
-                last_idx = hist.index[-1]
-                if last_idx.normalize() == today.normalize():
-                    hist.iloc[-1, hist.columns.get_loc("Close")] = current
+                try:
+                    today = pd.Timestamp.utcnow()
+                    if hist.index.tz is not None:
+                        today = today.tz_convert(hist.index.tz)
+                    else:
+                        today = today.tz_localize(None)
+                    if hist.index[-1].normalize() == today.normalize():
+                        hist.iloc[-1, hist.columns.get_loc("Close")] = current
+                except Exception:
+                    pass
 
             return {
                 "price": round(float(current), 4),
@@ -128,7 +222,7 @@ def fetch_ticker_data(symbol):
 
         except Exception:
             if attempt < 2:
-                time.sleep(0.8 * (attempt + 1))
+                time.sleep(0.6 * (attempt + 1))
                 continue
             return None
 
