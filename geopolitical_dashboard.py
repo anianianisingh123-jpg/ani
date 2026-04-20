@@ -5,6 +5,7 @@ import streamlit as st
 import yfinance as yf
 import plotly.graph_objects as go
 import pandas as pd
+import requests
 from datetime import datetime
 import feedparser
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -38,6 +39,55 @@ ASSETS = {
     "Currencies": {"USD Index (DXY)": "DX-Y.NYB", "EUR/USD": "EURUSD=X", "GBP/USD": "GBPUSD=X", "USD/JPY": "JPY=X", "USD/CHF": "CHF=X", "USD/TRY": "TRY=X", "USD/ILS": "ILS=X", "USD/SAR": "SAR=X", "USD/AED": "AED=X", "USD/INR": "INR=X", "USD/CNY": "CNY=X", "USD/RUB": "RUB=X", "USD/EGP": "EGP=X", "XAU/USD (Gold)": "XAUUSD=X"},
 }
 
+# ─── LIVE PRICE OVERRIDE (Stooq, near real-time, no Yahoo 15-min futures delay) ─
+_STOOQ_LIVE = {
+    "CL=F": "cl.f", "BZ=F": "bz.f", "NG=F": "ng.f",
+    "GC=F": "gc.f", "SI=F": "si.f", "HG=F": "hg.f",
+    "PL=F": "pl.f", "PA=F": "pa.f", "ZW=F": "zw.f", "ZC=F": "zc.f",
+}
+_STOOQ_SESSION = requests.Session()
+_STOOQ_SESSION.headers.update({"User-Agent": "Mozilla/5.0"})
+
+def _stooq_live_price(symbol):
+    """Best-effort live price from Stooq. Returns float or None; never raises."""
+    s = _STOOQ_LIVE.get(symbol)
+    if not s:
+        return None
+    try:
+        r = _STOOQ_SESSION.get(
+            f"https://stooq.com/q/l/?s={s}&f=sd2t2c&h&e=csv",
+            timeout=2,
+        )
+        if r.status_code != 200:
+            return None
+        lines = r.text.strip().splitlines()
+        if len(lines) < 2:
+            return None
+        parts = lines[1].split(",")
+        if len(parts) < 4:
+            return None
+        val = parts[3].strip()
+        if val in ("N/D", "", "0", "0.00"):
+            return None
+        return float(val)
+    except Exception:
+        return None
+
+def _apply_live(symbol, result):
+    """Override yfinance price with live Stooq quote for mapped symbols."""
+    if not result:
+        return result
+    live = _stooq_live_price(symbol)
+    if live is None:
+        return result
+    prev = result["price"] - result["change"]
+    if prev <= 0:
+        return result
+    result["price"] = round(float(live), 4)
+    result["change"] = float(live - prev)
+    result["pct_change"] = round((live - prev) / prev * 100, 2)
+    return result
+
 # ─── ROBUST DATA COLLECTION ─────────────────────────────
 @st.cache_data(ttl=30, show_spinner=False)
 def fetch_ticker_data(symbol):
@@ -57,7 +107,7 @@ def fetch_ticker_data(symbol):
                         prev = current
                     change = current - prev
                     pct = (change / prev * 100) if prev != 0 else 0
-                    return {"price": round(current, 4), "change": float(change), "pct_change": round(pct, 2), "history": hist}
+                    return _apply_live(symbol, {"price": round(current, 4), "change": float(change), "pct_change": round(pct, 2), "history": hist})
             except:
                 pass
 
@@ -75,7 +125,7 @@ def fetch_ticker_data(symbol):
             else:
                 return None
 
-            return {"price": round(current, 4), "change": float(change), "pct_change": round(pct, 2), "history": hist}
+            return _apply_live(symbol, {"price": round(current, 4), "change": float(change), "pct_change": round(pct, 2), "history": hist})
 
         except Exception:
             if attempt < 2:
