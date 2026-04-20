@@ -39,43 +39,92 @@ ASSETS = {
 }
 
 # ─── ROBUST DATA COLLECTION ─────────────────────────────
+def _fast_info_get(fi, *names):
+    """Safely pull a value from yfinance FastInfo using attribute or dict access."""
+    for n in names:
+        try:
+            val = fi[n] if hasattr(fi, "__getitem__") else None
+        except Exception:
+            val = None
+        if val is None:
+            val = getattr(fi, n, None)
+        if val is not None:
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                continue
+    return None
+
 @st.cache_data(ttl=30, show_spinner=False)
 def fetch_ticker_data(symbol):
     for attempt in range(3):
         try:
             ticker = yf.Ticker(symbol)
-            # Try fast_info first
+
+            # 1) Pull fresh intraday data to capture the latest live print.
+            intraday = pd.DataFrame()
+            for period, interval in (("1d", "1m"), ("5d", "5m"), ("1mo", "1h")):
+                try:
+                    intraday = ticker.history(period=period, interval=interval, prepost=True, auto_adjust=False)
+                    if intraday is not None and not intraday.empty:
+                        break
+                except Exception:
+                    continue
+
+            # 2) Pull daily history for the sparkline + reliable prev close.
+            hist = pd.DataFrame()
             try:
-                info = ticker.fast_info
-                current = info.get('lastPrice') or info.get('regularMarketPrice') or info.get('regularMarketPreviousClose')
-                if current is not None:
-                    current = float(current)
-                    hist = ticker.history(period="1mo", interval="1d")
-                    if len(hist) >= 2:
-                        prev = float(hist["Close"].iloc[-2])
-                    else:
-                        prev = current
-                    change = current - prev
-                    pct = (change / prev * 100) if prev != 0 else 0
-                    return {"price": round(current, 4), "change": float(change), "pct_change": round(pct, 2), "history": hist}
-            except:
+                hist = ticker.history(period="1mo", interval="1d", auto_adjust=False)
+            except Exception:
                 pass
 
-            hist = ticker.history(period="1mo", interval="1d")
-            if len(hist) >= 2:
-                current = float(hist["Close"].iloc[-1])
-                prev = float(hist["Close"].iloc[-2])
-                change = current - prev
-                pct = (change / prev * 100) if prev != 0 else 0
-            elif not hist.empty:
-                current = float(hist["Close"].iloc[-1])
-                prev = current
-                change = 0
-                pct = 0
-            else:
-                return None
+            # 3) Determine the current live price (prefer intraday, then fast_info, then daily).
+            current = None
+            if intraday is not None and not intraday.empty:
+                current = float(intraday["Close"].dropna().iloc[-1])
 
-            return {"price": round(current, 4), "change": float(change), "pct_change": round(pct, 2), "history": hist}
+            prev = None
+            try:
+                fi = ticker.fast_info
+                if current is None:
+                    current = _fast_info_get(fi, "last_price", "lastPrice", "regular_market_price", "regularMarketPrice")
+                prev = _fast_info_get(fi, "previous_close", "previousClose", "regular_market_previous_close", "regularMarketPreviousClose")
+            except Exception:
+                pass
+
+            if current is None and not hist.empty:
+                current = float(hist["Close"].dropna().iloc[-1])
+
+            if current is None:
+                raise ValueError("no price available")
+
+            # 4) Previous close: fast_info -> daily history fallback.
+            if prev is None and not hist.empty:
+                closes = hist["Close"].dropna()
+                if len(closes) >= 2:
+                    prev = float(closes.iloc[-2])
+                elif len(closes) == 1:
+                    prev = float(closes.iloc[-1])
+
+            if prev is None:
+                prev = current
+
+            change = current - prev
+            pct = (change / prev * 100) if prev != 0 else 0.0
+
+            # 5) Make sure the daily history reflects today's live print for charts.
+            if not hist.empty:
+                today = pd.Timestamp.utcnow().tz_convert(hist.index.tz) if hist.index.tz is not None else pd.Timestamp.utcnow().tz_localize(None)
+                last_idx = hist.index[-1]
+                if last_idx.normalize() == today.normalize():
+                    hist.iloc[-1, hist.columns.get_loc("Close")] = current
+
+            return {
+                "price": round(float(current), 4),
+                "change": float(change),
+                "pct_change": round(float(pct), 2),
+                "history": hist,
+            }
 
         except Exception:
             if attempt < 2:
