@@ -6,7 +6,6 @@ import yfinance as yf
 import plotly.graph_objects as go
 import pandas as pd
 import requests
-from io import StringIO
 from datetime import datetime
 import feedparser
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -40,189 +39,97 @@ ASSETS = {
     "Currencies": {"USD Index (DXY)": "DX-Y.NYB", "EUR/USD": "EURUSD=X", "GBP/USD": "GBPUSD=X", "USD/JPY": "JPY=X", "USD/CHF": "CHF=X", "USD/TRY": "TRY=X", "USD/ILS": "ILS=X", "USD/SAR": "SAR=X", "USD/AED": "AED=X", "USD/INR": "INR=X", "USD/CNY": "CNY=X", "USD/RUB": "RUB=X", "USD/EGP": "EGP=X", "XAU/USD (Gold)": "XAUUSD=X"},
 }
 
-# ─── ROBUST DATA COLLECTION ─────────────────────────────
-
-# Stooq symbols (near real-time, no 15-min exchange delay like Yahoo imposes on futures).
-STOOQ_MAP = {
+# ─── LIVE PRICE OVERRIDE (Stooq, near real-time, no Yahoo 15-min futures delay) ─
+_STOOQ_LIVE = {
     "CL=F": "cl.f", "BZ=F": "bz.f", "NG=F": "ng.f",
-    "GC=F": "gc.f", "SI=F": "si.f", "PL=F": "pl.f", "PA=F": "pa.f",
-    "ZW=F": "zw.f", "ZC=F": "zc.f", "HG=F": "hg.f",
-    "^GSPC": "^spx", "^DJI": "^dji", "^IXIC": "^ndq", "^VIX": "^vix",
-    "^TNX": "^tnx", "^TYX": "^tyx", "^FVX": "^fvx",
-    "^FTSE": "^ftm", "^GDAXI": "^dax", "^FCHI": "^cac", "^N225": "^nkx",
-    "BTC-USD": "btcusd",
-    "EURUSD=X": "eurusd", "GBPUSD=X": "gbpusd", "JPY=X": "usdjpy",
-    "CHF=X": "usdchf", "TRY=X": "usdtry", "ILS=X": "usdils",
-    "INR=X": "usdinr", "CNY=X": "usdcny", "RUB=X": "usdrub",
-    "XAUUSD=X": "xauusd",
-    "DX-Y.NYB": "^dxy",
+    "GC=F": "gc.f", "SI=F": "si.f", "HG=F": "hg.f",
+    "PL=F": "pl.f", "PA=F": "pa.f", "ZW=F": "zw.f", "ZC=F": "zc.f",
 }
-
 _STOOQ_SESSION = requests.Session()
-_STOOQ_SESSION.headers.update({"User-Agent": "Mozilla/5.0 (compatible; GeopoliticalDashboard/1.0)"})
+_STOOQ_SESSION.headers.update({"User-Agent": "Mozilla/5.0"})
 
-def _fetch_stooq_quote(symbol):
-    """Pull the latest live quote + % change from Stooq. Returns None on failure."""
-    stooq_sym = STOOQ_MAP.get(symbol)
-    if not stooq_sym:
+def _stooq_live_price(symbol):
+    """Best-effort live price from Stooq. Returns float or None; never raises."""
+    s = _STOOQ_LIVE.get(symbol)
+    if not s:
         return None
     try:
-        # Bust any intermediary cache with a timestamp query param.
-        url = f"https://stooq.com/q/l/?s={stooq_sym}&f=sd2t2ohlcvp&h&e=csv&_={int(time.time())}"
-        r = _STOOQ_SESSION.get(url, timeout=6)
-        r.raise_for_status()
-        lines = [x for x in r.text.splitlines() if x.strip()]
+        r = _STOOQ_SESSION.get(
+            f"https://stooq.com/q/l/?s={s}&f=sd2t2c&h&e=csv",
+            timeout=2,
+        )
+        if r.status_code != 200:
+            return None
+        lines = r.text.strip().splitlines()
         if len(lines) < 2:
             return None
-        # Header: Symbol,Date,Time,Open,High,Low,Close,Volume,Change%
-        fields = [f.strip() for f in lines[1].split(",")]
-        if len(fields) < 7 or fields[6] in ("N/D", "", "0"):
+        parts = lines[1].split(",")
+        if len(parts) < 4:
             return None
-        current = float(fields[6])
-        pct = None
-        if len(fields) >= 9 and fields[8] not in ("N/D", ""):
-            try:
-                pct = float(fields[8].replace("%", "").replace("+", ""))
-            except ValueError:
-                pct = None
-        prev = None
-        if pct is not None and (1 + pct / 100) != 0:
-            prev = current / (1 + pct / 100)
-        return {"price": current, "prev_close": prev, "pct": pct}
+        val = parts[3].strip()
+        if val in ("N/D", "", "0", "0.00"):
+            return None
+        return float(val)
     except Exception:
         return None
 
-def _fetch_stooq_history(symbol):
-    """Pull daily OHLCV history from Stooq for sparklines/correlation."""
-    stooq_sym = STOOQ_MAP.get(symbol)
-    if not stooq_sym:
-        return pd.DataFrame()
-    try:
-        url = f"https://stooq.com/q/d/l/?s={stooq_sym}&i=d&_={int(time.time())}"
-        r = _STOOQ_SESSION.get(url, timeout=8)
-        r.raise_for_status()
-        if not r.text or "Date,Open" not in r.text:
-            return pd.DataFrame()
-        df = pd.read_csv(StringIO(r.text))
-        if df.empty or "Close" not in df.columns:
-            return pd.DataFrame()
-        df["Date"] = pd.to_datetime(df["Date"])
-        df = df.set_index("Date").sort_index().tail(30)
-        return df
-    except Exception:
-        return pd.DataFrame()
+def _apply_live(symbol, result):
+    """Override yfinance price with live Stooq quote for mapped symbols."""
+    if not result:
+        return result
+    live = _stooq_live_price(symbol)
+    if live is None:
+        return result
+    prev = result["price"] - result["change"]
+    if prev <= 0:
+        return result
+    result["price"] = round(float(live), 4)
+    result["change"] = float(live - prev)
+    result["pct_change"] = round((live - prev) / prev * 100, 2)
+    return result
 
-def _fast_info_get(fi, *names):
-    """Safely pull a value from yfinance FastInfo via attribute or dict access."""
-    for n in names:
-        try:
-            val = fi[n] if hasattr(fi, "__getitem__") else None
-        except Exception:
-            val = None
-        if val is None:
-            val = getattr(fi, n, None)
-        if val is not None:
-            try:
-                return float(val)
-            except (TypeError, ValueError):
-                continue
-    return None
-
-def _yf_session():
-    """Return a plain requests.Session so yfinance doesn't reuse its cached HTTP client."""
-    s = requests.Session()
-    s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; GeopoliticalDashboard/1.0)"})
-    return s
-
-@st.cache_data(ttl=20, show_spinner=False)
+# ─── ROBUST DATA COLLECTION ─────────────────────────────
+@st.cache_data(ttl=30, show_spinner=False)
 def fetch_ticker_data(symbol):
     for attempt in range(3):
         try:
-            # ── PRIMARY (live, un-delayed): Stooq for mapped symbols.
-            stooq_quote = _fetch_stooq_quote(symbol)
-            stooq_hist = _fetch_stooq_history(symbol) if stooq_quote else pd.DataFrame()
-
-            # ── yfinance for the rest, bypassing its internal HTTP cache.
-            ticker = yf.Ticker(symbol, session=_yf_session())
-
-            yf_intraday = pd.DataFrame()
-            if stooq_quote is None:
-                for period, interval in (("1d", "1m"), ("5d", "5m"), ("1mo", "1h")):
-                    try:
-                        yf_intraday = ticker.history(period=period, interval=interval, prepost=True, auto_adjust=False)
-                        if yf_intraday is not None and not yf_intraday.empty:
-                            break
-                    except Exception:
-                        continue
-
-            yf_hist = pd.DataFrame()
-            if stooq_hist.empty:
-                try:
-                    yf_hist = ticker.history(period="1mo", interval="1d", auto_adjust=False)
-                except Exception:
-                    pass
-
-            # ── Resolve current price: Stooq first (live), then yfinance intraday, then fast_info, then daily.
-            current = None
-            if stooq_quote and stooq_quote.get("price") is not None:
-                current = float(stooq_quote["price"])
-            elif yf_intraday is not None and not yf_intraday.empty:
-                current = float(yf_intraday["Close"].dropna().iloc[-1])
-
-            prev = stooq_quote["prev_close"] if (stooq_quote and stooq_quote.get("prev_close")) else None
-            if current is None or prev is None:
-                try:
-                    fi = ticker.fast_info
-                    if current is None:
-                        current = _fast_info_get(fi, "last_price", "lastPrice", "regular_market_price", "regularMarketPrice")
-                    if prev is None:
-                        prev = _fast_info_get(fi, "previous_close", "previousClose", "regular_market_previous_close", "regularMarketPreviousClose")
-                except Exception:
-                    pass
-
-            if current is None and not yf_hist.empty:
-                current = float(yf_hist["Close"].dropna().iloc[-1])
-            if current is None:
-                raise ValueError("no price available")
-
-            if prev is None:
-                src = yf_hist if not yf_hist.empty else stooq_hist
-                if not src.empty:
-                    closes = src["Close"].dropna()
-                    if len(closes) >= 2:
-                        prev = float(closes.iloc[-2])
-                    elif len(closes) == 1:
-                        prev = float(closes.iloc[-1])
-            if prev is None:
-                prev = current
-
-            change = current - prev
-            pct = (change / prev * 100) if prev != 0 else 0.0
-
-            # ── Pick the best history dataframe for charts.
-            hist = stooq_hist if not stooq_hist.empty else yf_hist
-            if not hist.empty:
-                try:
-                    today = pd.Timestamp.utcnow()
-                    if hist.index.tz is not None:
-                        today = today.tz_convert(hist.index.tz)
+            ticker = yf.Ticker(symbol)
+            # Try fast_info first
+            try:
+                info = ticker.fast_info
+                current = info.get('lastPrice') or info.get('regularMarketPrice') or info.get('regularMarketPreviousClose')
+                if current is not None:
+                    current = float(current)
+                    hist = ticker.history(period="1mo", interval="1d")
+                    if len(hist) >= 2:
+                        prev = float(hist["Close"].iloc[-2])
                     else:
-                        today = today.tz_localize(None)
-                    if hist.index[-1].normalize() == today.normalize():
-                        hist.iloc[-1, hist.columns.get_loc("Close")] = current
-                except Exception:
-                    pass
+                        prev = current
+                    change = current - prev
+                    pct = (change / prev * 100) if prev != 0 else 0
+                    return _apply_live(symbol, {"price": round(current, 4), "change": float(change), "pct_change": round(pct, 2), "history": hist})
+            except:
+                pass
 
-            return {
-                "price": round(float(current), 4),
-                "change": float(change),
-                "pct_change": round(float(pct), 2),
-                "history": hist,
-            }
+            hist = ticker.history(period="1mo", interval="1d")
+            if len(hist) >= 2:
+                current = float(hist["Close"].iloc[-1])
+                prev = float(hist["Close"].iloc[-2])
+                change = current - prev
+                pct = (change / prev * 100) if prev != 0 else 0
+            elif not hist.empty:
+                current = float(hist["Close"].iloc[-1])
+                prev = current
+                change = 0
+                pct = 0
+            else:
+                return None
+
+            return _apply_live(symbol, {"price": round(current, 4), "change": float(change), "pct_change": round(pct, 2), "history": hist})
 
         except Exception:
             if attempt < 2:
-                time.sleep(0.6 * (attempt + 1))
+                time.sleep(0.8 * (attempt + 1))
                 continue
             return None
 
