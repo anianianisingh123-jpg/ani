@@ -1,9 +1,4 @@
-"""Thesis scoring engine.
-
-Pulls news for each position and asks Claude to score each thesis pillar
-1-10 against the most recent headlines. Returns structured JSON the UI
-can render.
-"""
+"""Thesis scoring engine — fetch news, ask Claude to score each pillar."""
 from __future__ import annotations
 
 import json
@@ -11,20 +6,35 @@ import os
 from datetime import datetime
 from typing import Optional
 
-from dotenv import load_dotenv
+import anthropic
+import streamlit as st
 
 from data_fetcher import news_search
 
-load_dotenv()
 
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+def get_secret(key):
+    try:
+        val = st.secrets.get(key)
+        if val:
+            return val
+    except Exception:
+        pass
+    return os.getenv(key)
+
+
+FRED_API_KEY = get_secret("FRED_API_KEY")
+NEWS_API_KEY = get_secret("NEWS_API_KEY")
+ANTHROPIC_API_KEY = get_secret("ANTHROPIC_API_KEY")
+
 MODEL = "claude-sonnet-4-20250514"
 
-try:
-    from anthropic import Anthropic
-    _CLIENT = Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
-except Exception:
-    _CLIENT = None
+
+def get_client():
+    return anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+
+def has_anthropic():
+    return bool(ANTHROPIC_API_KEY)
 
 
 POSITIONS = {
@@ -119,12 +129,8 @@ SYSTEM_PROMPT = (
 )
 
 
-def has_anthropic() -> bool:
-    return _CLIENT is not None
-
-
-def score_position(key: str) -> dict:
-    """Run the full pipeline for a position: news -> Claude -> structured result."""
+@st.cache_data(ttl=1800, show_spinner=False)
+def score_position(key):
     pos = POSITIONS[key]
     articles = news_search(pos["news_query"], page_size=10)
     result = {
@@ -140,20 +146,19 @@ def score_position(key: str) -> dict:
     if not articles:
         result["error"] = "No news articles available (NewsAPI key missing or empty result)."
         return result
-    if _CLIENT is None:
-        result["error"] = "Anthropic API key not configured."
-        return result
 
     user_prompt = _build_user_prompt(pos, articles)
     try:
-        msg = _CLIENT.messages.create(
+        client = get_client()
+        msg = client.messages.create(
             model=MODEL,
             max_tokens=1000,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],
         )
         text = "".join(
-            block.text for block in msg.content if getattr(block, "type", "") == "text"
+            block.text for block in msg.content
+            if getattr(block, "type", "") == "text"
         )
         result["scores"] = _parse_json(text)
     except Exception as exc:
@@ -161,7 +166,7 @@ def score_position(key: str) -> dict:
     return result
 
 
-def _build_user_prompt(pos: dict, articles: list[dict]) -> str:
+def _build_user_prompt(pos, articles):
     headlines = "\n".join(
         f"- [{a.get('publishedAt', '')[:10]}] {a['title']}"
         + (f" — {a['description']}" if a.get("description") else "")
@@ -177,8 +182,7 @@ def _build_user_prompt(pos: dict, articles: list[dict]) -> str:
     )
 
 
-def _parse_json(text: str) -> Optional[dict]:
-    """Extract the first JSON object from a text response."""
+def _parse_json(text):
     if not text:
         return None
     start = text.find("{")

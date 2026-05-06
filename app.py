@@ -5,6 +5,7 @@ Run with:
 """
 from __future__ import annotations
 
+import os
 from datetime import datetime
 
 import numpy as np
@@ -17,13 +18,28 @@ import data_fetcher as df_
 import thesis_engine as te
 
 
+def get_secret(key):
+    try:
+        val = st.secrets.get(key)
+        if val:
+            return val
+    except Exception:
+        pass
+    return os.getenv(key)
+
+
+FRED_API_KEY = get_secret("FRED_API_KEY")
+NEWS_API_KEY = get_secret("NEWS_API_KEY")
+ANTHROPIC_API_KEY = get_secret("ANTHROPIC_API_KEY")
+
+
 def _last(series: pd.Series, years: int) -> pd.Series:
-    """Slice a datetime-indexed series to the last N years."""
     if series.empty:
         return series
     idx = pd.to_datetime(series.index)
     cutoff = idx.max() - pd.DateOffset(years=years)
     return series[idx >= cutoff]
+
 
 st.set_page_config(
     page_title="Ani Terminal",
@@ -33,7 +49,7 @@ st.set_page_config(
 
 
 # ---------------------------------------------------------------------------
-# Small helpers
+# Helpers
 # ---------------------------------------------------------------------------
 def _fmt(value, suffix: str = "", decimals: int = 2) -> str:
     if value is None or (isinstance(value, float) and np.isnan(value)):
@@ -47,9 +63,8 @@ def _delta_str(value, suffix: str = "%") -> str | None:
     return f"{value:+.2f}{suffix}"
 
 
-def _metric_card(label: str, value, delta=None, value_suffix: str = "",
-                 delta_suffix: str = "%", help_text: str | None = None,
-                 delta_color: str = "normal", decimals: int = 2):
+def _metric_card(label, value, delta=None, value_suffix="", delta_suffix="%",
+                 help_text=None, delta_color="normal", decimals=2):
     st.metric(
         label=label,
         value=_fmt(value, value_suffix, decimals),
@@ -59,7 +74,7 @@ def _metric_card(label: str, value, delta=None, value_suffix: str = "",
     )
 
 
-def _now_str() -> str:
+def _now_str():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -78,7 +93,7 @@ def _api_status_warnings():
     if missing:
         st.warning(
             "Missing API keys: " + ", ".join(missing)
-            + ". Some sections will be empty until configured in `.env`."
+            + ". Some sections will be empty until configured."
         )
 
 
@@ -122,8 +137,8 @@ def render_overview():
     st.header("Overview — 30-Second Read")
 
     markets = {
-        "SPY": "S&P 500",
-        "QQQ": "Nasdaq",
+        "^GSPC": "S&P 500",
+        "^IXIC": "Nasdaq",
         "DX-Y.NYB": "DXY",
         "^VIX": "VIX",
     }
@@ -153,21 +168,19 @@ def render_overview():
 
     st.subheader("Rates")
     cols = st.columns(4)
-    y2, y2_prior = df_.fred_latest("DGS2")
-    y10, y10_prior = df_.fred_latest("DGS10")
-    y30, y30_prior = df_.fred_latest("DGS30")
+    # 2Y → ^IRX, 10Y → ^TNX, 30Y → ^TYX (yfinance returns scaled values; /100)
+    y2_raw, y2_pct = df_.get_price("^IRX")
+    y10_raw, y10_pct = df_.get_price("^TNX")
+    y30_raw, y30_pct = df_.get_price("^TYX")
+    y2 = (y2_raw / 100) if y2_raw is not None else None
+    y10 = (y10_raw / 100) if y10_raw is not None else None
+    y30 = (y30_raw / 100) if y30_raw is not None else None
     with cols[0]:
-        _metric_card("US 2Y Yield", y2,
-                     (y2 - y2_prior) if (y2 and y2_prior) else None,
-                     value_suffix="%", delta_suffix=" bps")
+        _metric_card("US 2Y Yield", y2, y2_pct, value_suffix="%")
     with cols[1]:
-        _metric_card("US 10Y Yield", y10,
-                     (y10 - y10_prior) if (y10 and y10_prior) else None,
-                     value_suffix="%", delta_suffix=" bps")
+        _metric_card("US 10Y Yield", y10, y10_pct, value_suffix="%")
     with cols[2]:
-        _metric_card("US 30Y Yield", y30,
-                     (y30 - y30_prior) if (y30 and y30_prior) else None,
-                     value_suffix="%", delta_suffix=" bps")
+        _metric_card("US 30Y Yield", y30, y30_pct, value_suffix="%")
     with cols[3]:
         spread = (y10 - y2) * 100 if (y10 is not None and y2 is not None) else None
         spread_color = "inverse" if (spread is not None and spread < 0) else "normal"
@@ -199,11 +212,11 @@ def render_overview():
          "GLD": "GLD (Gold)", "TLT": "TLT (20Y Treasuries)"},
         period="1y",
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key="overview_normalized_1y")
     _last_updated()
 
 
-def _normalized_performance_chart(tickers: dict[str, str], period: str = "1y"):
+def _normalized_performance_chart(tickers, period="1y"):
     fig = go.Figure()
     for ticker, label in tickers.items():
         hist = df_.yf_history(ticker, period=period)
@@ -233,8 +246,10 @@ def render_debt_cycle():
 
     debt_to_gdp_series = df_.fred_series("GFDEGDQ188S")
     debt_to_gdp = float(debt_to_gdp_series.iloc[-1]) if not debt_to_gdp_series.empty else None
-    y2, _ = df_.fred_latest("DGS2")
-    y10, _ = df_.fred_latest("DGS10")
+    y2_raw, _ = df_.get_price("^IRX")
+    y10_raw, _ = df_.get_price("^TNX")
+    y2 = (y2_raw / 100) if y2_raw is not None else None
+    y10 = (y10_raw / 100) if y10_raw is not None else None
     inverted = (y2 is not None and y10 is not None and y2 > y10)
 
     if debt_to_gdp is not None and debt_to_gdp > 120 and inverted:
@@ -256,7 +271,7 @@ def render_debt_cycle():
         f"2y/10y: {'Inverted' if inverted else 'Positive'}"
     )
 
-    # ---- Short-term cycle ----
+    # ---- Short-term ----
     st.subheader("Short-Term Cycle Indicators")
 
     fed_funds, fed_funds_prior = df_.fred_latest("FEDFUNDS")
@@ -290,11 +305,10 @@ def render_debt_cycle():
     cols = st.columns(3)
     for i, (label, key, value, delta, vsuffix, dsuffix) in enumerate(short_term):
         with cols[i % 3]:
-            _metric_card(label, value, delta,
-                         value_suffix=vsuffix, delta_suffix=dsuffix)
-            _sparkline(key, label)
+            _metric_card(label, value, delta, value_suffix=vsuffix, delta_suffix=dsuffix)
+            _sparkline(key, label, chart_key=f"spark_st_{key}_{i}")
 
-    # ---- Long-term cycle ----
+    # ---- Long-term ----
     st.subheader("Long-Term Cycle Indicators")
 
     debt_to_gdp_now, debt_to_gdp_prior = df_.fred_latest("GFDEGDQ188S")
@@ -337,38 +351,25 @@ def render_debt_cycle():
     cols = st.columns(3)
     for i, (label, key, value, delta, vsuffix, dsuffix) in enumerate(long_term):
         with cols[i % 3]:
-            _metric_card(label, value, delta,
-                         value_suffix=vsuffix, delta_suffix=dsuffix)
-            _sparkline_10y(key, label)
+            _metric_card(label, value, delta, value_suffix=vsuffix, delta_suffix=dsuffix)
+            _sparkline_10y(key, label, chart_key=f"spark_lt_{key}_{i}")
 
-    # ---- Big charts ----
     st.subheader("US Federal Debt to GDP (1970–present)")
-    st.plotly_chart(_debt_to_gdp_chart(), use_container_width=True)
+    st.plotly_chart(_debt_to_gdp_chart(), use_container_width=True, key="debt_gdp_chart")
 
     st.subheader("M2 Money Supply vs CPI (last 20 years)")
-    st.plotly_chart(_m2_vs_cpi_chart(), use_container_width=True)
+    st.plotly_chart(_m2_vs_cpi_chart(), use_container_width=True, key="debt_m2_cpi")
     _last_updated()
 
 
-_SPARK_SERIES = {
-    "FEDFUNDS": "FEDFUNDS",
-    "GFDEGDQ188S": "GFDEGDQ188S",
-    "GFDEBTN": "GFDEBTN",
-    "TDSP": "TDSP",
-    "BAMLH0A0HYM2": "BAMLH0A0HYM2",
-    "DRCCLACBS": "DRCCLACBS",
-}
-
-
-def _sparkline(key: str, label: str):
-    """Small last-2-year sparkline for short-term cycle metrics."""
+def _sparkline(key, label, chart_key):
     series_id = key.replace("_yoy", "")
     s = df_.fred_series(series_id)
     if s.empty:
         return
     if key.endswith("_yoy"):
         s = (s.pct_change(periods=12) * 100).dropna()
-    s = s.pipe(_last, 2) if not s.empty else s
+    s = _last(s, 2) if not s.empty else s
     if s.empty:
         return
     fig = go.Figure(go.Scatter(x=s.index, y=s.values, mode="lines",
@@ -376,21 +377,21 @@ def _sparkline(key: str, label: str):
     fig.update_layout(height=80, margin=dict(l=0, r=0, t=0, b=0),
                       xaxis=dict(visible=False), yaxis=dict(visible=False),
                       template="plotly_dark", showlegend=False)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key=chart_key)
 
 
-def _sparkline_10y(key: str, label: str):
+def _sparkline_10y(key, label, chart_key):
     if key == "INTEREST_RATIO":
         ip = df_.fred_series("A091RC1Q027SBEA")
         rv = df_.fred_series("W006RC1Q027SBEA")
         if ip.empty or rv.empty:
             return
-        s = (ip / rv * 100).dropna().pipe(_last, 10)
+        s = _last((ip / rv * 100).dropna(), 10)
     else:
         s = df_.fred_series(key)
         if s.empty:
             return
-        s = s.pipe(_last, 10)
+        s = _last(s, 10)
     if s.empty:
         return
     fig = go.Figure(go.Scatter(x=s.index, y=s.values, mode="lines",
@@ -398,7 +399,7 @@ def _sparkline_10y(key: str, label: str):
     fig.update_layout(height=100, margin=dict(l=0, r=0, t=0, b=0),
                       xaxis=dict(visible=False), yaxis=dict(visible=True),
                       template="plotly_dark", showlegend=False)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key=chart_key)
 
 
 def _debt_to_gdp_chart():
@@ -476,9 +477,8 @@ def render_bonds():
                           margin=dict(l=20, r=20, t=20, b=20),
                           xaxis_title="Tenor", yaxis_title="Yield (%)",
                           legend=dict(orientation="h", y=1.05))
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key="yield_curve_chart")
 
-    # Spreads
     st.subheader("Key Spreads")
     y3m, _ = df_.fred_latest("DGS3MO")
     y2, _ = df_.fred_latest("DGS2")
@@ -512,7 +512,6 @@ def render_bonds():
     if s_2_10 is not None and s_2_10 < 0:
         st.error("Yield curve inverted (2Y > 10Y). Historical recession signal.")
 
-    # Inflation expectations
     st.subheader("Inflation Expectations")
     be5, _ = df_.fred_latest("T5YIE")
     be10, _ = df_.fred_latest("T10YIE")
@@ -532,16 +531,15 @@ def render_bonds():
         s = df_.fred_series(series_id)
         if s.empty:
             continue
-        s = s.pipe(_last, 2)
+        s = _last(s, 2)
         fig.add_trace(go.Scatter(x=s.index, y=s.values, mode="lines",
                                  name=label, line=dict(color=color)))
     fig.update_layout(height=320, template="plotly_dark",
                       margin=dict(l=20, r=20, t=20, b=20),
                       legend=dict(orientation="h", y=1.05),
                       yaxis_title="%")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key="bonds_inflation_exp")
 
-    # Bond ETFs
     st.subheader("Bond ETFs")
     bond_etfs = {"TLT": "TLT (20Y+ Treasury)", "IEF": "IEF (7-10Y)",
                  "HYG": "HYG (High Yield)", "LQD": "LQD (Inv Grade)",
@@ -554,7 +552,7 @@ def render_bonds():
             _metric_card(label, q["price"], q["change_pct"])
 
     fig = _normalized_performance_chart(bond_etfs, period="1y")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key="bonds_etfs_norm")
     _last_updated()
 
 
@@ -619,7 +617,6 @@ def render_macro():
         })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-    # 2x2 chart grid
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("**CPI vs Core PCE YoY (5y)**")
@@ -629,47 +626,47 @@ def render_macro():
             s = df_.fred_series(sid)
             if s.empty:
                 continue
-            yoy = (s.pct_change(periods=12) * 100).dropna().pipe(_last, 5)
+            yoy = _last((s.pct_change(periods=12) * 100).dropna(), 5)
             fig.add_trace(go.Scatter(x=yoy.index, y=yoy.values, mode="lines",
                                      name=label, line=dict(color=color)))
         fig.update_layout(height=300, template="plotly_dark",
                           margin=dict(l=20, r=20, t=20, b=20),
                           legend=dict(orientation="h", y=1.05))
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key="macro_cpi_pce")
 
         st.markdown("**GDP Growth Rate (10y)**")
         s = df_.fred_series("A191RL1Q225SBEA")
         fig = go.Figure()
         if not s.empty:
-            s = s.pipe(_last, 10)
+            s = _last(s, 10)
             fig.add_trace(go.Bar(x=s.index, y=s.values, name="GDP",
                                  marker_color="#00FF94"))
         fig.update_layout(height=300, template="plotly_dark",
                           margin=dict(l=20, r=20, t=20, b=20))
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key="macro_gdp")
 
     with c2:
         st.markdown("**Unemployment Rate (10y)**")
         s = df_.fred_series("UNRATE")
         fig = go.Figure()
         if not s.empty:
-            s = s.pipe(_last, 10)
+            s = _last(s, 10)
             fig.add_trace(go.Scatter(x=s.index, y=s.values, mode="lines",
                                      line=dict(color="#FF6B9D", width=2)))
         fig.update_layout(height=300, template="plotly_dark",
                           margin=dict(l=20, r=20, t=20, b=20))
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key="macro_unemployment")
 
         st.markdown("**Retail Sales (5y)**")
         s = df_.fred_series("RSAFS")
         fig = go.Figure()
         if not s.empty:
-            s = s.pipe(_last, 5)
+            s = _last(s, 5)
             fig.add_trace(go.Scatter(x=s.index, y=s.values, mode="lines",
                                      line=dict(color="#FFC107", width=2)))
         fig.update_layout(height=300, template="plotly_dark",
                           margin=dict(l=20, r=20, t=20, b=20))
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key="macro_retail")
 
     st.divider()
     st.subheader("Global Indicators")
@@ -718,14 +715,17 @@ def render_commodities():
     cu_au = (copper_q["price"] / gold_q["price"]) if (copper_q["price"] and gold_q["price"]) else None
     au_oil = (gold_q["price"] / wti_q["price"]) if (gold_q["price"] and wti_q["price"]) else None
 
-    # Direction of copper/gold ratio over the past 30 days
     risk_signal = None
-    cu = df_.yf_history("HG=F", period="3mo")["Close"] if not df_.yf_history("HG=F", period="3mo").empty else None
-    au = df_.yf_history("GC=F", period="3mo")["Close"] if not df_.yf_history("GC=F", period="3mo").empty else None
-    if cu is not None and au is not None and not cu.empty and not au.empty:
-        ratio = (cu / au).dropna()
-        if len(ratio) > 22:
-            risk_signal = "Risk-On" if ratio.iloc[-1] > ratio.iloc[-22] else "Risk-Off"
+    cu_hist = df_.yf_history("HG=F", period="1y")
+    au_hist = df_.yf_history("GC=F", period="1y")
+    if not cu_hist.empty and not au_hist.empty:
+        cu = cu_hist["Close"].dropna()
+        au = au_hist["Close"].dropna()
+        common = cu.index.intersection(au.index)
+        if len(common) > 22:
+            ratio = (cu.loc[common] / au.loc[common]).dropna()
+            if len(ratio) > 22:
+                risk_signal = "Risk-On" if ratio.iloc[-1] > ratio.iloc[-22] else "Risk-Off"
 
     cols = st.columns(3)
     with cols[0]:
@@ -738,22 +738,23 @@ def render_commodities():
     with cols[1]:
         _metric_card("Gold/Oil Ratio", au_oil)
 
-    # MA charts
     st.subheader("WTI — 50/200 day MA")
-    st.plotly_chart(_price_with_mas("CL=F", "WTI Crude"), use_container_width=True)
+    st.plotly_chart(_price_with_mas("CL=F", "WTI Crude"),
+                    use_container_width=True, key="commodities_wti_ma")
     st.subheader("Gold — 50/200 day MA")
-    st.plotly_chart(_price_with_mas("GC=F", "Gold"), use_container_width=True)
+    st.plotly_chart(_price_with_mas("GC=F", "Gold"),
+                    use_container_width=True, key="commodities_gold_ma")
 
     st.subheader("1-Year Normalized Performance")
     fig = _normalized_performance_chart(
         {"CL=F": "WTI", "GC=F": "Gold", "HG=F": "Copper", "NG=F": "Nat Gas"},
         period="1y",
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key="commodities_norm")
     _last_updated()
 
 
-def _price_with_mas(ticker: str, label: str):
+def _price_with_mas(ticker, label):
     hist = df_.yf_history(ticker, period="1y")
     fig = go.Figure()
     if hist.empty:
@@ -791,7 +792,7 @@ def render_fx():
         fig.update_layout(height=300, template="plotly_dark",
                           margin=dict(l=20, r=20, t=20, b=20),
                           yaxis_title="DXY")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key="fx_dxy_1y")
 
     st.subheader("Major Pairs")
     majors = {"EURUSD=X": "EUR/USD", "GBPUSD=X": "GBP/USD",
@@ -829,7 +830,7 @@ def render_fx():
         {"DX-Y.NYB": "DXY", "EURUSD=X": "EUR/USD", "CNY=X": "USD/CNY"},
         period="1y",
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key="fx_3way_norm")
     st.caption(
         "DXY strength = dollar hegemony signal. CNY weakness = capital flight / "
         "trade war pressure."
@@ -844,8 +845,8 @@ def render_equities():
     st.header("Equities")
 
     st.subheader("Market Breadth")
-    breadth = {"SPY": "S&P 500", "QQQ": "Nasdaq",
-               "IWM": "Russell 2000", "DIA": "Dow"}
+    breadth = {"SPY": "S&P 500 (SPY)", "QQQ": "Nasdaq (QQQ)",
+               "IWM": "Russell 2000 (IWM)", "DIA": "Dow (DIA)"}
     quotes = df_.yf_quotes(list(breadth.keys()))
     cols = st.columns(4)
     for col, (ticker, label) in zip(cols, breadth.items()):
@@ -854,7 +855,8 @@ def render_equities():
             _metric_card(label, q["price"], q["change_pct"])
 
     st.subheader("SPY — 50/200 day MA")
-    st.plotly_chart(_price_with_mas("SPY", "SPY"), use_container_width=True)
+    st.plotly_chart(_price_with_mas("SPY", "SPY"),
+                    use_container_width=True, key="equities_spy_ma")
 
     st.subheader("Sector Performance YTD")
     sector_data = []
@@ -870,7 +872,7 @@ def render_equities():
         fig.update_layout(height=420, template="plotly_dark",
                           margin=dict(l=20, r=20, t=20, b=20),
                           xaxis_title="YTD %")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key="equities_sectors")
 
     st.subheader("Major Stock Performance")
     quotes = df_.yf_quotes(df_.MAJOR_STOCKS)
@@ -889,10 +891,10 @@ def render_equities():
         e = df_.latest_earnings(ticker)
         earnings_rows.append({
             "Ticker": ticker,
+            "Quarter": e.get("quarter") or "—",
             "Revenue": f"${e['revenue']/1e9:,.2f}B" if e["revenue"] else "—",
             "Rev YoY": f"{e['revenue_yoy']:+.2f}%" if e["revenue_yoy"] else "—",
-            "EPS": f"{e['eps']:.2f}" if e["eps"] is not None else "—",
-            "EPS YoY": f"{e['eps_yoy']:+.2f}%" if e["eps_yoy"] else "—",
+            "EPS (TTM)": f"{e['eps']:.2f}" if e["eps"] is not None else "—",
             "Net Income": f"${e['net_income']/1e9:,.2f}B" if e["net_income"] else "—",
             "Gross Margin": f"{e['gross_margin']:.1f}%" if e["gross_margin"] else "—",
         })
@@ -900,25 +902,19 @@ def render_equities():
 
     st.subheader("Analyst Headlines")
     if not df_.has_news():
-        st.info("Set NEWS_API_KEY in .env to populate this section.")
+        st.info("Set NEWS_API_KEY to populate this section.")
     else:
         for ticker in df_.EARNINGS_STOCKS:
-            with st.expander(f"{ticker} — recent analyst coverage"):
-                articles = df_.news_search(
-                    f'"{ticker}" upgrade downgrade price target analyst',
-                    page_size=3,
-                )
+            with st.expander(f"{ticker} — recent coverage"):
+                articles = df_.get_stock_news(ticker)
                 if not articles:
                     st.caption("No recent headlines.")
                     continue
                 for a in articles:
-                    date = a.get("publishedAt", "")[:10]
                     st.markdown(
                         f"**[{a['title']}]({a['url']})** — "
-                        f"_{a.get('source', '')} · {date}_"
+                        f"_{a.get('source', '')} · {a.get('date', '')}_"
                     )
-                    if a.get("description"):
-                        st.caption(a["description"])
     _last_updated()
 
 
@@ -931,19 +927,18 @@ def render_thesis():
 
     if not te.has_anthropic() or not df_.has_news():
         st.warning(
-            "Thesis scoring requires both ANTHROPIC_API_KEY and NEWS_API_KEY. "
-            "Configure them in `.env` to enable the AI scorer."
+            "Thesis scoring requires both ANTHROPIC_API_KEY and NEWS_API_KEY."
         )
 
     if "thesis_results" not in st.session_state:
         st.session_state["thesis_results"] = {}
 
     if st.button("Re-Score All Theses", type="primary"):
+        te.score_position.clear()
         with st.spinner("Pulling news and running Claude scoring..."):
             for key in te.POSITIONS:
                 st.session_state["thesis_results"][key] = te.score_position(key)
 
-    # Run on first load
     if not st.session_state["thesis_results"]:
         with st.spinner("Initial thesis scoring..."):
             for key in te.POSITIONS:
@@ -951,7 +946,6 @@ def render_thesis():
 
     results = st.session_state["thesis_results"]
 
-    # Summary row
     st.subheader("Summary")
     summary_rows = []
     for key, res in results.items():
@@ -969,12 +963,12 @@ def render_thesis():
     st.divider()
 
     for key, res in results.items():
-        _render_position(res)
+        _render_position(key, res)
         st.divider()
     _last_updated()
 
 
-def _render_position(res: dict):
+def _render_position(key, res):
     st.subheader(f"{res['name']} ({res['ticker']})")
     with st.expander("Thesis"):
         st.write(res["thesis"])
@@ -987,9 +981,12 @@ def _render_position(res: dict):
     overall = scores.get("overall_score")
     pillar_scores = scores.get("pillar_scores") or []
 
+    slug = key.lower()
     c1, c2 = st.columns([1, 2])
     with c1:
-        st.plotly_chart(_score_gauge(overall), use_container_width=True)
+        st.plotly_chart(_score_gauge(overall),
+                        use_container_width=True,
+                        key=f"thesis_{slug}_gauge")
         verdict = scores.get("overall_verdict")
         if verdict:
             st.markdown(f"**Verdict:** {verdict}")
@@ -1008,7 +1005,8 @@ def _render_position(res: dict):
             fig.update_layout(height=320, template="plotly_dark",
                               margin=dict(l=20, r=20, t=20, b=20),
                               xaxis=dict(range=[0, 10], title="Score"))
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True,
+                            key=f"thesis_{slug}_pillars")
             with st.expander("Pillar reasoning"):
                 for p in pillar_scores:
                     st.markdown(

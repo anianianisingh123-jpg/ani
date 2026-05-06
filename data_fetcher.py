@@ -1,13 +1,8 @@
-"""Data fetching layer for Ani Terminal.
-
-All external API calls live here. Functions are cached via Streamlit so the
-UI does not refetch on every interaction. Errors are returned as None or
-empty structures so the UI can render a graceful warning instead of crashing.
-"""
+"""Data fetching layer for Ani Terminal."""
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional
 
 import numpy as np
@@ -16,123 +11,227 @@ import requests
 import streamlit as st
 import yfinance as yf
 from dotenv import load_dotenv
+from fredapi import Fred
 
 load_dotenv()
 
-FRED_API_KEY = os.getenv("FRED_API_KEY", "")
-NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
 
-try:
-    from fredapi import Fred
-    _FRED = Fred(api_key=FRED_API_KEY) if FRED_API_KEY else None
-except Exception:
-    _FRED = None
-
-
-# ---------------------------------------------------------------------------
-# yfinance helpers
-# ---------------------------------------------------------------------------
-@st.cache_data(ttl=3600, show_spinner=False)
-def yf_history(ticker: str, period: str = "1y") -> pd.DataFrame:
-    """Return price history for a ticker. Empty DataFrame on failure."""
+def get_secret(key):
     try:
-        df = yf.Ticker(ticker).history(period=period, auto_adjust=False)
-        if df is None or df.empty:
-            return pd.DataFrame()
-        return df
+        val = st.secrets.get(key)
+        if val:
+            return val
+    except Exception:
+        pass
+    return os.getenv(key)
+
+
+FRED_API_KEY = get_secret("FRED_API_KEY")
+NEWS_API_KEY = get_secret("NEWS_API_KEY")
+ANTHROPIC_API_KEY = get_secret("ANTHROPIC_API_KEY")
+
+
+# ---------------------------------------------------------------------------
+# yfinance — price / history
+# ---------------------------------------------------------------------------
+@st.cache_data(ttl=300, show_spinner=False)
+def get_price(symbol):
+    try:
+        ticker = yf.Ticker(symbol)
+        data = ticker.history(period="5d", interval="1d")
+        data = data.dropna()
+        if len(data) < 2:
+            return None, None
+        price = float(data["Close"].iloc[-1])
+        prev = float(data["Close"].iloc[-2])
+        pct = ((price - prev) / prev) * 100
+        return price, pct
+    except Exception:
+        return None, None
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_history_1y(symbol):
+    try:
+        df = yf.Ticker(symbol).history(period="1y", interval="1d")
+        return df if df is not None else pd.DataFrame()
     except Exception:
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def yf_quote(ticker: str) -> dict:
-    """Latest price + daily change + 1-month change for a ticker."""
-    df = yf_history(ticker, period="3mo")
-    if df.empty or "Close" not in df.columns:
-        return {"ticker": ticker, "price": None, "change_pct": None, "month_change_pct": None}
-    closes = df["Close"].dropna()
-    if len(closes) < 2:
-        return {"ticker": ticker, "price": float(closes.iloc[-1]) if len(closes) else None,
-                "change_pct": None, "month_change_pct": None}
-    price = float(closes.iloc[-1])
-    prev = float(closes.iloc[-2])
-    change_pct = (price / prev - 1) * 100 if prev else None
-    month_idx = max(0, len(closes) - 22)
-    month_prev = float(closes.iloc[month_idx])
-    month_change_pct = (price / month_prev - 1) * 100 if month_prev else None
-    return {"ticker": ticker, "price": price, "change_pct": change_pct,
-            "month_change_pct": month_change_pct}
+@st.cache_data(ttl=300, show_spinner=False)
+def get_history_5y(symbol):
+    try:
+        df = yf.Ticker(symbol).history(period="5y", interval="1wk")
+        return df if df is not None else pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def yf_quotes(tickers: list[str]) -> dict[str, dict]:
+@st.cache_data(ttl=300, show_spinner=False)
+def get_month_change(symbol):
+    try:
+        df = yf.Ticker(symbol).history(period="3mo", interval="1d").dropna()
+        if len(df) < 22:
+            return None
+        return float((df["Close"].iloc[-1] / df["Close"].iloc[-22] - 1) * 100)
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_ytd_change(symbol):
+    try:
+        df = yf.Ticker(symbol).history(period="1y", interval="1d").dropna()
+        if df.empty:
+            return None
+        year = datetime.now().year
+        ytd = df[df.index.year == year]["Close"]
+        if len(ytd) < 2:
+            return None
+        return float((ytd.iloc[-1] / ytd.iloc[0] - 1) * 100)
+    except Exception:
+        return None
+
+
+# Backward-compatible helpers used across app.py
+def yf_quote(ticker):
+    price, pct = get_price(ticker)
+    return {
+        "ticker": ticker,
+        "price": price,
+        "change_pct": pct,
+        "month_change_pct": get_month_change(ticker),
+    }
+
+
+def yf_quotes(tickers):
     return {t: yf_quote(t) for t in tickers}
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def yf_ytd_change(ticker: str) -> Optional[float]:
-    """Year-to-date percent change for a ticker."""
-    df = yf_history(ticker, period="1y")
-    if df.empty or "Close" not in df.columns:
-        return None
-    year = datetime.now().year
-    ytd = df[df.index.year == year]["Close"].dropna()
-    if len(ytd) < 2:
-        return None
-    return float((ytd.iloc[-1] / ytd.iloc[0] - 1) * 100)
+def yf_history(ticker, period="1y"):
+    if str(period).startswith("5y"):
+        return get_history_5y(ticker)
+    return get_history_1y(ticker)
+
+
+def yf_ytd_change(ticker):
+    return get_ytd_change(ticker)
 
 
 # ---------------------------------------------------------------------------
-# FRED helpers
+# FRED
 # ---------------------------------------------------------------------------
+def get_fred_client():
+    return Fred(api_key=FRED_API_KEY) if FRED_API_KEY else None
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
-def fred_series(series_id: str, observation_start: Optional[str] = None) -> pd.Series:
-    """Fetch a FRED series. Empty Series on failure."""
-    if _FRED is None:
-        return pd.Series(dtype=float)
+def get_fred(series_id):
     try:
-        kwargs = {}
-        if observation_start:
-            kwargs["observation_start"] = observation_start
-        s = _FRED.get_series(series_id, **kwargs)
-        return s.dropna() if s is not None else pd.Series(dtype=float)
+        fred = get_fred_client()
+        if fred is None:
+            return None, None, None
+        data = fred.get_series(series_id).dropna()
+        if data.empty:
+            return None, None, None
+        if len(data) < 2:
+            return float(data.iloc[-1]), None, data
+        return float(data.iloc[-1]), float(data.iloc[-2]), data
     except Exception:
+        return None, None, None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_fred_yoy(series_id):
+    try:
+        fred = get_fred_client()
+        if fred is None:
+            return None, None, None
+        data = fred.get_series(series_id).dropna()
+        yoy = (data.pct_change(periods=12) * 100).dropna()
+        if yoy.empty:
+            return None, None, None
+        if len(yoy) < 2:
+            return float(yoy.iloc[-1]), None, yoy
+        return float(yoy.iloc[-1]), float(yoy.iloc[-2]), yoy
+    except Exception:
+        return None, None, None
+
+
+# Backward-compat shims
+def fred_series(series_id, observation_start=None):
+    _, _, s = get_fred(series_id)
+    if s is None:
         return pd.Series(dtype=float)
+    if observation_start:
+        return s[s.index >= pd.Timestamp(observation_start)]
+    return s
 
 
-def fred_latest(series_id: str) -> tuple[Optional[float], Optional[float]]:
-    """Return (current, prior) values for a FRED series."""
-    s = fred_series(series_id)
-    if s.empty:
-        return None, None
-    if len(s) < 2:
-        return float(s.iloc[-1]), None
-    return float(s.iloc[-1]), float(s.iloc[-2])
+def fred_latest(series_id):
+    cur, prior, _ = get_fred(series_id)
+    return cur, prior
 
 
-def fred_yoy(series_id: str) -> tuple[Optional[float], Optional[float]]:
-    """Year-over-year percent change for a monthly FRED series.
-
-    Returns (latest_yoy, prior_yoy) so the UI can show direction.
-    """
-    s = fred_series(series_id)
-    if s.empty or len(s) < 13:
-        return None, None
-    yoy = s.pct_change(periods=12) * 100
-    yoy = yoy.dropna()
-    if yoy.empty:
-        return None, None
-    if len(yoy) < 2:
-        return float(yoy.iloc[-1]), None
-    return float(yoy.iloc[-1]), float(yoy.iloc[-2])
+def fred_yoy(series_id):
+    cur, prior, _ = get_fred_yoy(series_id)
+    return cur, prior
 
 
 # ---------------------------------------------------------------------------
-# NewsAPI
+# News
 # ---------------------------------------------------------------------------
+COMPANY_NAMES = {
+    "AAPL": "Apple",
+    "MSFT": "Microsoft",
+    "NVDA": "Nvidia",
+    "GOOGL": "Google",
+    "AMZN": "Amazon",
+    "META": "Meta",
+    "TSLA": "Tesla",
+    "QCOM": "Qualcomm",
+    "CRM": "Salesforce",
+    "BABA": "Alibaba",
+    "TSM": "TSMC",
+    "ASML": "ASML",
+    "XIACY": "Xiaomi",
+}
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
-def news_search(query: str, page_size: int = 10) -> list[dict]:
-    """Search NewsAPI. Returns list of {title, description, url, publishedAt, source}."""
+def get_stock_news(ticker, company_name=None):
+    if company_name is None:
+        company_name = COMPANY_NAMES.get(ticker, ticker)
+    try:
+        url = "https://newsapi.org/v2/everything"
+        params = {
+            "q": company_name,
+            "sortBy": "publishedAt",
+            "pageSize": 5,
+            "language": "en",
+            "apiKey": NEWS_API_KEY,
+        }
+        r = requests.get(url, params=params, timeout=10)
+        data = r.json()
+        if data.get("status") == "ok":
+            return [
+                {
+                    "title": a["title"],
+                    "url": a["url"],
+                    "source": a["source"]["name"],
+                    "date": a["publishedAt"][:10],
+                }
+                for a in data.get("articles", [])
+                if a.get("title") and "[Removed]" not in a["title"]
+            ]
+        return []
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def news_search(query, page_size=10):
     if not NEWS_API_KEY:
         return []
     try:
@@ -159,14 +258,87 @@ def news_search(query: str, page_size: int = 10) -> list[dict]:
                 "source": (a.get("source") or {}).get("name", ""),
             }
             for a in articles
-            if a.get("title")
+            if a.get("title") and "[Removed]" not in a.get("title", "")
         ]
     except Exception:
         return []
 
 
 # ---------------------------------------------------------------------------
-# Convenience: the yield curve as one structure
+# Earnings
+# ---------------------------------------------------------------------------
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_earnings_data(ticker):
+    try:
+        t = yf.Ticker(ticker)
+        qf = t.quarterly_financials
+        if qf is None or qf.empty:
+            return None
+        latest = qf.columns[0]
+        year_ago = qf.columns[4] if len(qf.columns) > 4 else None
+
+        revenue, rev_yoy, net_income, gross_margin = None, None, None, None
+
+        for key in ["Total Revenue", "Revenue"]:
+            if key in qf.index:
+                revenue = float(qf.loc[key, latest])
+                if year_ago is not None:
+                    prior = float(qf.loc[key, year_ago])
+                    if prior:
+                        rev_yoy = ((revenue - prior) / abs(prior)) * 100
+                break
+
+        for key in ["Net Income", "Net Income Common Stockholders"]:
+            if key in qf.index:
+                net_income = float(qf.loc[key, latest])
+                break
+
+        for key in ["Gross Profit"]:
+            if key in qf.index and revenue:
+                gross_margin = (float(qf.loc[key, latest]) / revenue) * 100
+                break
+
+        eps = None
+        try:
+            eps = t.info.get("trailingEps", None)
+        except Exception:
+            eps = None
+
+        return {
+            "revenue": revenue,
+            "rev_yoy": rev_yoy,
+            "net_income": net_income,
+            "gross_margin": gross_margin,
+            "eps": eps,
+            "quarter": str(latest)[:10],
+        }
+    except Exception:
+        return None
+
+
+def latest_earnings(ticker):
+    """Backward-compat shim returning the dict shape used by app.py."""
+    e = get_earnings_data(ticker)
+    if e is None:
+        return {
+            "ticker": ticker, "revenue": None, "revenue_yoy": None,
+            "eps": None, "eps_yoy": None, "net_income": None,
+            "gross_margin": None, "quarter": None,
+        }
+    return {
+        "ticker": ticker,
+        "revenue": e["revenue"],
+        "revenue_yoy": e["rev_yoy"],
+        "eps": e["eps"],
+        "eps_yoy": None,
+        "net_income": e["net_income"],
+        "gross_margin": e["gross_margin"],
+        "quarter": e["quarter"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Yield curve snapshot (FRED)
 # ---------------------------------------------------------------------------
 YIELD_CURVE_SERIES = [
     ("1M", "DGS1MO"),
@@ -184,8 +356,7 @@ YIELD_CURVE_SERIES = [
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def yield_curve_snapshot() -> pd.DataFrame:
-    """Return DataFrame with columns: tenor, current, year_ago, two_years_ago."""
+def yield_curve_snapshot():
     rows = []
     today = pd.Timestamp(datetime.now().date())
     one_year_ago = today - pd.Timedelta(days=365)
@@ -197,16 +368,16 @@ def yield_curve_snapshot() -> pd.DataFrame:
                          "two_years_ago": None})
             continue
         s.index = pd.to_datetime(s.index)
-        current = float(s.iloc[-1])
-        year_ago = _value_near(s, one_year_ago)
-        two_years = _value_near(s, two_years_ago)
-        rows.append({"tenor": tenor, "current": current, "year_ago": year_ago,
-                     "two_years_ago": two_years})
+        rows.append({
+            "tenor": tenor,
+            "current": float(s.iloc[-1]),
+            "year_ago": _value_near(s, one_year_ago),
+            "two_years_ago": _value_near(s, two_years_ago),
+        })
     return pd.DataFrame(rows)
 
 
-def _value_near(series: pd.Series, target: pd.Timestamp) -> Optional[float]:
-    """Return the series value at-or-before target date."""
+def _value_near(series, target):
     if series.empty:
         return None
     sub = series[series.index <= target]
@@ -216,86 +387,8 @@ def _value_near(series: pd.Series, target: pd.Timestamp) -> Optional[float]:
 
 
 # ---------------------------------------------------------------------------
-# Earnings via yfinance
+# Constants
 # ---------------------------------------------------------------------------
-@st.cache_data(ttl=3600, show_spinner=False)
-def latest_earnings(ticker: str) -> dict:
-    """Pull most recent quarterly fundamentals via yfinance.
-
-    Returns dict with revenue, revenue_yoy, eps, eps_yoy, net_income, gross_margin.
-    Any field may be None when yfinance does not surface it.
-    """
-    out = {
-        "ticker": ticker,
-        "revenue": None,
-        "revenue_yoy": None,
-        "eps": None,
-        "eps_yoy": None,
-        "net_income": None,
-        "gross_margin": None,
-    }
-    try:
-        t = yf.Ticker(ticker)
-        qf = None
-        try:
-            qf = t.quarterly_financials
-        except Exception:
-            qf = None
-        if qf is not None and not qf.empty:
-            cols = list(qf.columns)
-            if cols:
-                latest = cols[0]
-                rev = _safe_lookup(qf, "Total Revenue", latest)
-                ni = _safe_lookup(qf, "Net Income", latest)
-                gp = _safe_lookup(qf, "Gross Profit", latest)
-                out["revenue"] = rev
-                out["net_income"] = ni
-                if rev and gp:
-                    out["gross_margin"] = (gp / rev) * 100
-                if len(cols) >= 5:
-                    yoy_col = cols[4]
-                    rev_yoy = _safe_lookup(qf, "Total Revenue", yoy_col)
-                    if rev and rev_yoy:
-                        out["revenue_yoy"] = (rev / rev_yoy - 1) * 100
-        # EPS via earnings_history
-        try:
-            hist = t.earnings_history
-            if hist is not None and not hist.empty:
-                eps_col = "epsActual" if "epsActual" in hist.columns else (
-                    "EPS Actual" if "EPS Actual" in hist.columns else None)
-                if eps_col:
-                    eps_series = hist[eps_col].dropna()
-                    if len(eps_series) >= 1:
-                        out["eps"] = float(eps_series.iloc[-1])
-                    if len(eps_series) >= 5:
-                        prior = float(eps_series.iloc[-5])
-                        if prior:
-                            out["eps_yoy"] = (out["eps"] / prior - 1) * 100
-        except Exception:
-            pass
-    except Exception:
-        pass
-    return out
-
-
-def _safe_lookup(df: pd.DataFrame, row: str, col) -> Optional[float]:
-    try:
-        if row in df.index:
-            v = df.loc[row, col]
-            if pd.notna(v):
-                return float(v)
-    except Exception:
-        return None
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Tickers used across the app
-# ---------------------------------------------------------------------------
-OVERVIEW_MARKETS = ["SPY", "QQQ", "DX-Y.NYB", "^VIX"]
-OVERVIEW_COMMODITIES = ["CL=F", "GC=F", "HG=F", "NG=F"]
-OVERVIEW_FX = ["EURUSD=X", "CNY=X", "JPY=X", "BTC-USD"]
-
 SECTOR_ETFS = {
     "XLK": "Tech",
     "XLF": "Financials",
@@ -326,9 +419,9 @@ GLOBAL_ETFS = {
 }
 
 
-def has_fred() -> bool:
-    return _FRED is not None
+def has_fred():
+    return bool(FRED_API_KEY)
 
 
-def has_news() -> bool:
+def has_news():
     return bool(NEWS_API_KEY)
