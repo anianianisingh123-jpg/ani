@@ -106,7 +106,14 @@ with st.sidebar:
     st.markdown(f"`{datetime.now().strftime('%H:%M:%S')}`")
     if st.button("Refresh data", use_container_width=True):
         st.cache_data.clear()
+        if "thesis_results" in st.session_state:
+            del st.session_state["thesis_results"]
         st.rerun()
+    debug_mode = st.checkbox("Debug mode", value=False)
+    if debug_mode:
+        os.environ["DEBUG_MODE"] = "1"
+    else:
+        os.environ.pop("DEBUG_MODE", None)
     st.divider()
     st.caption("Data: yfinance, FRED, NewsAPI")
     st.caption("Theses scored by Claude")
@@ -170,11 +177,20 @@ def render_overview():
     cols = st.columns(4)
     yields = df_.get_treasury_yields()
     with cols[0]:
-        _metric_card("US 2Y Yield", yields["y2"], value_suffix="%")
+        delta = (yields["y2"] - yields["y2_prior"]) * 100 if (yields["y2"] and yields["y2_prior"]) else None
+        st.metric("US 2Y Yield",
+                  f"{yields['y2']:.2f}%" if yields["y2"] else "—",
+                  delta=f"{delta:+.0f} bps" if delta is not None else None)
     with cols[1]:
-        _metric_card("US 10Y Yield", yields["y10"], value_suffix="%")
+        delta = (yields["y10"] - yields["y10_prior"]) * 100 if (yields["y10"] and yields["y10_prior"]) else None
+        st.metric("US 10Y Yield",
+                  f"{yields['y10']:.2f}%" if yields["y10"] else "—",
+                  delta=f"{delta:+.0f} bps" if delta is not None else None)
     with cols[2]:
-        _metric_card("US 30Y Yield", yields["y30"], value_suffix="%")
+        delta = (yields["y30"] - yields["y30_prior"]) * 100 if (yields["y30"] and yields["y30_prior"]) else None
+        st.metric("US 30Y Yield",
+                  f"{yields['y30']:.2f}%" if yields["y30"] else "—",
+                  delta=f"{delta:+.0f} bps" if delta is not None else None)
     with cols[3]:
         spread = yields["spread_bps"]
         spread_color = "inverse" if (spread is not None and spread < 0) else "normal"
@@ -324,10 +340,10 @@ def render_debt_cycle():
         ("Federal Debt / GDP", "GFDEGDQ188S", debt_to_gdp_now,
          (debt_to_gdp_now - debt_to_gdp_prior) if (debt_to_gdp_now and debt_to_gdp_prior) else None,
          "%", " pp"),
-        ("Total Public Debt ($B)", "GFDEBTN",
-         total_debt_now / 1000 if total_debt_now else None,
-         ((total_debt_now - total_debt_prior) / 1000) if (total_debt_now and total_debt_prior) else None,
-         "B", " B"),
+        ("Total Public Debt ($T)", "GFDEBTN",
+         total_debt_now / 1_000_000 if total_debt_now else None,
+         ((total_debt_now - total_debt_prior) / 1_000_000) if (total_debt_now and total_debt_prior) else None,
+         "T", " T"),
         ("Interest / Revenue", "INTEREST_RATIO", interest_pct,
          (interest_pct - interest_pct_prior) if (interest_pct and interest_pct_prior) else None,
          "%", " pp"),
@@ -473,12 +489,21 @@ def render_bonds():
         st.plotly_chart(fig, use_container_width=True, key="yield_curve_chart")
 
     st.subheader("Key Spreads")
+    # FRED can return yields as decimal (0.0442) instead of percent (4.42).
+    # Normalize so all downstream math is in percent.
+    def to_pct(v):
+        if v is None:
+            return None
+        return v * 100 if v < 0.5 else v
+
     y3m, _ = df_.fred_latest("DGS3MO")
     y2, _ = df_.fred_latest("DGS2")
     y10, _ = df_.fred_latest("DGS10")
     y30, _ = df_.fred_latest("DGS30")
     hy, _ = df_.fred_latest("BAMLH0A0HYM2")
     ig, _ = df_.fred_latest("BAMLC0A0CM")
+    y3m, y2, y10, y30 = to_pct(y3m), to_pct(y2), to_pct(y10), to_pct(y30)
+    hy, ig = to_pct(hy), to_pct(ig)
 
     cols = st.columns(5)
     s_2_10 = (y10 - y2) * 100 if (y10 and y2) else None
@@ -509,6 +534,7 @@ def render_bonds():
     be5, _ = df_.fred_latest("T5YIE")
     be10, _ = df_.fred_latest("T10YIE")
     fwd5y5y, _ = df_.fred_latest("T5YIFR")
+    be5, be10, fwd5y5y = to_pct(be5), to_pct(be10), to_pct(fwd5y5y)
     cols = st.columns(3)
     with cols[0]:
         _metric_card("5Y Breakeven", be5, value_suffix="%")
@@ -563,7 +589,7 @@ def render_macro():
         ("Core PCE YoY", "PCEPILFE", "yoy", "%"),
         ("Unemployment Rate", "UNRATE", "level", "%"),
         ("Nonfarm Payrolls (MoM, K)", "PAYEMS", "diff", "K"),
-        ("ISM Mfg PMI proxy (NAPM)", "NAPM", "level", ""),
+        ("Manufacturing Employment", "MANEMP", "yoy", "%"),
         ("Retail Sales MoM", "RSAFS", "pct_change", "%"),
         ("Industrial Production", "INDPRO", "level", ""),
         ("Housing Starts (K)", "HOUST", "level", "K"),
@@ -589,6 +615,10 @@ def render_macro():
             d = s.diff().dropna()
             current = float(d.iloc[-1])
             prior = float(d.iloc[-2]) if len(d) > 1 else None
+            # Payrolls are reported in thousands and read better as integers
+            if series_id == "PAYEMS":
+                current = round(current)
+                prior = round(prior) if prior is not None else None
         else:
             current = float(s.iloc[-1])
             prior = float(s.iloc[-2])
@@ -601,10 +631,16 @@ def render_macro():
             arrow = "▼"
         else:
             arrow = "—"
+        is_payrolls = mode == "diff" and series_id == "PAYEMS"
+        current_str = f"{int(current):,}{suffix}" if is_payrolls else f"{current:,.2f}{suffix}"
+        if prior is None:
+            prior_str = "—"
+        else:
+            prior_str = f"{int(prior):,}{suffix}" if is_payrolls else f"{prior:,.2f}{suffix}"
         rows.append({
             "Indicator": label,
-            "Current": f"{current:,.2f}{suffix}",
-            "Prior": f"{prior:,.2f}{suffix}" if prior is not None else "—",
+            "Current": current_str,
+            "Prior": prior_str,
             "Change": f"{change:+.2f}" if change is not None else "—",
             "Direction": arrow,
         })
@@ -705,7 +741,9 @@ def render_commodities():
     gold_q = df_.yf_quote("GC=F")
     copper_q = df_.yf_quote("HG=F")
     wti_q = df_.yf_quote("CL=F")
-    cu_au = (copper_q["price"] / gold_q["price"]) if (copper_q["price"] and gold_q["price"]) else None
+    # Multiply copper price by 1000 to get a readable ratio (Cu in $/lb,
+    # Au in $/oz, raw ratio is < 0.005).
+    cu_au = ((copper_q["price"] * 1000) / gold_q["price"]) if (copper_q["price"] and gold_q["price"]) else None
     au_oil = (gold_q["price"] / wti_q["price"]) if (gold_q["price"] and wti_q["price"]) else None
 
     risk_signal = None
@@ -715,16 +753,17 @@ def render_commodities():
         cu = cu_hist["Close"].dropna()
         au = au_hist["Close"].dropna()
         common = cu.index.intersection(au.index)
-        if len(common) > 22:
-            ratio = (cu.loc[common] / au.loc[common]).dropna()
-            if len(ratio) > 22:
-                risk_signal = "Risk-On" if ratio.iloc[-1] > ratio.iloc[-22] else "Risk-Off"
+        if len(common) > 50:
+            ratio = (cu.loc[common] * 1000 / au.loc[common]).dropna()
+            if len(ratio) > 50:
+                ma50 = ratio.rolling(50).mean()
+                risk_signal = "Risk-On" if ratio.iloc[-1] > ma50.iloc[-1] else "Risk-Off"
 
     cols = st.columns(3)
     with cols[0]:
         st.metric(
-            "Copper/Gold Ratio",
-            _fmt(cu_au, decimals=4),
+            "Copper/Gold Ratio (x1000)",
+            _fmt(cu_au, decimals=2),
             delta=risk_signal,
             delta_color="normal" if risk_signal == "Risk-On" else "inverse",
         )
@@ -855,8 +894,10 @@ def render_equities():
     sector_data = []
     for ticker, label in df_.SECTOR_ETFS.items():
         ytd = df_.yf_ytd_change(ticker)
-        if ytd is not None:
-            sector_data.append({"sector": f"{ticker} — {label}", "ytd": ytd})
+        sector_data.append({
+            "sector": f"{ticker} — {label}",
+            "ytd": ytd if ytd is not None else 0,
+        })
     if sector_data:
         sector_df = pd.DataFrame(sector_data).sort_values("ytd")
         colors = ["#00FF94" if v >= 0 else "#FF4B4B" for v in sector_df["ytd"]]
@@ -888,6 +929,7 @@ def render_equities():
             "Revenue": f"${e['revenue']/1e9:,.2f}B" if e["revenue"] else "—",
             "Rev YoY": f"{e['revenue_yoy']:+.2f}%" if e["revenue_yoy"] else "—",
             "EPS (TTM)": f"{e['eps']:.2f}" if e["eps"] is not None else "—",
+            "EPS YoY": f"{e['eps_yoy']:+.2f}%" if e.get("eps_yoy") else "—",
             "Net Income": f"${e['net_income']/1e9:,.2f}B" if e["net_income"] else "—",
             "Gross Margin": f"{e['gross_margin']:.1f}%" if e["gross_margin"] else "—",
         })

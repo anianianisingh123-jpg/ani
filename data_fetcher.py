@@ -162,12 +162,32 @@ def get_fred_yoy(series_id):
 
 
 def get_treasury_yields():
-    """Current 2Y / 10Y / 30Y yields (%) and 2Y/10Y spread (bps) from FRED."""
-    y2, _, _ = get_fred("DGS2")
-    y10, _, _ = get_fred("DGS10")
-    y30, _, _ = get_fred("DGS30")
+    """Current 2Y / 10Y / 30Y yields (%) and 2Y/10Y spread (bps) from FRED.
+
+    Returns prior values too so callers can show daily deltas in bps.
+    """
+    y2, y2_prior, _ = get_fred("DGS2")
+    y10, y10_prior, _ = get_fred("DGS10")
+    y30, y30_prior, _ = get_fred("DGS30")
+
+    # FRED sometimes returns yields in decimal form (0.0442) instead of
+    # percent (4.42). Normalize to percent.
+    def to_pct(v):
+        if v is None:
+            return None
+        return v * 100 if v < 0.5 else v
+
+    y2, y2_prior = to_pct(y2), to_pct(y2_prior)
+    y10, y10_prior = to_pct(y10), to_pct(y10_prior)
+    y30, y30_prior = to_pct(y30), to_pct(y30_prior)
+
     spread_bps = ((y10 - y2) * 100) if (y10 is not None and y2 is not None) else None
-    return {"y2": y2, "y10": y10, "y30": y30, "spread_bps": spread_bps}
+
+    return {
+        "y2": y2, "y10": y10, "y30": y30,
+        "y2_prior": y2_prior, "y10_prior": y10_prior, "y30_prior": y30_prior,
+        "spread_bps": spread_bps,
+    }
 
 
 # Backward-compat shims
@@ -315,12 +335,27 @@ def get_earnings_data(ticker):
         except Exception:
             eps = None
 
+        # EPS YoY — pull historical EPS from earnings_history
+        eps_yoy = None
+        try:
+            eh = t.earnings_history
+            if eh is not None and not eh.empty and "epsActual" in eh.columns:
+                eps_actuals = eh["epsActual"].dropna()
+                if len(eps_actuals) >= 5:
+                    current_eps = float(eps_actuals.iloc[-1])
+                    year_ago_eps = float(eps_actuals.iloc[-5])
+                    if year_ago_eps:
+                        eps_yoy = ((current_eps - year_ago_eps) / abs(year_ago_eps)) * 100
+        except Exception:
+            pass
+
         return {
             "revenue": revenue,
             "rev_yoy": rev_yoy,
             "net_income": net_income,
             "gross_margin": gross_margin,
             "eps": eps,
+            "eps_yoy": eps_yoy,
             "quarter": str(latest)[:10],
         }
     except Exception:
@@ -341,7 +376,7 @@ def latest_earnings(ticker):
         "revenue": e["revenue"],
         "revenue_yoy": e["rev_yoy"],
         "eps": e["eps"],
-        "eps_yoy": None,
+        "eps_yoy": e.get("eps_yoy"),
         "net_income": e["net_income"],
         "gross_margin": e["gross_margin"],
         "quarter": e["quarter"],
