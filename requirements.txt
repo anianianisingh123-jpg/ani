@@ -2,5 +2,9 @@ streamlit>=1.30.0
 yfinance>=0.2.30
 plotly>=5.18.0
 pandas>=2.0.0
+numpy>=1.24.0
 requests>=2.31.0
-feedparser
+fredapi>=0.5.1
+anthropic>=0.39.0
+python-dotenv>=1.0.0
+feedparser>=6.0.0
