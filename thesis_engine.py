@@ -22,9 +22,9 @@ def get_secret(key):
     return os.getenv(key)
 
 
-FRED_API_KEY = get_secret("FRED_API_KEY")
-NEWS_API_KEY = get_secret("NEWS_API_KEY")
-ANTHROPIC_API_KEY = get_secret("ANTHROPIC_API_KEY")
+FRED_API_KEY = get_secret("FRED_API_KEY") or "35c497c8d13b7c40e6b3cc75fb2817dc"
+NEWS_API_KEY = get_secret("NEWS_API_KEY") or "db162a8b8ca042389ce24e6b644b0143"
+ANTHROPIC_API_KEY = get_secret("ANTHROPIC_API_KEY") or "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"
 
 MODEL = "claude-sonnet-4-20250514"
 
