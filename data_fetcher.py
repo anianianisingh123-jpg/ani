@@ -28,7 +28,7 @@ def get_secret(key):
 
 FRED_API_KEY = get_secret("FRED_API_KEY") or "35c497c8d13b7c40e6b3cc75fb2817dc"
 NEWS_API_KEY = get_secret("NEWS_API_KEY") or "db162a8b8ca042389ce24e6b644b0143"
-ANTHROPIC_API_KEY = get_secret("ANTHROPIC_API_KEY") or "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"
+ANTHROPIC_API_KEY = get_secret("ANTHROPIC_API_KEY") or "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"
 
 
 # ---------------------------------------------------------------------------
@@ -37,9 +37,11 @@ ANTHROPIC_API_KEY = get_secret("ANTHROPIC_API_KEY") or "sk-ant-api03-Fy8VYGGrVmz
 @st.cache_data(ttl=300, show_spinner=False)
 def get_price(symbol):
     try:
+        # Futures (=F) can have contract roll gaps in 5d windows; widen to 1mo
+        period = "1mo" if symbol.endswith("=F") else "5d"
         ticker = yf.Ticker(symbol)
-        data = ticker.history(period="5d", interval="1d")
-        data = data.dropna()
+        data = ticker.history(period=period, interval="1d")
+        data = data.dropna(subset=["Close"])
         if len(data) < 2:
             return None, None
         price = float(data["Close"].iloc[-1])
@@ -157,6 +159,15 @@ def get_fred_yoy(series_id):
         return float(yoy.iloc[-1]), float(yoy.iloc[-2]), yoy
     except Exception:
         return None, None, None
+
+
+def get_treasury_yields():
+    """Current 2Y / 10Y / 30Y yields (%) and 2Y/10Y spread (bps) from FRED."""
+    y2, _, _ = get_fred("DGS2")
+    y10, _, _ = get_fred("DGS10")
+    y30, _, _ = get_fred("DGS30")
+    spread_bps = ((y10 - y2) * 100) if (y10 is not None and y2 is not None) else None
+    return {"y2": y2, "y10": y10, "y30": y30, "spread_bps": spread_bps}
 
 
 # Backward-compat shims

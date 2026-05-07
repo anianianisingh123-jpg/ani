@@ -168,21 +168,15 @@ def render_overview():
 
     st.subheader("Rates")
     cols = st.columns(4)
-    # 2Y → ^IRX, 10Y → ^TNX, 30Y → ^TYX (yfinance returns scaled values; /100)
-    y2_raw, y2_pct = df_.get_price("^IRX")
-    y10_raw, y10_pct = df_.get_price("^TNX")
-    y30_raw, y30_pct = df_.get_price("^TYX")
-    y2 = (y2_raw / 100) if y2_raw is not None else None
-    y10 = (y10_raw / 100) if y10_raw is not None else None
-    y30 = (y30_raw / 100) if y30_raw is not None else None
+    yields = df_.get_treasury_yields()
     with cols[0]:
-        _metric_card("US 2Y Yield", y2, y2_pct, value_suffix="%")
+        _metric_card("US 2Y Yield", yields["y2"], value_suffix="%")
     with cols[1]:
-        _metric_card("US 10Y Yield", y10, y10_pct, value_suffix="%")
+        _metric_card("US 10Y Yield", yields["y10"], value_suffix="%")
     with cols[2]:
-        _metric_card("US 30Y Yield", y30, y30_pct, value_suffix="%")
+        _metric_card("US 30Y Yield", yields["y30"], value_suffix="%")
     with cols[3]:
-        spread = (y10 - y2) * 100 if (y10 is not None and y2 is not None) else None
+        spread = yields["spread_bps"]
         spread_color = "inverse" if (spread is not None and spread < 0) else "normal"
         st.metric(
             "2Y/10Y Spread",
@@ -246,10 +240,9 @@ def render_debt_cycle():
 
     debt_to_gdp_series = df_.fred_series("GFDEGDQ188S")
     debt_to_gdp = float(debt_to_gdp_series.iloc[-1]) if not debt_to_gdp_series.empty else None
-    y2_raw, _ = df_.get_price("^IRX")
-    y10_raw, _ = df_.get_price("^TNX")
-    y2 = (y2_raw / 100) if y2_raw is not None else None
-    y10 = (y10_raw / 100) if y10_raw is not None else None
+    yields = df_.get_treasury_yields()
+    y2 = yields["y2"]
+    y10 = yields["y10"]
     inverted = (y2 is not None and y10 is not None and y2 > y10)
 
     if debt_to_gdp is not None and debt_to_gdp > 120 and inverted:
