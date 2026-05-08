@@ -489,21 +489,14 @@ def render_bonds():
         st.plotly_chart(fig, use_container_width=True, key="yield_curve_chart")
 
     st.subheader("Key Spreads")
-    # FRED can return yields as decimal (0.0442) instead of percent (4.42).
-    # Normalize so all downstream math is in percent.
-    def to_pct(v):
-        if v is None:
-            return None
-        return v * 100 if v < 0.5 else v
-
-    y3m, _ = df_.fred_latest("DGS3MO")
-    y2, _ = df_.fred_latest("DGS2")
-    y10, _ = df_.fred_latest("DGS10")
-    y30, _ = df_.fred_latest("DGS30")
+    # Treasury yields from yfinance (returned directly as percent).
+    # ^IRX = 3M T-bill, ^FVX = 5Y (used as 2Y proxy), ^TNX = 10Y, ^TYX = 30Y
+    yields = df_.get_treasury_yields()
+    y2, y10, y30 = yields["y2"], yields["y10"], yields["y30"]
+    y3m, _ = df_.get_price("^IRX")
+    # Credit spreads stay on FRED — no equivalent yfinance ticker
     hy, _ = df_.fred_latest("BAMLH0A0HYM2")
     ig, _ = df_.fred_latest("BAMLC0A0CM")
-    y3m, y2, y10, y30 = to_pct(y3m), to_pct(y2), to_pct(y10), to_pct(y30)
-    hy, ig = to_pct(hy), to_pct(ig)
 
     cols = st.columns(5)
     s_2_10 = (y10 - y2) * 100 if (y10 and y2) else None
@@ -534,7 +527,6 @@ def render_bonds():
     be5, _ = df_.fred_latest("T5YIE")
     be10, _ = df_.fred_latest("T10YIE")
     fwd5y5y, _ = df_.fred_latest("T5YIFR")
-    be5, be10, fwd5y5y = to_pct(be5), to_pct(be10), to_pct(fwd5y5y)
     cols = st.columns(3)
     with cols[0]:
         _metric_card("5Y Breakeven", be5, value_suffix="%")

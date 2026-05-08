@@ -161,25 +161,33 @@ def get_fred_yoy(series_id):
         return None, None, None
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def get_treasury_yields():
-    """Current 2Y / 10Y / 30Y yields (%) and 2Y/10Y spread (bps) from FRED.
+    """Current 2Y / 10Y / 30Y yields from yfinance.
 
-    Returns prior values too so callers can show daily deltas in bps.
+    yfinance ^TNX/^FVX/^TYX return yields directly as percentages
+    (e.g., 4.42 = 4.42%). No /100 normalization needed.
+
+    ^FVX (5Y) is used as the 2Y proxy because yfinance does not have a
+    clean 2Y ticker. Returns prior-day values so callers can show
+    basis-point deltas.
     """
-    y2, y2_prior, _ = get_fred("DGS2")
-    y10, y10_prior, _ = get_fred("DGS10")
-    y30, y30_prior, _ = get_fred("DGS30")
+    def fetch_yield(symbol):
+        try:
+            t = yf.Ticker(symbol)
+            data = t.history(period="5d", interval="1d").dropna()
+            if len(data) < 2:
+                return None, None
+            current = float(data["Close"].iloc[-1])
+            prior = float(data["Close"].iloc[-2])
+            return current, prior
+        except Exception:
+            return None, None
 
-    # FRED sometimes returns yields in decimal form (0.0442) instead of
-    # percent (4.42). Normalize to percent.
-    def to_pct(v):
-        if v is None:
-            return None
-        return v * 100 if v < 0.5 else v
-
-    y2, y2_prior = to_pct(y2), to_pct(y2_prior)
-    y10, y10_prior = to_pct(y10), to_pct(y10_prior)
-    y30, y30_prior = to_pct(y30), to_pct(y30_prior)
+    # ^IRX = 13w T-bill, ^FVX = 5Y, ^TNX = 10Y, ^TYX = 30Y
+    y2, y2_prior = fetch_yield("^FVX")  # 5Y closer to 2Y than 13-week
+    y10, y10_prior = fetch_yield("^TNX")
+    y30, y30_prior = fetch_yield("^TYX")
 
     spread_bps = ((y10 - y2) * 100) if (y10 is not None and y2 is not None) else None
 
