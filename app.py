@@ -1,1124 +1,586 @@
-"""Ani Terminal — personal macro and investment research dashboard.
-
-Run with:
-    streamlit run app.py
 """
+SIGNAL — Ani Singh Private Research Agent
+A two-mode research agent: full 6-section daily cycle, or topic-specific deep dive.
+Powered by Claude with web search.
+"""
+
 from __future__ import annotations
 
 import os
 from datetime import datetime
+from typing import Generator
+from zoneinfo import ZoneInfo
 
-import numpy as np
-import pandas as pd
-import plotly.graph_objects as go
+import anthropic
 import streamlit as st
-from plotly.subplots import make_subplots
+from dotenv import load_dotenv
 
-import data_fetcher as df_
-import thesis_engine as te
+load_dotenv()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────────────────────────────────────
+
+MODEL = "claude-sonnet-4-5"
+MAX_TOKENS = 8000
+WEB_SEARCH_TOOL = {
+    "type": "web_search_20250305",
+    "name": "web_search",
+    "max_uses": 6,
+}
+
+GOLD = "#c9a84c"
+BG = "#0c0c0c"
 
 
-def get_secret(key):
+def get_api_key() -> str | None:
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if key:
+        return key
     try:
-        val = st.secrets.get(key)
-        if val:
-            return val
+        return st.secrets["ANTHROPIC_API_KEY"]
     except Exception:
-        pass
-    return os.getenv(key)
+        return None
 
 
-FRED_API_KEY = get_secret("FRED_API_KEY")
-NEWS_API_KEY = get_secret("NEWS_API_KEY")
-ANTHROPIC_API_KEY = get_secret("ANTHROPIC_API_KEY")
+def today_str() -> str:
+    return datetime.now(ZoneInfo("America/New_York")).strftime("%A, %B %d, %Y")
 
 
-def _last(series: pd.Series, years: int) -> pd.Series:
-    if series.empty:
-        return series
-    idx = pd.to_datetime(series.index)
-    cutoff = idx.max() - pd.DateOffset(years=years)
-    return series[idx >= cutoff]
+def now_str() -> str:
+    return datetime.now(ZoneInfo("America/New_York")).strftime("%H:%M ET · %a %b %d")
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SYSTEM PROMPT — the lens
+# ─────────────────────────────────────────────────────────────────────────────
+
+SYSTEM_PROMPT = """You are a dedicated research agent for Anirudh Singh — a concentrated macro investor building toward running a concentrated macro fund.
+
+His analytical framework:
+- PRIMARY LENS: Ray Dalio — long-term debt cycle, changing world order, historical pattern recognition. Always ask: where are we in the machine?
+- SECONDARY LENS: George Soros reflexivity — identify self-reinforcing loops between perception and fundamentals
+- WRITING/THINKING DISCIPLINE: Howard Marks memo style — what is priced, where is the asymmetry, what is consensus wrong about, no filler, no hedging for cover
+- INVESTING PRINCIPLES: Concentration with conviction, long time horizons, no external validation needed, obligation as risk management
+
+His core positions:
+- QUALCOMM (QCOM) — 40% portfolio weight, largest holding. Thesis: edge AI inference dominance in power-constrained environments, automotive revenue ramp, QTL licensing moat. Structural multi-year advantage over Nvidia/AMD in mobile/edge due to mobile power-constraint engineering heritage.
+- KINDER MORGAN (KMI) — 17% portfolio weight, second largest holding. Energy midstream / pipeline infrastructure. Thesis: cash-flow-generative energy infrastructure, natural gas demand growth (including AI data center power demand), dividend yield, inflation-resilient real assets.
+- SALESFORCE (CRM) — Thesis: agentic AI platform consolidation, enterprise software stickiness, AI workflow monetization
+- XIAOMI (1810.HK) — Thesis: China consumer recovery, EV optionality, global hardware ecosystem expansion
+
+Standing watch-items (check every run):
+- Market sentiment — positioning, risk appetite, fear/greed, breadth, flows
+- Edge AI inference adoption curve
+- Semiconductor fab production capacity growth — TSMC ONLY
+- Inference AI news — developments specific to AI inference (not just training)
+
+ALWAYS: Use web search aggressively for current data and specific numbers. Apply the lens to everything — not just what happened, but what it means through the debt cycle, reflexivity, and risk asymmetry. Identify what consensus is missing. Write for a sophisticated investor who knows the basics — skip definitions, get to the edge.
+
+Format your output as a Howard Marks memo: tight paragraphs, specific numbers, no throat-clearing. Use markdown headers (## or ###) sparingly to organize. Bold key claims with **double asterisks**. Never apologize for uncertainty — state your view."""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# THE 6 RESEARCH PROMPTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def prompt_macro(today: str) -> str:
+    return f"""Today is {today}. Use web search for all current data.
+
+Produce the MACRO & RATES section. Cover:
+- Federal Reserve: latest statements, rate path, balance sheet trajectory
+- US Treasury: 10Y yield, real yield, term premium
+- Inflation and labor: latest prints, gap between what's printed and what's priced
+- Global central banks: ECB, PBOC, BOJ divergence signals
+- Credit cycle: Dalio long-term debt cycle positioning — where are we?
+- Market sentiment: positioning, risk appetite, fund flows, fear/greed indicators — what is the crowd doing and is it a contrarian signal?
+- Dollar: DXY, reserve currency dynamics
+
+Apply Dalio: where are we in the machine? Apply Marks: what is being priced for perfection in rates? Specific numbers only."""
+
+
+def prompt_earnings(today: str) -> str:
+    return f"""Today is {today}. Use web search for all current data.
+
+Produce the EARNINGS & CORPORATE section. Cover:
+- Major earnings in trailing 48-72 hours: actual vs estimate, guidance revision, margin trajectory, what management didn't say
+- Key reports due this week that move the macro or sector picture
+- Semiconductor sector specifically: supply, pricing, capex, design wins (critical for QCOM thesis)
+- Capital markets: debt issuance, refinancing stress, downgrades, defaults
+- Major M&A, restructurings, corporate strategy shifts
+
+Signal vs noise filter applied. Reflexivity lens: is any earnings narrative becoming self-reinforcing?"""
+
+
+def prompt_ai_tech(today: str) -> str:
+    return f"""Today is {today}. Use web search for all current data.
+
+Produce the AI & TECHNOLOGY section. Cover:
+- Edge AI inference adoption curve: on-device compute developments — this is the core QCOM structural thesis. New design wins, partnerships, adoption evidence?
+- Inference AI news specifically: developments in AI inference (NOT training) — cost curves, inference-optimized chips, deployment at scale
+- Semiconductor fab capacity — TSMC ONLY: production capacity growth, node ramp (N2, N3), capex, utilization, AI chip allocation. Focus exclusively on TSMC.
+- Qualcomm, Apple, Nvidia, AMD silicon roadmap news as it relates to inference
+- AI model releases and capability announcements relevant to inference demand
+- One emerging inference-related signal most investors are not watching yet
+
+Frame edge AI through Dalio: early-to-middle cycle technology shift. What is the reflexivity loop forming?"""
+
+
+def prompt_geo(today: str) -> str:
+    return f"""Today is {today}. Use web search for all current data.
+
+Produce the GEOPOLITICAL section. Cover:
+- Middle East energy: current status, escalation or de-escalation, oil supply implications (relevant to KMI energy thesis)
+- US-China: trade actions, tech and semiconductor export restrictions, Taiwan developments (critical for TSMC capacity), capital flow implications
+- Energy infrastructure and natural gas: policy, demand drivers including AI data center power buildout (relevant to KMI)
+- Europe: energy security, political developments with market implications
+- One flashpoint being underpriced by markets right now
+
+Changing world order lens: which developments signal the structural transition Dalio describes?"""
+
+
+def prompt_cross_asset(today: str) -> str:
+    return f"""Today is {today}. Use web search for all current data.
+
+Produce the CROSS-ASSET section. Cover:
+- Equities: index levels, sector rotation, market breadth — is the rally narrow or broad?
+- Rates: yield curve shape (2s10s spread), credit spreads IG and HY, MOVE index
+- Commodities: WTI oil, gold (central bank demand signal), copper (growth signal)
+- FX: DXY, key crosses, stress signals
+- Volatility: VIX — fear or complacency?
+- One cross-asset relationship breaking down or forming that most haven't noticed
+
+Marks lens: where is risk being mispriced across these asset classes right now?"""
+
+
+def prompt_synthesis(today: str) -> str:
+    return f"""Today is {today}. Based on all research today, produce the SYNTHESIS section. Cover:
+
+POSITION DESK — Thesis check for each (strengthened or challenged by today's data, be blunt):
+- QUALCOMM (QCOM, 40% weight): edge AI inference, automotive ramp, QTL licensing
+- KINDER MORGAN (KMI, 17% weight): energy midstream, natural gas demand including AI data center power, dividend, inflation-resilient real assets
+- SALESFORCE (CRM): agentic AI enterprise consolidation
+- XIAOMI (1810.HK): China consumer recovery, EV optionality
+
+WHAT CONSENSUS IS MISSING — The dominant market narrative right now and exactly where it is wrong. One specific contrarian read.
+
+TAIL RISKS — 2-3 risks that are real and unpriced. Not consensus risks. Make the reader uncomfortable.
+
+THE ANCHOR — One paragraph. What should a concentrated macro investor be thinking this week that most aren't? End with a historical parallel that rhymes today (Weimar, 1970s stagflation, 1998, 2008) and the lesson.
+
+SUBSTACK ANGLE — 1 essay idea from today's research. Give the hook and the structural argument in 3 sentences."""
+
+
+def prompt_deep_dive(today: str, query: str) -> str:
+    return f"""Today is {today}. Topic: "{query}"
+
+Use web search aggressively. Pull all current data, recent developments, analyst views, policy updates on this topic.
+
+Produce a complete memo covering:
+1. THE CURRENT SITUATION — What is actually happening right now, specific numbers and dates
+2. HISTORICAL CONTEXT — How does this fit the longer debt cycle or historical pattern? Where have we seen this before?
+3. DALIO LENS — Where does this sit in the long-term debt cycle and changing world order?
+4. REFLEXIVITY LOOP — Is there a self-reinforcing dynamic forming between narrative and fundamentals?
+5. MARKET IMPLICATIONS — What is priced, what is mispriced, where is the asymmetry?
+6. PORTFOLIO RELEVANCE — Impact on QCOM (40%), Kinder Morgan (17%), Salesforce, or Xiaomi. Any thesis implications?
+7. WHAT CONSENSUS IS MISSING — The contrarian read. What is the dominant narrative getting wrong?
+8. TAIL RISK — The scenario that breaks everything in this situation.
+
+Specific numbers only. Skip definitions. Write for a sophisticated investor who already knows the basics."""
+
+
+SECTIONS = [
+    ("MACRO & RATES", prompt_macro),
+    ("EARNINGS & CORPORATE", prompt_earnings),
+    ("AI & TECHNOLOGY", prompt_ai_tech),
+    ("GEOPOLITICAL", prompt_geo),
+    ("CROSS-ASSET", prompt_cross_asset),
+    ("SYNTHESIS · POSITIONS · RISKS · SUBSTACK", prompt_synthesis),
+]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STREAMING
+# ─────────────────────────────────────────────────────────────────────────────
+
+def stream_research(prompt: str, api_key: str) -> Generator[str, None, None]:
+    """Stream text deltas from Claude with web search enabled."""
+    client = anthropic.Anthropic(api_key=api_key)
+    with client.messages.stream(
+        model=MODEL,
+        max_tokens=MAX_TOKENS,
+        system=SYSTEM_PROMPT,
+        tools=[WEB_SEARCH_TOOL],
+        messages=[{"role": "user", "content": prompt}],
+    ) as stream:
+        for event in stream:
+            etype = getattr(event, "type", "")
+            if etype == "content_block_start":
+                block = getattr(event, "content_block", None)
+                if block is not None and getattr(block, "type", "") == "server_tool_use":
+                    yield "\n\n_◆ searching the web…_\n\n"
+            elif etype == "content_block_delta":
+                delta = getattr(event, "delta", None)
+                if delta is not None and getattr(delta, "type", "") == "text_delta":
+                    yield delta.text
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PAGE / CSS
+# ─────────────────────────────────────────────────────────────────────────────
 
 st.set_page_config(
-    page_title="Ani Terminal",
+    page_title="SIGNAL · Ani Singh",
+    page_icon="◆",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
+st.markdown(
+    """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600;700&family=Inter:wght@300;400;500;600&display=swap');
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-def _fmt(value, suffix: str = "", decimals: int = 2) -> str:
-    if value is None or (isinstance(value, float) and np.isnan(value)):
-        return "—"
-    return f"{value:,.{decimals}f}{suffix}"
+html, body, .stApp {
+    background-color: #0c0c0c !important;
+    color: #e8e3d6 !important;
+}
 
+.stApp {
+    background: radial-gradient(ellipse at top, #131210 0%, #0c0c0c 60%) !important;
+}
 
-def _delta_str(value, suffix: str = "%") -> str | None:
-    if value is None or (isinstance(value, float) and np.isnan(value)):
-        return None
-    return f"{value:+.2f}{suffix}"
+body, p, li, span, div, .stMarkdown, .stMarkdown p {
+    font-family: 'Cormorant Garamond', Georgia, serif !important;
+    font-size: 1.08rem;
+    line-height: 1.55;
+    color: #e8e3d6 !important;
+}
 
+h1, h2, h3, h4 {
+    font-family: 'Cormorant Garamond', Georgia, serif !important;
+    color: #c9a84c !important;
+    font-weight: 600 !important;
+}
 
-def _metric_card(label, value, delta=None, value_suffix="", delta_suffix="%",
-                 help_text=None, delta_color="normal", decimals=2):
-    st.metric(
-        label=label,
-        value=_fmt(value, value_suffix, decimals),
-        delta=_delta_str(delta, delta_suffix),
-        help=help_text,
-        delta_color=delta_color,
+.stMarkdown h2 {
+    border-bottom: 1px solid #2a261b;
+    padding-bottom: 0.3rem;
+    margin-top: 1.5rem;
+}
+
+strong, b {
+    color: #f0e6c8 !important;
+    font-weight: 600 !important;
+}
+
+a, a:visited {
+    color: #c9a84c !important;
+    text-decoration: none !important;
+    border-bottom: 1px dotted #6a5828;
+}
+
+.signal-title {
+    font-family: 'Cormorant Garamond', Georgia, serif;
+    font-size: 5.5rem;
+    font-weight: 700;
+    letter-spacing: 0.7rem;
+    color: #c9a84c;
+    margin: 0;
+    line-height: 1;
+    text-shadow: 0 0 30px rgba(201, 168, 76, 0.15);
+}
+
+.signal-subtitle {
+    font-family: 'Inter', sans-serif;
+    font-size: 0.7rem;
+    font-weight: 500;
+    letter-spacing: 0.4rem;
+    color: #8a8470;
+    margin-top: 0.7rem;
+    text-transform: uppercase;
+}
+
+.signal-meta {
+    font-family: 'Inter', sans-serif;
+    font-size: 0.7rem;
+    color: #6a6555;
+    letter-spacing: 0.2rem;
+    margin-top: 0.8rem;
+    text-transform: uppercase;
+}
+
+.gold-rule {
+    border: none;
+    border-top: 1px solid #c9a84c;
+    opacity: 0.25;
+    margin: 1.5rem 0;
+}
+
+.stButton > button, .stDownloadButton > button {
+    background-color: transparent !important;
+    color: #c9a84c !important;
+    font-family: 'Inter', sans-serif !important;
+    font-weight: 500 !important;
+    font-size: 0.85rem !important;
+    letter-spacing: 0.25rem !important;
+    text-transform: uppercase !important;
+    border: 1px solid #c9a84c !important;
+    padding: 0.7rem 1.8rem !important;
+    border-radius: 1px !important;
+    transition: all 0.2s ease;
+    width: 100%;
+}
+
+.stButton > button:hover, .stDownloadButton > button:hover {
+    background-color: #c9a84c !important;
+    color: #0c0c0c !important;
+}
+
+.stButton > button:focus { box-shadow: none !important; outline: none !important; }
+
+.stTextInput > div > div > input {
+    background-color: #14130f !important;
+    color: #e8e3d6 !important;
+    border: 1px solid #2a261b !important;
+    border-radius: 1px !important;
+    font-family: 'Cormorant Garamond', Georgia, serif !important;
+    font-size: 1.1rem !important;
+    padding: 0.8rem 1rem !important;
+}
+.stTextInput > div > div > input:focus { border-color: #c9a84c !important; box-shadow: none !important; }
+
+.section-card { margin-top: 2rem; margin-bottom: 0.5rem; }
+.section-num {
+    font-family: 'Inter', sans-serif;
+    font-size: 0.65rem;
+    color: #6a6555;
+    letter-spacing: 0.3rem;
+    text-transform: uppercase;
+}
+.section-name {
+    font-family: 'Cormorant Garamond', Georgia, serif;
+    font-size: 1.9rem;
+    color: #c9a84c;
+    margin-top: 0.3rem;
+    border-bottom: 1px solid #2a261b;
+    padding-bottom: 0.4rem;
+    font-weight: 600;
+}
+
+.stProgress > div > div > div > div { background-color: #c9a84c !important; }
+.stProgress > div > div > div { background-color: #2a261b !important; }
+
+.status-line {
+    font-family: 'Inter', sans-serif;
+    font-size: 0.72rem;
+    color: #8a8470;
+    letter-spacing: 0.2rem;
+    text-transform: uppercase;
+    margin-top: 0.4rem;
+}
+
+.stCode, code { background-color: #14130f !important; color: #e8e3d6 !important; font-size: 0.85rem !important; }
+
+#MainMenu, footer, header { visibility: hidden; }
+
+.block-container {
+    padding-top: 2rem !important;
+    max-width: 900px;
+}
+
+@media (max-width: 640px) {
+    .signal-title { font-size: 3.4rem !important; letter-spacing: 0.4rem !important; }
+    .signal-subtitle { font-size: 0.6rem !important; letter-spacing: 0.25rem !important; }
+    .section-name { font-size: 1.4rem !important; }
+    body, p, li, .stMarkdown p { font-size: 1rem !important; }
+    .block-container { padding-top: 1rem !important; }
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HERO
+# ─────────────────────────────────────────────────────────────────────────────
+
+st.markdown(
+    f"""
+<div style="text-align:center; margin-top:1rem; margin-bottom:2rem;">
+    <div class="signal-title">SIGNAL</div>
+    <div class="signal-subtitle">Ani Singh · Private Research Agent</div>
+    <div class="signal-meta">{now_str()}</div>
+</div>
+<hr class="gold-rule">
+""",
+    unsafe_allow_html=True,
+)
+
+if "memo_sections" not in st.session_state:
+    st.session_state.memo_sections = []
+if "memo_kind" not in st.session_state:
+    st.session_state.memo_kind = None
+if "memo_topic" not in st.session_state:
+    st.session_state.memo_topic = ""
+
+api_key = get_api_key()
+if not api_key:
+    st.error(
+        "ANTHROPIC_API_KEY not set. Add it to .env locally, or to "
+        "Streamlit Cloud secrets (Settings → Secrets) as "
+        "`ANTHROPIC_API_KEY=\"sk-ant-…\"`."
     )
+    st.stop()
 
+# ─────────────────────────────────────────────────────────────────────────────
+# CONTROLS
+# ─────────────────────────────────────────────────────────────────────────────
 
-def _now_str():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+st.markdown("<div class='status-line'>I · Full Research Cycle</div>", unsafe_allow_html=True)
+run_full = st.button("◆  Run Full Research Cycle", key="run_full", use_container_width=True)
 
+st.markdown("<div style='height:1.5rem'></div>", unsafe_allow_html=True)
+st.markdown("<div class='status-line'>II · Deep Dive</div>", unsafe_allow_html=True)
 
-def _last_updated():
-    st.caption(f"Last updated: {_now_str()}")
-
-
-def _api_status_warnings():
-    missing = []
-    if not df_.has_fred():
-        missing.append("FRED_API_KEY")
-    if not df_.has_news():
-        missing.append("NEWS_API_KEY")
-    if not te.has_anthropic():
-        missing.append("ANTHROPIC_API_KEY")
-    if missing:
-        st.warning(
-            "Missing API keys: " + ", ".join(missing)
-            + ". Some sections will be empty until configured."
-        )
-
-
-# ---------------------------------------------------------------------------
-# Sidebar
-# ---------------------------------------------------------------------------
-with st.sidebar:
-    st.title("ANI TERMINAL")
-    st.markdown(f"**{datetime.now().strftime('%A, %B %d %Y')}**")
-    st.markdown(f"`{datetime.now().strftime('%H:%M:%S')}`")
-    if st.button("Refresh data", use_container_width=True):
-        st.cache_data.clear()
-        if "thesis_results" in st.session_state:
-            del st.session_state["thesis_results"]
-        st.rerun()
-    debug_mode = st.checkbox("Debug mode", value=False)
-    if debug_mode:
-        os.environ["DEBUG_MODE"] = "1"
-    else:
-        os.environ.pop("DEBUG_MODE", None)
-    st.divider()
-    st.caption("Data: yfinance, FRED, NewsAPI")
-    st.caption("Theses scored by Claude")
-
-
-_api_status_warnings()
-
-
-# ---------------------------------------------------------------------------
-# Tabs
-# ---------------------------------------------------------------------------
-tab_overview, tab_debt, tab_bonds, tab_macro, tab_commodities, tab_fx, tab_equities, tab_thesis = st.tabs([
-    "Overview",
-    "Debt Cycle",
-    "Bonds",
-    "Macro Data",
-    "Commodities",
-    "Currencies",
-    "Equities",
-    "Portfolio & Thesis",
-])
-
-
-# ---------------------------------------------------------------------------
-# Tab 1 — Overview
-# ---------------------------------------------------------------------------
-def render_overview():
-    st.header("Overview — 30-Second Read")
-
-    markets = {
-        "^GSPC": "S&P 500",
-        "^IXIC": "Nasdaq",
-        "DX-Y.NYB": "DXY",
-        "^VIX": "VIX",
-    }
-    commodities = {
-        "CL=F": "WTI Crude",
-        "GC=F": "Gold",
-        "HG=F": "Copper",
-        "NG=F": "Natural Gas",
-    }
-    fx = {
-        "EURUSD=X": "EUR/USD",
-        "CNY=X": "USD/CNY",
-        "JPY=X": "USD/JPY",
-        "BTC-USD": "Bitcoin",
-    }
-
-    market_quotes = df_.yf_quotes(list(markets.keys()))
-    commodity_quotes = df_.yf_quotes(list(commodities.keys()))
-    fx_quotes = df_.yf_quotes(list(fx.keys()))
-
-    st.subheader("Markets")
-    cols = st.columns(4)
-    for col, (ticker, label) in zip(cols, markets.items()):
-        q = market_quotes[ticker]
-        with col:
-            _metric_card(label, q["price"], q["change_pct"])
-
-    st.subheader("Rates")
-    cols = st.columns(4)
-    yields = df_.get_treasury_yields()
-    with cols[0]:
-        delta = (yields["y2"] - yields["y2_prior"]) * 100 if (yields["y2"] and yields["y2_prior"]) else None
-        st.metric("US 2Y Yield",
-                  f"{yields['y2']:.2f}%" if yields["y2"] else "—",
-                  delta=f"{delta:+.0f} bps" if delta is not None else None)
-    with cols[1]:
-        delta = (yields["y10"] - yields["y10_prior"]) * 100 if (yields["y10"] and yields["y10_prior"]) else None
-        st.metric("US 10Y Yield",
-                  f"{yields['y10']:.2f}%" if yields["y10"] else "—",
-                  delta=f"{delta:+.0f} bps" if delta is not None else None)
-    with cols[2]:
-        delta = (yields["y30"] - yields["y30_prior"]) * 100 if (yields["y30"] and yields["y30_prior"]) else None
-        st.metric("US 30Y Yield",
-                  f"{yields['y30']:.2f}%" if yields["y30"] else "—",
-                  delta=f"{delta:+.0f} bps" if delta is not None else None)
-    with cols[3]:
-        spread = yields["spread_bps"]
-        spread_color = "inverse" if (spread is not None and spread < 0) else "normal"
-        st.metric(
-            "2Y/10Y Spread",
-            f"{spread:+.0f} bps" if spread is not None else "—",
-            delta="Inverted" if (spread is not None and spread < 0) else "Positive",
-            delta_color=spread_color,
-        )
-
-    st.subheader("Commodities")
-    cols = st.columns(4)
-    for col, (ticker, label) in zip(cols, commodities.items()):
-        q = commodity_quotes[ticker]
-        with col:
-            _metric_card(label, q["price"], q["change_pct"])
-
-    st.subheader("Currencies & Crypto")
-    cols = st.columns(4)
-    for col, (ticker, label) in zip(cols, fx.items()):
-        q = fx_quotes[ticker]
-        with col:
-            _metric_card(label, q["price"], q["change_pct"], decimals=4)
-
-    st.divider()
-    st.subheader("1-Year Asset Performance (Normalized)")
-    fig = _normalized_performance_chart(
-        {"SPY": "SPY (S&P 500)", "QQQ": "QQQ (Nasdaq)",
-         "GLD": "GLD (Gold)", "TLT": "TLT (20Y Treasuries)"},
-        period="1y",
+dive_col1, dive_col2 = st.columns([4, 1])
+with dive_col1:
+    topic = st.text_input(
+        "topic",
+        placeholder="e.g. Japan yield crisis · private credit stress · Qualcomm edge AI",
+        label_visibility="collapsed",
+        key="topic_input",
     )
-    st.plotly_chart(fig, use_container_width=True, key="overview_normalized_1y")
-    _last_updated()
+with dive_col2:
+    run_deep = st.button("Research", key="run_deep", use_container_width=True)
 
+st.markdown("<hr class='gold-rule'>", unsafe_allow_html=True)
 
-def _normalized_performance_chart(tickers, period="1y"):
-    fig = go.Figure()
-    for ticker, label in tickers.items():
-        hist = df_.yf_history(ticker, period=period)
-        if hist.empty or "Close" not in hist.columns:
-            continue
-        closes = hist["Close"].dropna()
-        if closes.empty:
-            continue
-        normalized = closes / closes.iloc[0] * 100
-        fig.add_trace(go.Scatter(x=normalized.index, y=normalized.values,
-                                 mode="lines", name=label))
-    fig.update_layout(
-        height=420,
-        margin=dict(l=20, r=20, t=20, b=20),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-        yaxis_title="Index (start = 100)",
-        template="plotly_dark",
-    )
-    return fig
+# ─────────────────────────────────────────────────────────────────────────────
+# EXECUTION
+# ─────────────────────────────────────────────────────────────────────────────
 
-
-# ---------------------------------------------------------------------------
-# Tab 2 — Debt Cycle
-# ---------------------------------------------------------------------------
-def render_debt_cycle():
-    st.header("Dalio Debt Cycle Monitor")
-
-    debt_to_gdp_series = df_.fred_series("GFDEGDQ188S")
-    debt_to_gdp = float(debt_to_gdp_series.iloc[-1]) if not debt_to_gdp_series.empty else None
-    yields = df_.get_treasury_yields()
-    y2 = yields["y2"]
-    y10 = yields["y10"]
-    inverted = (y2 is not None and y10 is not None and y2 > y10)
-
-    if debt_to_gdp is not None and debt_to_gdp > 120 and inverted:
-        phase = "Late-Stage Long-Term Debt Cycle"
-        phase_color = "#FF4B4B"
-    elif debt_to_gdp is not None and debt_to_gdp > 100:
-        phase = "Mid-to-Late Long-Term Debt Cycle"
-        phase_color = "#FFC107"
-    else:
-        phase = "Mid Long-Term Debt Cycle"
-        phase_color = "#00FF94"
-
+def render_section_header(num: str, name: str):
     st.markdown(
-        f"<h3 style='color:{phase_color}'>Current Phase: {phase}</h3>",
+        f"""
+<div class="section-card">
+    <div class="section-num">§ {num}</div>
+    <div class="section-name">{name}</div>
+</div>
+""",
         unsafe_allow_html=True,
     )
-    st.caption(
-        f"Debt/GDP: {_fmt(debt_to_gdp, '%')} · "
-        f"2y/10y: {'Inverted' if inverted else 'Positive'}"
-    )
 
-    # ---- Short-term ----
-    st.subheader("Short-Term Cycle Indicators")
 
-    fed_funds, fed_funds_prior = df_.fred_latest("FEDFUNDS")
-    cpi_yoy, cpi_yoy_prior = df_.fred_yoy("CPIAUCSL")
-    pce_yoy, pce_yoy_prior = df_.fred_yoy("PCEPILFE")
-    m2_yoy, m2_yoy_prior = df_.fred_yoy("M2SL")
-    bank_credit_yoy, bank_credit_yoy_prior = df_.fred_yoy("TOTBKCR")
-    consumer_credit_yoy, consumer_credit_yoy_prior = df_.fred_yoy("TOTALSL")
+def run_full_cycle():
+    today = today_str()
+    st.session_state.memo_sections = []
+    st.session_state.memo_kind = "full"
+    st.session_state.memo_topic = ""
 
-    short_term = [
-        ("Fed Funds Rate", "FEDFUNDS", fed_funds,
-         (fed_funds - fed_funds_prior) if (fed_funds and fed_funds_prior) else None,
-         "%", " pp"),
-        ("CPI YoY", "CPIAUCSL_yoy", cpi_yoy,
-         (cpi_yoy - cpi_yoy_prior) if (cpi_yoy and cpi_yoy_prior) else None,
-         "%", " pp"),
-        ("Core PCE YoY", "PCEPILFE_yoy", pce_yoy,
-         (pce_yoy - pce_yoy_prior) if (pce_yoy and pce_yoy_prior) else None,
-         "%", " pp"),
-        ("M2 YoY", "M2SL_yoy", m2_yoy,
-         (m2_yoy - m2_yoy_prior) if (m2_yoy and m2_yoy_prior) else None,
-         "%", " pp"),
-        ("Bank Credit YoY", "TOTBKCR_yoy", bank_credit_yoy,
-         (bank_credit_yoy - bank_credit_yoy_prior) if (bank_credit_yoy and bank_credit_yoy_prior) else None,
-         "%", " pp"),
-        ("Consumer Credit YoY", "TOTALSL_yoy", consumer_credit_yoy,
-         (consumer_credit_yoy - consumer_credit_yoy_prior) if (consumer_credit_yoy and consumer_credit_yoy_prior) else None,
-         "%", " pp"),
-    ]
+    progress = st.progress(0.0, text="initializing…")
 
-    cols = st.columns(3)
-    for i, (label, key, value, delta, vsuffix, dsuffix) in enumerate(short_term):
-        with cols[i % 3]:
-            _metric_card(label, value, delta, value_suffix=vsuffix, delta_suffix=dsuffix)
-            _sparkline(key, label, chart_key=f"spark_st_{key}_{i}")
+    for i, (title, build_prompt) in enumerate(SECTIONS):
+        render_section_header(f"{i+1:02d} / {len(SECTIONS):02d}", title)
+        progress.progress(i / len(SECTIONS), text=f"{title} …")
 
-    # ---- Long-term ----
-    st.subheader("Long-Term Cycle Indicators")
+        try:
+            full_text = st.write_stream(stream_research(build_prompt(today), api_key))
+            if not isinstance(full_text, str):
+                full_text = "".join(full_text) if full_text else ""
+            st.session_state.memo_sections.append((title, full_text))
+        except anthropic.APIStatusError as e:
+            msg = getattr(e, "message", str(e))
+            st.error(f"API error in {title}: {msg}")
+            st.session_state.memo_sections.append((title, f"_API error: {msg}_"))
+        except Exception as e:  # noqa: BLE001
+            st.error(f"Error in {title}: {e}")
+            st.session_state.memo_sections.append((title, f"_Error: {e}_"))
 
-    debt_to_gdp_now, debt_to_gdp_prior = df_.fred_latest("GFDEGDQ188S")
-    total_debt_now, total_debt_prior = df_.fred_latest("GFDEBTN")
-    interest_pay = df_.fred_series("A091RC1Q027SBEA")
-    revenue = df_.fred_series("W006RC1Q027SBEA")
-    interest_pct = None
-    interest_pct_prior = None
-    if not interest_pay.empty and not revenue.empty:
-        ratio = (interest_pay / revenue * 100).dropna()
-        if len(ratio) >= 1:
-            interest_pct = float(ratio.iloc[-1])
-        if len(ratio) >= 2:
-            interest_pct_prior = float(ratio.iloc[-2])
-    dsr_now, dsr_prior = df_.fred_latest("TDSP")
-    hy_now, hy_prior = df_.fred_latest("BAMLH0A0HYM2")
-    delinq_now, delinq_prior = df_.fred_latest("DRCCLACBS")
+        progress.progress((i + 1) / len(SECTIONS), text=f"{title} complete")
 
-    long_term = [
-        ("Federal Debt / GDP", "GFDEGDQ188S", debt_to_gdp_now,
-         (debt_to_gdp_now - debt_to_gdp_prior) if (debt_to_gdp_now and debt_to_gdp_prior) else None,
-         "%", " pp"),
-        ("Total Public Debt ($T)", "GFDEBTN",
-         total_debt_now / 1_000_000 if total_debt_now else None,
-         ((total_debt_now - total_debt_prior) / 1_000_000) if (total_debt_now and total_debt_prior) else None,
-         "T", " T"),
-        ("Interest / Revenue", "INTEREST_RATIO", interest_pct,
-         (interest_pct - interest_pct_prior) if (interest_pct and interest_pct_prior) else None,
-         "%", " pp"),
-        ("HH Debt Service Ratio", "TDSP", dsr_now,
-         (dsr_now - dsr_prior) if (dsr_now and dsr_prior) else None,
-         "%", " pp"),
-        ("HY Credit Spread", "BAMLH0A0HYM2", hy_now,
-         (hy_now - hy_prior) if (hy_now and hy_prior) else None,
-         "%", " pp"),
-        ("Consumer Loan Delinq.", "DRCCLACBS", delinq_now,
-         (delinq_now - delinq_prior) if (delinq_now and delinq_prior) else None,
-         "%", " pp"),
-    ]
-    cols = st.columns(3)
-    for i, (label, key, value, delta, vsuffix, dsuffix) in enumerate(long_term):
-        with cols[i % 3]:
-            _metric_card(label, value, delta, value_suffix=vsuffix, delta_suffix=dsuffix)
-            _sparkline_10y(key, label, chart_key=f"spark_lt_{key}_{i}")
+    progress.progress(1.0, text="memo complete")
 
-    st.subheader("US Federal Debt to GDP (1970–present)")
-    st.plotly_chart(_debt_to_gdp_chart(), use_container_width=True, key="debt_gdp_chart")
 
-    st.subheader("M2 Money Supply vs CPI (last 20 years)")
-    st.plotly_chart(_m2_vs_cpi_chart(), use_container_width=True, key="debt_m2_cpi")
-    _last_updated()
+def run_deep_dive(query: str):
+    today = today_str()
+    st.session_state.memo_sections = []
+    st.session_state.memo_kind = "deep"
+    st.session_state.memo_topic = query
 
-
-def _sparkline(key, label, chart_key):
-    series_id = key.replace("_yoy", "")
-    s = df_.fred_series(series_id)
-    if s.empty:
-        return
-    if key.endswith("_yoy"):
-        s = (s.pct_change(periods=12) * 100).dropna()
-    s = _last(s, 2) if not s.empty else s
-    if s.empty:
-        return
-    fig = go.Figure(go.Scatter(x=s.index, y=s.values, mode="lines",
-                               line=dict(color="#00FF94", width=2)))
-    fig.update_layout(height=80, margin=dict(l=0, r=0, t=0, b=0),
-                      xaxis=dict(visible=False), yaxis=dict(visible=False),
-                      template="plotly_dark", showlegend=False)
-    st.plotly_chart(fig, use_container_width=True, key=chart_key)
-
-
-def _sparkline_10y(key, label, chart_key):
-    if key == "INTEREST_RATIO":
-        ip = df_.fred_series("A091RC1Q027SBEA")
-        rv = df_.fred_series("W006RC1Q027SBEA")
-        if ip.empty or rv.empty:
-            return
-        s = _last((ip / rv * 100).dropna(), 10)
-    else:
-        s = df_.fred_series(key)
-        if s.empty:
-            return
-        s = _last(s, 10)
-    if s.empty:
-        return
-    fig = go.Figure(go.Scatter(x=s.index, y=s.values, mode="lines",
-                               line=dict(color="#00FF94", width=2)))
-    fig.update_layout(height=100, margin=dict(l=0, r=0, t=0, b=0),
-                      xaxis=dict(visible=False), yaxis=dict(visible=True),
-                      template="plotly_dark", showlegend=False)
-    st.plotly_chart(fig, use_container_width=True, key=chart_key)
-
-
-def _debt_to_gdp_chart():
-    s = df_.fred_series("GFDEGDQ188S", observation_start="1970-01-01")
-    rec = df_.fred_series("USREC", observation_start="1970-01-01")
-    fig = go.Figure()
-    if not s.empty:
-        fig.add_trace(go.Scatter(x=s.index, y=s.values, mode="lines",
-                                 name="Debt/GDP", line=dict(color="#00FF94", width=2)))
-        current = float(s.iloc[-1])
-        fig.add_hline(y=current, line=dict(color="#FFC107", dash="dash"),
-                      annotation_text=f"Current: {current:.0f}%")
-    if not rec.empty:
-        rec.index = pd.to_datetime(rec.index)
-        in_recession = False
-        start = None
-        for date, val in rec.items():
-            if val == 1 and not in_recession:
-                start = date
-                in_recession = True
-            elif val == 0 and in_recession:
-                fig.add_vrect(x0=start, x1=date, fillcolor="gray",
-                              opacity=0.2, line_width=0)
-                in_recession = False
-        if in_recession and start is not None:
-            fig.add_vrect(x0=start, x1=rec.index[-1], fillcolor="gray",
-                          opacity=0.2, line_width=0)
-    fig.update_layout(height=420, template="plotly_dark",
-                      margin=dict(l=20, r=20, t=20, b=20),
-                      yaxis_title="% of GDP")
-    return fig
-
-
-def _m2_vs_cpi_chart():
-    m2 = df_.fred_series("M2SL", observation_start="2005-01-01")
-    cpi = df_.fred_series("CPIAUCSL", observation_start="2005-01-01")
-    fig = make_subplots(specs=[[{"secondary_y": True}]])
-    if not m2.empty:
-        fig.add_trace(go.Scatter(x=m2.index, y=m2.values, mode="lines",
-                                 name="M2 ($B)", line=dict(color="#00FF94")),
-                      secondary_y=False)
-    if not cpi.empty:
-        fig.add_trace(go.Scatter(x=cpi.index, y=cpi.values, mode="lines",
-                                 name="CPI Index", line=dict(color="#FFC107")),
-                      secondary_y=True)
-    fig.update_layout(height=420, template="plotly_dark",
-                      margin=dict(l=20, r=20, t=20, b=20),
-                      legend=dict(orientation="h", y=1.05))
-    fig.update_yaxes(title_text="M2 ($B)", secondary_y=False)
-    fig.update_yaxes(title_text="CPI Index", secondary_y=True)
-    return fig
-
-
-# ---------------------------------------------------------------------------
-# Tab 3 — Bonds
-# ---------------------------------------------------------------------------
-def render_bonds():
-    st.header("Bonds & Yield Curve")
-
-    curve = df_.yield_curve_snapshot()
-    if curve.empty or curve["current"].isna().all():
-        st.warning("Yield curve data unavailable (FRED key missing).")
-    else:
-        fig = go.Figure()
-        for col, label, color in [
-            ("two_years_ago", "2 Years Ago", "#666666"),
-            ("year_ago", "1 Year Ago", "#FFC107"),
-            ("current", "Current", "#00FF94"),
-        ]:
-            fig.add_trace(go.Scatter(
-                x=curve["tenor"], y=curve[col], mode="lines+markers",
-                name=label, line=dict(color=color,
-                                       width=3 if col == "current" else 2)))
-        fig.update_layout(height=420, template="plotly_dark",
-                          margin=dict(l=20, r=20, t=20, b=20),
-                          xaxis_title="Tenor", yaxis_title="Yield (%)",
-                          legend=dict(orientation="h", y=1.05))
-        st.plotly_chart(fig, use_container_width=True, key="yield_curve_chart")
-
-    st.subheader("Key Spreads")
-    # Treasury yields from yfinance (returned directly as percent).
-    # ^IRX = 3M T-bill, ^FVX = 5Y (used as 2Y proxy), ^TNX = 10Y, ^TYX = 30Y
-    yields = df_.get_treasury_yields()
-    y2, y10, y30 = yields["y2"], yields["y10"], yields["y30"]
-    y3m, _ = df_.get_price("^IRX")
-    # Credit spreads stay on FRED — no equivalent yfinance ticker
-    hy, _ = df_.fred_latest("BAMLH0A0HYM2")
-    ig, _ = df_.fred_latest("BAMLC0A0CM")
-
-    cols = st.columns(5)
-    s_2_10 = (y10 - y2) * 100 if (y10 and y2) else None
-    s_3m_10 = (y10 - y3m) * 100 if (y10 and y3m) else None
-    s_10_30 = (y30 - y10) * 100 if (y30 and y10) else None
-    with cols[0]:
-        st.metric("2Y/10Y Spread",
-                  f"{s_2_10:+.0f} bps" if s_2_10 is not None else "—",
-                  delta="Inverted" if (s_2_10 is not None and s_2_10 < 0) else "Positive",
-                  delta_color="inverse" if (s_2_10 is not None and s_2_10 < 0) else "normal")
-    with cols[1]:
-        st.metric("3M/10Y Spread",
-                  f"{s_3m_10:+.0f} bps" if s_3m_10 is not None else "—",
-                  delta="Inverted" if (s_3m_10 is not None and s_3m_10 < 0) else "Positive",
-                  delta_color="inverse" if (s_3m_10 is not None and s_3m_10 < 0) else "normal")
-    with cols[2]:
-        st.metric("10Y/30Y Spread",
-                  f"{s_10_30:+.0f} bps" if s_10_30 is not None else "—")
-    with cols[3]:
-        _metric_card("HY Credit Spread", hy, value_suffix="%")
-    with cols[4]:
-        _metric_card("IG Credit Spread", ig, value_suffix="%")
-
-    if s_2_10 is not None and s_2_10 < 0:
-        st.error("Yield curve inverted (2Y > 10Y). Historical recession signal.")
-
-    st.subheader("Inflation Expectations")
-    be5, _ = df_.fred_latest("T5YIE")
-    be10, _ = df_.fred_latest("T10YIE")
-    fwd5y5y, _ = df_.fred_latest("T5YIFR")
-    cols = st.columns(3)
-    with cols[0]:
-        _metric_card("5Y Breakeven", be5, value_suffix="%")
-    with cols[1]:
-        _metric_card("10Y Breakeven", be10, value_suffix="%")
-    with cols[2]:
-        _metric_card("5Y5Y Forward", fwd5y5y, value_suffix="%")
-
-    fig = go.Figure()
-    for series_id, label, color in [("T5YIE", "5Y Breakeven", "#00FF94"),
-                                     ("T10YIE", "10Y Breakeven", "#FFC107"),
-                                     ("T5YIFR", "5Y5Y Forward", "#FF6B9D")]:
-        s = df_.fred_series(series_id)
-        if s.empty:
-            continue
-        s = _last(s, 2)
-        fig.add_trace(go.Scatter(x=s.index, y=s.values, mode="lines",
-                                 name=label, line=dict(color=color)))
-    fig.update_layout(height=320, template="plotly_dark",
-                      margin=dict(l=20, r=20, t=20, b=20),
-                      legend=dict(orientation="h", y=1.05),
-                      yaxis_title="%")
-    st.plotly_chart(fig, use_container_width=True, key="bonds_inflation_exp")
-
-    st.subheader("Bond ETFs")
-    bond_etfs = {"TLT": "TLT (20Y+ Treasury)", "IEF": "IEF (7-10Y)",
-                 "HYG": "HYG (High Yield)", "LQD": "LQD (Inv Grade)",
-                 "TIP": "TIP (TIPS)"}
-    quotes = df_.yf_quotes(list(bond_etfs.keys()))
-    cols = st.columns(5)
-    for col, (ticker, label) in zip(cols, bond_etfs.items()):
-        q = quotes[ticker]
-        with col:
-            _metric_card(label, q["price"], q["change_pct"])
-
-    fig = _normalized_performance_chart(bond_etfs, period="1y")
-    st.plotly_chart(fig, use_container_width=True, key="bonds_etfs_norm")
-    _last_updated()
-
-
-# ---------------------------------------------------------------------------
-# Tab 4 — Macro Data
-# ---------------------------------------------------------------------------
-def render_macro():
-    st.header("Macro Data")
-
-    st.subheader("US Economic Indicators")
-    indicators = [
-        ("CPI Headline YoY", "CPIAUCSL", "yoy", "%"),
-        ("Core CPI YoY", "CPILFESL", "yoy", "%"),
-        ("PCE YoY", "PCEPI", "yoy", "%"),
-        ("Core PCE YoY", "PCEPILFE", "yoy", "%"),
-        ("Unemployment Rate", "UNRATE", "level", "%"),
-        ("Nonfarm Payrolls (MoM, K)", "PAYEMS", "diff", "K"),
-        ("Manufacturing Employment", "MANEMP", "yoy", "%"),
-        ("Retail Sales MoM", "RSAFS", "pct_change", "%"),
-        ("Industrial Production", "INDPRO", "level", ""),
-        ("Housing Starts (K)", "HOUST", "level", "K"),
-        ("Consumer Sentiment", "UMCSENT", "level", ""),
-        ("GDP Growth Rate", "A191RL1Q225SBEA", "level", "%"),
-    ]
-    rows = []
-    for label, series_id, mode, suffix in indicators:
-        s = df_.fred_series(series_id)
-        if s.empty or len(s) < 2:
-            rows.append({"Indicator": label, "Current": "—", "Prior": "—",
-                         "Change": "—", "Direction": "—"})
-            continue
-        if mode == "yoy":
-            yoy = (s.pct_change(periods=12) * 100).dropna()
-            current = float(yoy.iloc[-1])
-            prior = float(yoy.iloc[-2])
-        elif mode == "pct_change":
-            pc = (s.pct_change() * 100).dropna()
-            current = float(pc.iloc[-1])
-            prior = float(pc.iloc[-2]) if len(pc) > 1 else None
-        elif mode == "diff":
-            d = s.diff().dropna()
-            current = float(d.iloc[-1])
-            prior = float(d.iloc[-2]) if len(d) > 1 else None
-            # Payrolls are reported in thousands and read better as integers
-            if series_id == "PAYEMS":
-                current = round(current)
-                prior = round(prior) if prior is not None else None
-        else:
-            current = float(s.iloc[-1])
-            prior = float(s.iloc[-2])
-        change = (current - prior) if prior is not None else None
-        if change is None:
-            arrow = "—"
-        elif change > 0:
-            arrow = "▲"
-        elif change < 0:
-            arrow = "▼"
-        else:
-            arrow = "—"
-        is_payrolls = mode == "diff" and series_id == "PAYEMS"
-        current_str = f"{int(current):,}{suffix}" if is_payrolls else f"{current:,.2f}{suffix}"
-        if prior is None:
-            prior_str = "—"
-        else:
-            prior_str = f"{int(prior):,}{suffix}" if is_payrolls else f"{prior:,.2f}{suffix}"
-        rows.append({
-            "Indicator": label,
-            "Current": current_str,
-            "Prior": prior_str,
-            "Change": f"{change:+.2f}" if change is not None else "—",
-            "Direction": arrow,
-        })
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("**CPI vs Core PCE YoY (5y)**")
-        fig = go.Figure()
-        for sid, label, color in [("CPIAUCSL", "CPI", "#00FF94"),
-                                   ("PCEPILFE", "Core PCE", "#FFC107")]:
-            s = df_.fred_series(sid)
-            if s.empty:
-                continue
-            yoy = _last((s.pct_change(periods=12) * 100).dropna(), 5)
-            fig.add_trace(go.Scatter(x=yoy.index, y=yoy.values, mode="lines",
-                                     name=label, line=dict(color=color)))
-        fig.update_layout(height=300, template="plotly_dark",
-                          margin=dict(l=20, r=20, t=20, b=20),
-                          legend=dict(orientation="h", y=1.05))
-        st.plotly_chart(fig, use_container_width=True, key="macro_cpi_pce")
-
-        st.markdown("**GDP Growth Rate (10y)**")
-        s = df_.fred_series("A191RL1Q225SBEA")
-        fig = go.Figure()
-        if not s.empty:
-            s = _last(s, 10)
-            fig.add_trace(go.Bar(x=s.index, y=s.values, name="GDP",
-                                 marker_color="#00FF94"))
-        fig.update_layout(height=300, template="plotly_dark",
-                          margin=dict(l=20, r=20, t=20, b=20))
-        st.plotly_chart(fig, use_container_width=True, key="macro_gdp")
-
-    with c2:
-        st.markdown("**Unemployment Rate (10y)**")
-        s = df_.fred_series("UNRATE")
-        fig = go.Figure()
-        if not s.empty:
-            s = _last(s, 10)
-            fig.add_trace(go.Scatter(x=s.index, y=s.values, mode="lines",
-                                     line=dict(color="#FF6B9D", width=2)))
-        fig.update_layout(height=300, template="plotly_dark",
-                          margin=dict(l=20, r=20, t=20, b=20))
-        st.plotly_chart(fig, use_container_width=True, key="macro_unemployment")
-
-        st.markdown("**Retail Sales (5y)**")
-        s = df_.fred_series("RSAFS")
-        fig = go.Figure()
-        if not s.empty:
-            s = _last(s, 5)
-            fig.add_trace(go.Scatter(x=s.index, y=s.values, mode="lines",
-                                     line=dict(color="#FFC107", width=2)))
-        fig.update_layout(height=300, template="plotly_dark",
-                          margin=dict(l=20, r=20, t=20, b=20))
-        st.plotly_chart(fig, use_container_width=True, key="macro_retail")
-
-    st.divider()
-    st.subheader("Global Indicators")
-    quotes = df_.yf_quotes(list(df_.GLOBAL_ETFS.keys()))
-    cols = st.columns(6)
-    for col, (ticker, label) in zip(cols, df_.GLOBAL_ETFS.items()):
-        q = quotes[ticker]
-        with col:
-            _metric_card(label, q["price"], q["change_pct"])
-    _last_updated()
-
-
-# ---------------------------------------------------------------------------
-# Tab 5 — Commodities
-# ---------------------------------------------------------------------------
-def render_commodities():
-    st.header("Commodities")
-
-    energy = {"CL=F": "WTI Crude", "BZ=F": "Brent",
-              "NG=F": "Natural Gas", "RB=F": "Gasoline"}
-    metals = {"GC=F": "Gold", "SI=F": "Silver",
-              "HG=F": "Copper", "PL=F": "Platinum"}
-    agri = {"ZW=F": "Wheat", "ZC=F": "Corn",
-            "ZS=F": "Soybeans", "KC=F": "Coffee"}
-
-    for section, mapping in [("Energy", energy), ("Metals", metals),
-                              ("Agriculture", agri)]:
-        st.subheader(section)
-        quotes = df_.yf_quotes(list(mapping.keys()))
-        cols = st.columns(4)
-        for col, (ticker, label) in zip(cols, mapping.items()):
-            q = quotes[ticker]
-            with col:
-                st.metric(
-                    label,
-                    _fmt(q["price"]),
-                    delta=(_delta_str(q["change_pct"]) or "—") + "  ·  1m: "
-                          + (_delta_str(q["month_change_pct"]) or "—"),
-                )
-
-    st.divider()
-    st.subheader("Macro Signals")
-    gold_q = df_.yf_quote("GC=F")
-    copper_q = df_.yf_quote("HG=F")
-    wti_q = df_.yf_quote("CL=F")
-    # Multiply copper price by 1000 to get a readable ratio (Cu in $/lb,
-    # Au in $/oz, raw ratio is < 0.005).
-    cu_au = ((copper_q["price"] * 1000) / gold_q["price"]) if (copper_q["price"] and gold_q["price"]) else None
-    au_oil = (gold_q["price"] / wti_q["price"]) if (gold_q["price"] and wti_q["price"]) else None
-
-    risk_signal = None
-    cu_hist = df_.yf_history("HG=F", period="1y")
-    au_hist = df_.yf_history("GC=F", period="1y")
-    if not cu_hist.empty and not au_hist.empty:
-        cu = cu_hist["Close"].dropna()
-        au = au_hist["Close"].dropna()
-        common = cu.index.intersection(au.index)
-        if len(common) > 50:
-            ratio = (cu.loc[common] * 1000 / au.loc[common]).dropna()
-            if len(ratio) > 50:
-                ma50 = ratio.rolling(50).mean()
-                risk_signal = "Risk-On" if ratio.iloc[-1] > ma50.iloc[-1] else "Risk-Off"
-
-    cols = st.columns(3)
-    with cols[0]:
-        st.metric(
-            "Copper/Gold Ratio (x1000)",
-            _fmt(cu_au, decimals=2),
-            delta=risk_signal,
-            delta_color="normal" if risk_signal == "Risk-On" else "inverse",
-        )
-    with cols[1]:
-        _metric_card("Gold/Oil Ratio", au_oil)
-
-    st.subheader("WTI — 50/200 day MA")
-    st.plotly_chart(_price_with_mas("CL=F", "WTI Crude"),
-                    use_container_width=True, key="commodities_wti_ma")
-    st.subheader("Gold — 50/200 day MA")
-    st.plotly_chart(_price_with_mas("GC=F", "Gold"),
-                    use_container_width=True, key="commodities_gold_ma")
-
-    st.subheader("1-Year Normalized Performance")
-    fig = _normalized_performance_chart(
-        {"CL=F": "WTI", "GC=F": "Gold", "HG=F": "Copper", "NG=F": "Nat Gas"},
-        period="1y",
-    )
-    st.plotly_chart(fig, use_container_width=True, key="commodities_norm")
-    _last_updated()
-
-
-def _price_with_mas(ticker, label):
-    hist = df_.yf_history(ticker, period="1y")
-    fig = go.Figure()
-    if hist.empty:
-        return fig
-    closes = hist["Close"].dropna()
-    fig.add_trace(go.Scatter(x=closes.index, y=closes.values, mode="lines",
-                             name=label, line=dict(color="#00FF94", width=2)))
-    if len(closes) > 50:
-        ma50 = closes.rolling(50).mean()
-        fig.add_trace(go.Scatter(x=ma50.index, y=ma50.values, mode="lines",
-                                 name="50d MA", line=dict(color="#FFC107", width=1)))
-    if len(closes) > 200:
-        ma200 = closes.rolling(200).mean()
-        fig.add_trace(go.Scatter(x=ma200.index, y=ma200.values, mode="lines",
-                                 name="200d MA", line=dict(color="#FF6B9D", width=1)))
-    fig.update_layout(height=320, template="plotly_dark",
-                      margin=dict(l=20, r=20, t=20, b=20),
-                      legend=dict(orientation="h", y=1.05))
-    return fig
-
-
-# ---------------------------------------------------------------------------
-# Tab 6 — Currencies
-# ---------------------------------------------------------------------------
-def render_fx():
-    st.header("Currencies")
-
-    dxy_q = df_.yf_quote("DX-Y.NYB")
-    st.metric("DXY (US Dollar Index)", _fmt(dxy_q["price"]),
-              delta=_delta_str(dxy_q["change_pct"]))
-    dxy_hist = df_.yf_history("DX-Y.NYB", period="1y")
-    if not dxy_hist.empty:
-        fig = go.Figure(go.Scatter(x=dxy_hist.index, y=dxy_hist["Close"],
-                                   mode="lines", line=dict(color="#00FF94", width=2)))
-        fig.update_layout(height=300, template="plotly_dark",
-                          margin=dict(l=20, r=20, t=20, b=20),
-                          yaxis_title="DXY")
-        st.plotly_chart(fig, use_container_width=True, key="fx_dxy_1y")
-
-    st.subheader("Major Pairs")
-    majors = {"EURUSD=X": "EUR/USD", "GBPUSD=X": "GBP/USD",
-              "JPY=X": "USD/JPY", "CHF=X": "USD/CHF",
-              "AUDUSD=X": "AUD/USD", "CAD=X": "USD/CAD"}
-    quotes = df_.yf_quotes(list(majors.keys()))
-    cols = st.columns(6)
-    for col, (ticker, label) in zip(cols, majors.items()):
-        q = quotes[ticker]
-        with col:
-            _metric_card(label, q["price"], q["change_pct"], decimals=4)
-
-    st.subheader("EM & Strategic Pairs")
-    em = {"CNY=X": "USD/CNY", "INR=X": "USD/INR",
-          "BRL=X": "USD/BRL", "MXN=X": "USD/MXN",
-          "SAR=X": "USD/SAR", "RUB=X": "USD/RUB"}
-    quotes = df_.yf_quotes(list(em.keys()))
-    cols = st.columns(6)
-    for col, (ticker, label) in zip(cols, em.items()):
-        q = quotes[ticker]
-        with col:
-            _metric_card(label, q["price"], q["change_pct"], decimals=4)
-
-    st.subheader("Crypto as Macro Signal")
-    crypto = {"BTC-USD": "Bitcoin", "ETH-USD": "Ethereum"}
-    quotes = df_.yf_quotes(list(crypto.keys()))
-    cols = st.columns(2)
-    for col, (ticker, label) in zip(cols, crypto.items()):
-        q = quotes[ticker]
-        with col:
-            _metric_card(label, q["price"], q["change_pct"])
-
-    st.subheader("DXY vs EUR/USD vs USD/CNY (1y normalized)")
-    fig = _normalized_performance_chart(
-        {"DX-Y.NYB": "DXY", "EURUSD=X": "EUR/USD", "CNY=X": "USD/CNY"},
-        period="1y",
-    )
-    st.plotly_chart(fig, use_container_width=True, key="fx_3way_norm")
-    st.caption(
-        "DXY strength = dollar hegemony signal. CNY weakness = capital flight / "
-        "trade war pressure."
-    )
-    _last_updated()
-
-
-# ---------------------------------------------------------------------------
-# Tab 7 — Equities
-# ---------------------------------------------------------------------------
-def render_equities():
-    st.header("Equities")
-
-    st.subheader("Market Breadth")
-    breadth = {"SPY": "S&P 500 (SPY)", "QQQ": "Nasdaq (QQQ)",
-               "IWM": "Russell 2000 (IWM)", "DIA": "Dow (DIA)"}
-    quotes = df_.yf_quotes(list(breadth.keys()))
-    cols = st.columns(4)
-    for col, (ticker, label) in zip(cols, breadth.items()):
-        q = quotes[ticker]
-        with col:
-            _metric_card(label, q["price"], q["change_pct"])
-
-    st.subheader("SPY — 50/200 day MA")
-    st.plotly_chart(_price_with_mas("SPY", "SPY"),
-                    use_container_width=True, key="equities_spy_ma")
-
-    st.subheader("Sector Performance YTD")
-    sector_data = []
-    for ticker, label in df_.SECTOR_ETFS.items():
-        ytd = df_.yf_ytd_change(ticker)
-        sector_data.append({
-            "sector": f"{ticker} — {label}",
-            "ytd": ytd if ytd is not None else 0,
-        })
-    if sector_data:
-        sector_df = pd.DataFrame(sector_data).sort_values("ytd")
-        colors = ["#00FF94" if v >= 0 else "#FF4B4B" for v in sector_df["ytd"]]
-        fig = go.Figure(go.Bar(x=sector_df["ytd"], y=sector_df["sector"],
-                               orientation="h", marker_color=colors))
-        fig.update_layout(height=420, template="plotly_dark",
-                          margin=dict(l=20, r=20, t=20, b=20),
-                          xaxis_title="YTD %")
-        st.plotly_chart(fig, use_container_width=True, key="equities_sectors")
-
-    st.subheader("Major Stock Performance")
-    quotes = df_.yf_quotes(df_.MAJOR_STOCKS)
-    rows = []
-    for ticker in df_.MAJOR_STOCKS:
-        q = quotes[ticker]
-        ytd = df_.yf_ytd_change(ticker)
-        rows.append({"Ticker": ticker, "Price": _fmt(q["price"]),
-                     "Daily %": _delta_str(q["change_pct"]) or "—",
-                     "YTD %": f"{ytd:+.2f}%" if ytd is not None else "—"})
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-
-    st.subheader("Recent Earnings — Last Reported Quarter")
-    earnings_rows = []
-    for ticker in df_.EARNINGS_STOCKS:
-        e = df_.latest_earnings(ticker)
-        earnings_rows.append({
-            "Ticker": ticker,
-            "Quarter": e.get("quarter") or "—",
-            "Revenue": f"${e['revenue']/1e9:,.2f}B" if e["revenue"] else "—",
-            "Rev YoY": f"{e['revenue_yoy']:+.2f}%" if e["revenue_yoy"] else "—",
-            "EPS (TTM)": f"{e['eps']:.2f}" if e["eps"] is not None else "—",
-            "EPS YoY": f"{e['eps_yoy']:+.2f}%" if e.get("eps_yoy") else "—",
-            "Net Income": f"${e['net_income']/1e9:,.2f}B" if e["net_income"] else "—",
-            "Gross Margin": f"{e['gross_margin']:.1f}%" if e["gross_margin"] else "—",
-        })
-    st.dataframe(pd.DataFrame(earnings_rows), use_container_width=True, hide_index=True)
-
-    st.subheader("Analyst Headlines")
-    if not df_.has_news():
-        st.info("Set NEWS_API_KEY to populate this section.")
-    else:
-        for ticker in df_.EARNINGS_STOCKS:
-            with st.expander(f"{ticker} — recent coverage"):
-                articles = df_.get_stock_news(ticker)
-                if not articles:
-                    st.caption("No recent headlines.")
-                    continue
-                for a in articles:
-                    st.markdown(
-                        f"**[{a['title']}]({a['url']})** — "
-                        f"_{a.get('source', '')} · {a.get('date', '')}_"
-                    )
-    _last_updated()
-
-
-# ---------------------------------------------------------------------------
-# Tab 8 — Portfolio & Thesis
-# ---------------------------------------------------------------------------
-def render_thesis():
-    st.header("Portfolio & Thesis Tracker")
-    st.caption("Thesis integrity monitor — no P&L, cost basis, or dollar amounts.")
-
-    if not te.has_anthropic() or not df_.has_news():
-        st.warning(
-            "Thesis scoring requires both ANTHROPIC_API_KEY and NEWS_API_KEY."
-        )
-
-    if "thesis_results" not in st.session_state:
-        st.session_state["thesis_results"] = {}
-
-    if st.button("Re-Score All Theses", type="primary"):
-        te.score_position.clear()
-        with st.spinner("Pulling news and running Claude scoring..."):
-            for key in te.POSITIONS:
-                st.session_state["thesis_results"][key] = te.score_position(key)
-
-    if not st.session_state["thesis_results"]:
-        with st.spinner("Initial thesis scoring..."):
-            for key in te.POSITIONS:
-                st.session_state["thesis_results"][key] = te.score_position(key)
-
-    results = st.session_state["thesis_results"]
-
-    st.subheader("Summary")
-    summary_rows = []
-    for key, res in results.items():
-        scores = res.get("scores") or {}
-        overall = scores.get("overall_score")
-        verdict = scores.get("overall_verdict") or (res.get("error") or "—")
-        summary_rows.append({
-            "Position": f"{res['name']} ({res['ticker']})",
-            "Overall Score": f"{overall}/10" if overall is not None else "—",
-            "Verdict": verdict,
-            "Last Checked": res.get("timestamp", "—"),
-        })
-    st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
-
-    st.divider()
-
-    for key, res in results.items():
-        _render_position(key, res)
-        st.divider()
-    _last_updated()
-
-
-def _render_position(key, res):
-    st.subheader(f"{res['name']} ({res['ticker']})")
-    with st.expander("Thesis"):
-        st.write(res["thesis"])
-
-    if res.get("error") and not res.get("scores"):
-        st.error(res["error"])
-        return
-
-    scores = res.get("scores") or {}
-    overall = scores.get("overall_score")
-    pillar_scores = scores.get("pillar_scores") or []
-
-    slug = key.lower()
-    c1, c2 = st.columns([1, 2])
-    with c1:
-        st.plotly_chart(_score_gauge(overall),
-                        use_container_width=True,
-                        key=f"thesis_{slug}_gauge")
-        verdict = scores.get("overall_verdict")
-        if verdict:
-            st.markdown(f"**Verdict:** {verdict}")
-
-    with c2:
-        if pillar_scores:
-            labels = [p.get("pillar", "") for p in pillar_scores]
-            values = [p.get("score", 0) for p in pillar_scores]
-            colors = [_score_color(v) for v in values]
-            fig = go.Figure(go.Bar(
-                x=values, y=labels, orientation="h",
-                marker_color=colors,
-                text=[f"{v}/10" for v in values],
-                textposition="auto",
-            ))
-            fig.update_layout(height=320, template="plotly_dark",
-                              margin=dict(l=20, r=20, t=20, b=20),
-                              xaxis=dict(range=[0, 10], title="Score"))
-            st.plotly_chart(fig, use_container_width=True,
-                            key=f"thesis_{slug}_pillars")
-            with st.expander("Pillar reasoning"):
-                for p in pillar_scores:
-                    st.markdown(
-                        f"- **{p.get('pillar', '')}** — {p.get('score', '?')}/10: "
-                        f"{p.get('reasoning', '')}"
-                    )
-
-    confirming = scores.get("confirming_headlines") or []
-    contradicting = scores.get("contradicting_headlines") or []
-    c1, c2 = st.columns(2)
-    with c1:
-        with st.expander(f"Supporting Headlines ({len(confirming)})"):
-            if confirming:
-                for h in confirming:
-                    st.markdown(
-                        f"<span style='color:#00FF94'>✓</span> {h}",
-                        unsafe_allow_html=True,
-                    )
-            else:
-                st.caption("None.")
-    with c2:
-        with st.expander(f"Contradicting Headlines ({len(contradicting)})"):
-            if contradicting:
-                for h in contradicting:
-                    st.markdown(
-                        f"<span style='color:#FF4B4B'>✗</span> {h}",
-                        unsafe_allow_html=True,
-                    )
-            else:
-                st.caption("None.")
-
-    st.caption(f"Last updated: {res.get('timestamp', '—')}")
-
-
-def _score_gauge(score):
-    if score is None:
-        score = 0
-    color = _score_color(score)
-    fig = go.Figure(go.Indicator(
-        mode="gauge+number",
-        value=score,
-        number={"suffix": "/10"},
-        gauge={
-            "axis": {"range": [0, 10]},
-            "bar": {"color": color},
-            "steps": [
-                {"range": [0, 4], "color": "#3a1a1a"},
-                {"range": [4, 7], "color": "#3a3a1a"},
-                {"range": [7, 10], "color": "#1a3a2a"},
-            ],
-        },
-    ))
-    fig.update_layout(height=260, template="plotly_dark",
-                      margin=dict(l=10, r=10, t=20, b=10))
-    return fig
-
-
-def _score_color(score):
+    render_section_header("DEEP DIVE", query.upper())
     try:
-        s = float(score)
-    except (TypeError, ValueError):
-        return "#888888"
-    if s < 4:
-        return "#FF4B4B"
-    if s < 7:
-        return "#FFC107"
-    return "#00FF94"
+        full_text = st.write_stream(stream_research(prompt_deep_dive(today, query), api_key))
+        if not isinstance(full_text, str):
+            full_text = "".join(full_text) if full_text else ""
+        st.session_state.memo_sections.append((query.upper(), full_text))
+    except anthropic.APIStatusError as e:
+        msg = getattr(e, "message", str(e))
+        st.error(f"API error: {msg}")
+        st.session_state.memo_sections.append((query.upper(), f"_API error: {msg}_"))
+    except Exception as e:  # noqa: BLE001
+        st.error(f"Error: {e}")
+        st.session_state.memo_sections.append((query.upper(), f"_Error: {e}_"))
 
 
-# ---------------------------------------------------------------------------
-# Render
-# ---------------------------------------------------------------------------
-with tab_overview:
-    render_overview()
-with tab_debt:
-    render_debt_cycle()
-with tab_bonds:
-    render_bonds()
-with tab_macro:
-    render_macro()
-with tab_commodities:
-    render_commodities()
-with tab_fx:
-    render_fx()
-with tab_equities:
-    render_equities()
-with tab_thesis:
-    render_thesis()
+def assemble_full_memo() -> str:
+    today = today_str()
+    if st.session_state.memo_kind == "deep":
+        header = f"# SIGNAL · DEEP DIVE\n## {st.session_state.memo_topic}\n*{today}*\n\n---\n\n"
+    else:
+        header = f"# SIGNAL · DAILY MEMO\n*{today}*\n\n---\n\n"
+    body = "\n\n---\n\n".join(
+        f"## {title}\n\n{text}" for title, text in st.session_state.memo_sections
+    )
+    return header + body
+
+
+if run_full:
+    run_full_cycle()
+elif run_deep and topic.strip():
+    run_deep_dive(topic.strip())
+elif run_deep and not topic.strip():
+    st.warning("Enter a topic first.")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COPY / DOWNLOAD
+# ─────────────────────────────────────────────────────────────────────────────
+
+if st.session_state.memo_sections:
+    st.markdown("<hr class='gold-rule'>", unsafe_allow_html=True)
+    st.markdown("<div class='status-line'>Export</div>", unsafe_allow_html=True)
+
+    full_memo = assemble_full_memo()
+    today_slug = today_str().replace(",", "").replace(" ", "-")
+    kind = "deep-dive" if st.session_state.memo_kind == "deep" else "daily"
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.download_button(
+            "◆  Download Memo (.md)",
+            data=full_memo,
+            file_name=f"signal-{kind}-{today_slug}.md",
+            mime="text/markdown",
+            use_container_width=True,
+        )
+    with col_b:
+        show_copy = st.toggle("Show copy-ready text", value=False)
+
+    if show_copy:
+        st.markdown(
+            "<div class='status-line'>Tap the copy icon at the top-right of the block</div>",
+            unsafe_allow_html=True,
+        )
+        st.code(full_memo, language="markdown")
+
+st.markdown("<div style='height:4rem'></div>", unsafe_allow_html=True)
+st.markdown(
+    f"""
+<div style="text-align:center; font-family:'Inter',sans-serif; font-size:0.6rem;
+            color:#4a4538; letter-spacing:0.3rem; text-transform:uppercase;
+            margin-top:2rem;">
+    Signal · {MODEL} · web search enabled
+</div>
+""",
+    unsafe_allow_html=True,
+)
