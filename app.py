@@ -1,7 +1,7 @@
 """
 SIGNAL — Ani Singh Private Research Agent
-A two-mode research agent: full 6-section daily cycle, or topic-specific deep dive.
-Powered by Claude with web search.
+Three modes: full 6-section daily cycle, topic deep dive, and an interactive
+3D Global Markets globe. Powered by Claude with web search.
 """
 
 from __future__ import annotations
@@ -13,9 +13,13 @@ from zoneinfo import ZoneInfo
 
 import anthropic
 import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 
 load_dotenv()
+
+_GLOBE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "globe_component")
+globe_markets_component = components.declare_component("signal_globe", path=_GLOBE_DIR)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIG
@@ -187,6 +191,68 @@ Produce a complete memo covering:
 8. TAIL RISK — The scenario that breaks everything in this situation.
 
 Specific numbers only. Skip definitions. Write for a sophisticated investor who already knows the basics."""
+
+
+def prompt_market_analysis(today: str, country: str) -> str:
+    return f"""Today is {today}. Produce a complete market intelligence memo on {country} financial markets.
+
+Use web search aggressively for current data.
+
+Structure the memo as follows:
+
+DEBT CYCLE STAGE
+Where is {country} in the Dalio long-term debt cycle right now? Early, mid, late, or deleveraging? What are the key indicators telling you this — credit growth, debt/GDP, central bank posture, private sector leverage? Be specific with numbers.
+
+GEOPOLITICAL LANDSCAPE
+Key geopolitical risks or tensions involving {country} right now. Any active conflicts, trade disputes, political instability, or election risk. What is the market pricing vs what is actually happening?
+
+MARKET VALUATION
+Current equity market valuation — P/E, P/B, EV/EBITDA vs historical average and vs global peers. Cheap, fair, or expensive? Where is the asymmetry?
+
+EARNINGS GROWTH
+Current and forward earnings growth estimates for the broad market. Which sectors are driving or dragging? Any guidance revision trends?
+
+TOP SECTORS
+The 3-4 dominant sectors by market cap and by growth. What is the structural story of each?
+
+MACRO DATA
+GDP growth rate, inflation, unemployment, current account balance, currency trend. Any divergence from consensus expectations?
+
+TOP EXPORTS & IMPORTS
+The 5 most important exports and imports by value. What does this tell you about the country's structural position in global trade?
+
+TOP TRADING PARTNERS
+The 5 most important trading partners by volume. Any geopolitical tension with key partners?
+
+DALIO/MARKS SYNTHESIS
+One paragraph. Where is this market in the changing world order framework? Is this a rising, peak, or declining power in Dalio's model? What would Marks say about the current risk/reward? Is this a market worth having exposure to right now?
+
+PORTFOLIO RELEVANCE
+Any direct relevance to QCOM (40%), KMI (17%), Salesforce, or Xiaomi positions?
+
+Write in Howard Marks memo style. Specific numbers only. No generic statements."""
+
+
+MARKETS = [
+    {"name": "United States",  "lat": 40.7,  "lng":  -74.0},
+    {"name": "United Kingdom", "lat": 51.5,  "lng":   -0.1},
+    {"name": "Japan",          "lat": 35.7,  "lng":  139.7},
+    {"name": "Germany",        "lat": 50.1,  "lng":    8.7},
+    {"name": "France",         "lat": 48.9,  "lng":    2.3},
+    {"name": "China",          "lat": 31.2,  "lng":  121.5},
+    {"name": "Hong Kong",      "lat": 22.3,  "lng":  114.2},
+    {"name": "India",          "lat": 19.1,  "lng":   72.9},
+    {"name": "Brazil",         "lat": -23.5, "lng":  -46.6},
+    {"name": "Canada",         "lat": 43.7,  "lng":  -79.4},
+    {"name": "Australia",      "lat": -33.9, "lng":  151.2},
+    {"name": "South Korea",    "lat": 37.6,  "lng":  127.0},
+    {"name": "Singapore",      "lat":  1.3,  "lng":  103.8},
+    {"name": "Switzerland",    "lat": 47.4,  "lng":    8.5},
+    {"name": "Saudi Arabia",   "lat": 24.7,  "lng":   46.7},
+    {"name": "Taiwan",         "lat": 25.0,  "lng":  121.5},
+    {"name": "Mexico",         "lat": 19.4,  "lng":  -99.1},
+    {"name": "South Africa",   "lat": -26.2, "lng":   28.0},
+]
 
 
 SECTIONS = [
@@ -423,6 +489,8 @@ if "memo_kind" not in st.session_state:
     st.session_state.memo_kind = None
 if "memo_topic" not in st.session_state:
     st.session_state.memo_topic = ""
+if "last_globe_click_id" not in st.session_state:
+    st.session_state.last_globe_click_id = None
 
 api_key = get_api_key()
 if not api_key:
@@ -453,6 +521,24 @@ with dive_col1:
     )
 with dive_col2:
     run_deep = st.button("Research", key="run_deep", use_container_width=True)
+
+st.markdown("<hr class='gold-rule'>", unsafe_allow_html=True)
+
+# ─── Section III · Global Markets ────────────────────────────────────────────
+st.markdown("<div class='status-line'>III · Global Markets</div>", unsafe_allow_html=True)
+st.markdown(
+    "<div style='font-family:\"Inter\",sans-serif; font-size:0.7rem; color:#6a6555; "
+    "letter-spacing:0.15rem; margin-top:0.4rem; margin-bottom:0.8rem;'>"
+    "Tap a node to generate a country-level intelligence memo."
+    "</div>",
+    unsafe_allow_html=True,
+)
+globe_event = globe_markets_component(
+    markets=MARKETS,
+    height=560,
+    key="signal_globe",
+    default=None,
+)
 
 st.markdown("<hr class='gold-rule'>", unsafe_allow_html=True)
 
@@ -523,10 +609,38 @@ def run_deep_dive(query: str):
         st.session_state.memo_sections.append((query.upper(), f"_Error: {e}_"))
 
 
+def run_market_analysis(country: str):
+    today = today_str()
+    st.session_state.memo_sections = []
+    st.session_state.memo_kind = "market"
+    st.session_state.memo_topic = country
+
+    render_section_header("GLOBAL MARKETS", country.upper())
+    try:
+        full_text = st.write_stream(
+            stream_research(prompt_market_analysis(today, country), api_key)
+        )
+        if not isinstance(full_text, str):
+            full_text = "".join(full_text) if full_text else ""
+        st.session_state.memo_sections.append((country.upper(), full_text))
+    except anthropic.APIStatusError as e:
+        msg = getattr(e, "message", str(e))
+        st.error(f"API error: {msg}")
+        st.session_state.memo_sections.append((country.upper(), f"_API error: {msg}_"))
+    except Exception as e:  # noqa: BLE001
+        st.error(f"Error: {e}")
+        st.session_state.memo_sections.append((country.upper(), f"_Error: {e}_"))
+
+
 def assemble_full_memo() -> str:
     today = today_str()
     if st.session_state.memo_kind == "deep":
         header = f"# SIGNAL · DEEP DIVE\n## {st.session_state.memo_topic}\n*{today}*\n\n---\n\n"
+    elif st.session_state.memo_kind == "market":
+        header = (
+            f"# SIGNAL · GLOBAL MARKETS\n"
+            f"## {st.session_state.memo_topic}\n*{today}*\n\n---\n\n"
+        )
     else:
         header = f"# SIGNAL · DAILY MEMO\n*{today}*\n\n---\n\n"
     body = "\n\n---\n\n".join(
@@ -535,12 +649,22 @@ def assemble_full_memo() -> str:
     return header + body
 
 
+# Detect a fresh globe click (deduplicated by click_id)
+new_globe_click = None
+if isinstance(globe_event, dict):
+    cid = globe_event.get("click_id")
+    if cid and cid != st.session_state.get("last_globe_click_id"):
+        st.session_state.last_globe_click_id = cid
+        new_globe_click = globe_event.get("country")
+
 if run_full:
     run_full_cycle()
 elif run_deep and topic.strip():
     run_deep_dive(topic.strip())
 elif run_deep and not topic.strip():
     st.warning("Enter a topic first.")
+elif new_globe_click:
+    run_market_analysis(new_globe_click)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # COPY / DOWNLOAD
@@ -552,14 +676,23 @@ if st.session_state.memo_sections:
 
     full_memo = assemble_full_memo()
     today_slug = today_str().replace(",", "").replace(" ", "-")
-    kind = "deep-dive" if st.session_state.memo_kind == "deep" else "daily"
+    kind = {
+        "deep": "deep-dive",
+        "market": "market",
+        "full": "daily",
+    }.get(st.session_state.memo_kind, "memo")
 
+    topic_slug = (
+        "-" + st.session_state.memo_topic.lower().replace(" ", "-")
+        if st.session_state.memo_kind in ("deep", "market") and st.session_state.memo_topic
+        else ""
+    )
     col_a, col_b = st.columns(2)
     with col_a:
         st.download_button(
             "◆  Download Memo (.md)",
             data=full_memo,
-            file_name=f"signal-{kind}-{today_slug}.md",
+            file_name=f"signal-{kind}{topic_slug}-{today_slug}.md",
             mime="text/markdown",
             use_container_width=True,
         )
