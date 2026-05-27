@@ -23,18 +23,22 @@
   #globeViz:active { cursor: grabbing; }
 
   .country-label {
+    font-family: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace;
     color: #c9a84c;
     font-size: 11px;
     letter-spacing: 0.18em;
     text-transform: uppercase;
     font-weight: 500;
-    background: rgba(12, 12, 12, 0.85);
-    border: 1px solid rgba(201, 168, 76, 0.5);
-    padding: 4px 10px;
+    background: #141414;
+    border: 1px solid #c9a84c;
+    padding: 6px 12px;
     border-radius: 1px;
     pointer-events: none;
     white-space: nowrap;
+    line-height: 1.6;
   }
+  .country-label .pe-line { color: #e8e3d6; font-size: 10px; letter-spacing: 0.15em; }
+  .country-label .band-line { font-size: 10px; letter-spacing: 0.25em; font-weight: 600; }
 
   #status {
     position: absolute;
@@ -123,14 +127,14 @@
       .atmosphereAltitude(0.18)
       .pointsData(markets)
       .pointLat('lat').pointLng('lng')
-      .pointColor(d => d === lastClicked ? HOT : GOLD)
+      .pointColor(d => d === lastClicked ? HOT : (d.color || GOLD))
       .pointRadius(0.55)
       .pointAltitude(0.012)
-      .pointLabel(d => `<div class="country-label">${d.name}</div>`)
+      .pointLabel(buildLabel)
       .onPointClick(handleClick)
       .ringsData(markets)
       .ringLat('lat').ringLng('lng')
-      .ringColor(d => (t => `rgba(${GOLD_RGB}, ${0.85 * (1 - t)})`))
+      .ringColor(d => (t => hexToRgba(d.color || GOLD, 0.85 * (1 - t))))
       .ringMaxRadius(d => d === lastClicked ? 6 : 2.8)
       .ringPropagationSpeed(d => d === lastClicked ? 3.5 : 1.3)
       .ringRepeatPeriod(d => d === lastClicked ? 600 : 1800)
@@ -162,10 +166,30 @@
   function refreshVisuals() {
     if (!globe) return;
     globe
-      .pointColor(d => d === lastClicked ? HOT : GOLD)
+      .pointColor(d => d === lastClicked ? HOT : (d.color || GOLD))
       .ringMaxRadius(d => d === lastClicked ? 6 : 2.8)
       .ringPropagationSpeed(d => d === lastClicked ? 3.5 : 1.3)
       .ringRepeatPeriod(d => d === lastClicked ? 600 : 1800);
+  }
+
+  function hexToRgba(hex, alpha) {
+    const m = /^#?([a-f0-9]{6})$/i.exec(hex);
+    if (!m) return `rgba(${GOLD_RGB}, ${alpha})`;
+    const v = parseInt(m[1], 16);
+    return `rgba(${(v >> 16) & 255}, ${(v >> 8) & 255}, ${v & 255}, ${alpha})`;
+  }
+
+  function buildLabel(d) {
+    const peLine = (d.pe != null)
+      ? `<div class="pe-line">P/E ${Number(d.pe).toFixed(1)}x</div>`
+      : `<div class="pe-line">No data</div>`;
+    const band = d.band || 'NO DATA';
+    const bandColor = d.color || GOLD;
+    return `<div class="country-label">
+      <div>${d.name}</div>
+      ${peLine}
+      <div class="band-line" style="color:${bandColor}">${band}</div>
+    </div>`;
   }
 
   function handleClick(d) {
