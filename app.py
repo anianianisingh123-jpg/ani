@@ -1,13 +1,18 @@
 """
 SIGNAL — Ani Singh Private Research Agent
-Three modes: full 6-section daily cycle, topic deep dive, and an interactive
-3D Global Markets globe. Powered by Claude with web search.
+Full daily cycle, deep dive, 3D global markets globe with live valuation
+color-coding & divergence alerts, auto-loading Portfolio Pulse, and an
+Earnings Calendar with pre-earnings intelligence briefs.
 """
 
 from __future__ import annotations
 
+import json
 import os
+import re
+import time
 from datetime import datetime
+from pathlib import Path
 from typing import Generator
 from zoneinfo import ZoneInfo
 
@@ -36,6 +41,8 @@ WEB_SEARCH_TOOL = {
 GOLD = "#c9a84c"
 BG = "#0c0c0c"
 
+VALUATION_HISTORY_PATH = Path(__file__).parent / "valuation_history.json"
+
 
 def get_api_key() -> str | None:
     key = os.environ.get("ANTHROPIC_API_KEY")
@@ -51,8 +58,20 @@ def today_str() -> str:
     return datetime.now(ZoneInfo("America/New_York")).strftime("%A, %B %d, %Y")
 
 
+def today_iso() -> str:
+    return datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+
+
+def today_slug_compact() -> str:
+    return datetime.now(ZoneInfo("America/New_York")).strftime("%Y%m%d")
+
+
 def now_str() -> str:
     return datetime.now(ZoneInfo("America/New_York")).strftime("%H:%M ET · %a %b %d")
+
+
+def now_full_str() -> str:
+    return datetime.now(ZoneInfo("America/New_York")).strftime("%B %d, %Y · %H:%M ET")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -266,6 +285,399 @@ SECTIONS = [
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# VALUATION  (yfinance · ETF proxies)
+# ─────────────────────────────────────────────────────────────────────────────
+
+COUNTRY_ETF = {
+    "United States":  "SPY",
+    "United Kingdom": "EWU",
+    "Japan":          "EWJ",
+    "Germany":        "EWG",
+    "France":         "EWQ",
+    "China":          "MCHI",
+    "Hong Kong":      "EWH",
+    "India":          "INDA",
+    "Brazil":         "EWZ",
+    "Canada":         "EWC",
+    "Australia":      "EWA",
+    "South Korea":    "EWY",
+    "Singapore":      "EWS",
+    "Switzerland":    "EWL",
+    "Saudi Arabia":   "KSA",
+    "Taiwan":         "EWT",
+    "Mexico":         "EWW",
+    "South Africa":   "EZA",
+}
+
+BAND_CHEAP     = "CHEAP"
+BAND_FAIR      = "FAIR"
+BAND_ELEVATED  = "ELEVATED"
+BAND_EXPENSIVE = "EXPENSIVE"
+BAND_VERY_EXP  = "VERY EXPENSIVE"
+BAND_NONE      = "NO DATA"
+
+BAND_COLOR = {
+    BAND_CHEAP:     "#4ade80",
+    BAND_FAIR:      "#a3e635",
+    BAND_ELEVATED:  "#f59e0b",
+    BAND_EXPENSIVE: "#f97316",
+    BAND_VERY_EXP:  "#ef4444",
+    BAND_NONE:      GOLD,
+}
+
+BAND_RANK = {
+    BAND_CHEAP: 0, BAND_FAIR: 1, BAND_ELEVATED: 2,
+    BAND_EXPENSIVE: 3, BAND_VERY_EXP: 4, BAND_NONE: -1,
+}
+
+
+def band_for_pe(pe: float | None) -> str:
+    if pe is None or pe <= 0:
+        return BAND_NONE
+    if pe < 12:   return BAND_CHEAP
+    if pe < 16:   return BAND_FAIR
+    if pe < 20:   return BAND_ELEVATED
+    if pe < 24:   return BAND_EXPENSIVE
+    return BAND_VERY_EXP
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_valuations() -> dict:
+    """Pull trailing P/E (fallback forward P/E) for each market ETF. 24h cache."""
+    try:
+        import yfinance as yf  # local import keeps app starting if pkg unavailable
+    except Exception:
+        return {name: {"pe": None, "band": BAND_NONE, "color": GOLD, "etf": etf}
+                for name, etf in COUNTRY_ETF.items()}
+
+    out: dict[str, dict] = {}
+    for name, etf in COUNTRY_ETF.items():
+        pe = None
+        try:
+            info = yf.Ticker(etf).info or {}
+            pe = info.get("trailingPE") or info.get("forwardPE")
+            if pe is not None:
+                try:
+                    pe = float(pe)
+                    if pe <= 0 or pe > 200:
+                        pe = None
+                except Exception:
+                    pe = None
+        except Exception:
+            pe = None
+        band = band_for_pe(pe)
+        out[name] = {
+            "pe": pe,
+            "band": band,
+            "color": BAND_COLOR[band],
+            "etf": etf,
+        }
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# VALUATION HISTORY  &  DIVERGENCE ALERTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _load_history() -> dict:
+    if not VALUATION_HISTORY_PATH.exists():
+        return {}
+    try:
+        with VALUATION_HISTORY_PATH.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def _save_history(data: dict) -> None:
+    try:
+        with VALUATION_HISTORY_PATH.open("w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+    except Exception:
+        pass
+
+
+def update_history_and_detect_shifts(valuations: dict) -> list[dict]:
+    """Append today's readings (max 12 per market, no same-day duplicates) and
+    return a list of band shifts vs the most recent prior entry per market."""
+    history = _load_history()
+    today_key = today_iso()
+    shifts: list[dict] = []
+
+    for country, info in valuations.items():
+        pe = info.get("pe")
+        band = info.get("band", BAND_NONE)
+        if pe is None or band == BAND_NONE:
+            continue
+
+        bucket = history.get(country, [])
+        prior = bucket[-1] if bucket else None
+
+        if prior and prior.get("band") not in (None, BAND_NONE) and prior.get("band") != band:
+            shifts.append({
+                "country": country,
+                "from_band": prior["band"],
+                "to_band": band,
+                "from_pe": prior.get("pe"),
+                "to_pe": pe,
+                "direction": (
+                    "more_expensive"
+                    if BAND_RANK.get(band, -1) > BAND_RANK.get(prior["band"], -1)
+                    else "cheaper"
+                ),
+            })
+
+        entry = {"date": today_key, "pe": round(float(pe), 2), "band": band}
+        if prior and prior.get("date") == today_key:
+            bucket[-1] = entry
+        else:
+            bucket.append(entry)
+        history[country] = bucket[-12:]
+
+    _save_history(history)
+    return shifts
+
+
+# Country → list of position tickers it should alert into
+COUNTRY_TO_POSITIONS = {
+    "United States": ["QCOM", "CRM"],
+    "China":         ["XIAOMI"],
+    "Hong Kong":     ["XIAOMI"],
+    "India":         ["XIAOMI"],
+    "Taiwan":        ["QCOM"],
+    "South Korea":   ["QCOM"],
+    "Saudi Arabia":  ["KMI"],
+    "Canada":        ["KMI"],
+    "Mexico":        ["KMI"],
+}
+
+
+def shifts_for_position(shifts: list[dict], ticker: str) -> list[dict]:
+    out = []
+    for s in shifts:
+        if ticker in COUNTRY_TO_POSITIONS.get(s["country"], []):
+            out.append(s)
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PORTFOLIO PULSE  (Section IV)
+# ─────────────────────────────────────────────────────────────────────────────
+
+POSITIONS = [
+    {
+        "ticker": "QCOM",
+        "name": "Qualcomm",
+        "yf": "QCOM",
+        "weight": "40% WEIGHT",
+        "thesis": (
+            "Edge AI inference dominance in power-constrained environments, "
+            "automotive revenue ramp targeting $4B by 2026, QTL licensing moat, "
+            "structural multi-year advantage over Nvidia and AMD at the edge due "
+            "to mobile power-constraint engineering heritage. TSMC N2 capacity "
+            "ramp is a direct tailwind for QCOM product roadmap."
+        ),
+    },
+    {
+        "ticker": "KMI",
+        "name": "Kinder Morgan",
+        "yf": "KMI",
+        "weight": "17% WEIGHT",
+        "thesis": (
+            "Cash-flow-generative midstream energy infrastructure, natural gas "
+            "demand growth driven by AI data center power buildout, 4–6% "
+            "dividend yield, inflation-resilient real asset, long-duration "
+            "pipeline contracts insulated from commodity price swings."
+        ),
+    },
+    {
+        "ticker": "CRM",
+        "name": "Salesforce",
+        "yf": "CRM",
+        "weight": "CORE HOLDING",
+        "thesis": (
+            "Agentic AI platform consolidation, enterprise software stickiness, "
+            "Agentforce as the dominant AI workflow layer for enterprise, "
+            "remaining performance obligation as forward revenue visibility signal."
+        ),
+    },
+    {
+        "ticker": "XIAOMI",
+        "name": "Xiaomi",
+        "yf": "1810.HK",
+        "weight": "CORE HOLDING",
+        "thesis": (
+            "China consumer recovery, EV optionality with growing delivery "
+            "numbers, global hardware ecosystem expansion, India smartphone "
+            "market share. Watch India revenue concentration — if above 30% of "
+            "total, India credit cycle becomes position-sizing concern."
+        ),
+    },
+]
+
+
+def prompt_portfolio_pulse(today: str, pos: dict) -> str:
+    return f"""Today is {today}. Use web search.
+
+Position check for {pos['ticker']} ({pos['name']}), {pos['weight'].lower()} of portfolio.
+
+Core thesis: {pos['thesis']}
+
+In 4–5 sentences cover:
+1. Any material news, earnings, analyst actions, or price target changes in the last 48 hours
+2. Any development that directly strengthens or challenges the core thesis
+3. Status verdict: THESIS INTACT, WATCH, or ALERT and one sentence explaining why
+
+Be direct. No filler. If nothing material happened say so plainly."""
+
+
+def classify_status(text: str) -> tuple[str, str]:
+    """Return (label, color) by scanning the model output for the verdict."""
+    upper = text.upper()
+    # Look at the last 600 chars for the verdict line
+    tail = upper[-800:]
+    if "ALERT" in tail and "INTACT" not in tail.split("ALERT")[-1][:120]:
+        return "ALERT", "#ef4444"
+    if "WATCH" in tail:
+        return "WATCH", "#f59e0b"
+    if "INTACT" in tail or "STRENGTHEN" in tail:
+        return "THESIS INTACT", "#4ade80"
+    if "ALERT" in tail:
+        return "ALERT", "#ef4444"
+    return "THESIS INTACT", "#4ade80"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EARNINGS CALENDAR  (Section V)
+# ─────────────────────────────────────────────────────────────────────────────
+
+SECTOR_WATCH = [
+    ("NVDA",  "NVIDIA",            "AI / SEMI"),
+    ("AMD",   "AMD",               "AI / SEMI"),
+    ("TSM",   "TSMC",              "AI / SEMI"),
+    ("MSFT",  "Microsoft",         "AI / SEMI"),
+    ("GOOGL", "Alphabet",          "AI / SEMI"),
+    ("META",  "Meta Platforms",    "AI / SEMI"),
+    ("OXY",   "Occidental",        "ENERGY"),
+    ("ET",    "Energy Transfer",   "ENERGY"),
+    ("WMB",   "Williams Cos.",     "ENERGY"),
+    ("ENB",   "Enbridge",          "ENERGY"),
+    ("ORCL",  "Oracle",            "ENTERPRISE SW"),
+    ("SAP",   "SAP",               "ENTERPRISE SW"),
+    ("SNOW",  "Snowflake",         "ENTERPRISE SW"),
+]
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_earnings_one(symbol: str) -> dict:
+    """Return {date_iso, date_human, days_until, eps_avg} or fallbacks."""
+    out = {"date_iso": None, "date_human": "TBD — verify on IR page",
+           "days_until": None, "eps_avg": None}
+    try:
+        import yfinance as yf
+        from datetime import date
+        t = yf.Ticker(symbol)
+        cal = t.calendar
+        ed = None
+        eps_avg = None
+        if isinstance(cal, dict):
+            dates = cal.get("Earnings Date") or []
+            if dates:
+                ed = dates[0]
+            eps_avg = cal.get("Earnings Average")
+        if ed is None:
+            try:
+                info = t.info or {}
+                ts = info.get("earningsTimestamp") or info.get("earningsTimestampStart")
+                if ts:
+                    ed = datetime.fromtimestamp(int(ts)).date()
+            except Exception:
+                pass
+        if ed is not None:
+            if hasattr(ed, "date"):
+                ed = ed.date() if callable(getattr(ed, "date", None)) else ed
+            try:
+                d_iso = ed.isoformat() if hasattr(ed, "isoformat") else str(ed)
+            except Exception:
+                d_iso = str(ed)
+            out["date_iso"] = d_iso
+            try:
+                d_obj = ed if isinstance(ed, date) else datetime.fromisoformat(d_iso).date()
+                out["date_human"] = d_obj.strftime("%b %d, %Y")
+                out["days_until"] = (d_obj - datetime.now(ZoneInfo("America/New_York")).date()).days
+            except Exception:
+                pass
+        if eps_avg is not None:
+            try:
+                out["eps_avg"] = float(eps_avg)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return out
+
+
+def prompt_pre_earnings(today: str, pos: dict, earnings_date: str) -> str:
+    ticker_watchlist = {
+        "QCOM": (
+            "For QCOM specifically watch:\n"
+            "- Automotive segment revenue (thesis: $4B by 2026)\n"
+            "- IoT segment revenue trend\n"
+            "- Handset unit guidance and ASP\n"
+            "- Any edge AI or on-device AI design win commentary\n"
+            "- QTL licensing revenue and royalty rate"
+        ),
+        "KMI": (
+            "For KMI specifically watch:\n"
+            "- Natural gas throughput volumes\n"
+            "- Natural gas demand commentary — any AI data center customer mentions\n"
+            "- LNG export capacity utilization\n"
+            "- Dividend guidance or coverage ratio"
+        ),
+        "CRM": (
+            "For CRM specifically watch:\n"
+            "- Agentforce seat adoption and revenue attach rate\n"
+            "- Remaining Performance Obligation growth (forward revenue signal)\n"
+            "- AI-driven deal sizes vs traditional deals\n"
+            "- Net revenue retention rate"
+        ),
+        "XIAOMI": (
+            "For Xiaomi specifically watch:\n"
+            "- EV delivery numbers and margin per unit\n"
+            "- India revenue as % of total (alert if above 30%)\n"
+            "- Gross margin trajectory across segments\n"
+            "- Any commentary on China consumer demand trends"
+        ),
+    }
+    watch_block = ticker_watchlist.get(pos["ticker"], "")
+    return f"""Today is {today}. Use web search.
+
+Pre-earnings intelligence brief for {pos['ticker']} reporting approximately {earnings_date}.
+
+1. CONSENSUS EXPECTATIONS
+What is the street expecting for EPS, revenue, and key segment metrics? What is the whisper number vs official consensus?
+
+2. WHAT TO WATCH
+The 2–3 specific data points or guidance language that will move the stock.
+
+{watch_block}
+
+3. THESIS CHECK SCENARIOS
+What results would strengthen the thesis? What would challenge it? Specific numbers.
+
+4. HISTORICAL EARNINGS PATTERN
+How has this stock reacted to beats vs misses over the last 4 quarters? Any consistent pattern?
+
+5. POSITIONING INTO THE PRINT
+Given current valuation and thesis conviction, what is the rational response to a beat, a miss, and an in-line result?
+
+Howard Marks memo style. Specific numbers only. No generic statements."""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # STREAMING
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -291,6 +703,132 @@ def stream_research(prompt: str, api_key: str) -> Generator[str, None, None]:
                     yield delta.text
 
 
+def collect_research(prompt: str, api_key: str) -> str:
+    """Non-streaming helper — returns the full assembled text."""
+    return "".join(stream_research(prompt, api_key))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PDF GENERATION  (fpdf2)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_LATIN1_FIXES = {
+    "‘": "'", "’": "'", "‚": "'", "‛": "'",
+    "“": '"', "”": '"', "„": '"', "‟": '"',
+    "–": "-", "—": "-", "−": "-",
+    "…": "...",
+    " ": " ", "​": "", "‌": "", "‍": "", "﻿": "",
+    "•": "*", "◆": "*", "◈": "*", "●": "*",
+    "⚠": "!", "→": "->", "⇒": "=>", "·": "-",
+    " ": " ", " ": " ",
+}
+
+
+def _safe_latin1(text: str) -> str:
+    for k, v in _LATIN1_FIXES.items():
+        text = text.replace(k, v)
+    return text.encode("latin-1", errors="replace").decode("latin-1")
+
+
+def _strip_inline(text: str) -> str:
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    text = re.sub(r"__(.+?)__", r"\1", text)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    return text
+
+
+def build_pdf(title: str, subtitle: str, body_markdown: str) -> bytes:
+    from fpdf import FPDF
+
+    class SignalPDF(FPDF):
+        def header(self):
+            self.set_font("Helvetica", "B", 11)
+            self.set_text_color(201, 168, 76)
+            self.cell(0, 7, _safe_latin1("SIGNAL · ANI SINGH · PRIVATE RESEARCH AGENT"),
+                      align="C", new_x="LMARGIN", new_y="NEXT")
+            self.set_font("Helvetica", "", 9)
+            self.set_text_color(120, 110, 80)
+            self.cell(0, 5, _safe_latin1(f"{title}  ·  {subtitle}"),
+                      align="C", new_x="LMARGIN", new_y="NEXT")
+            self.set_draw_color(201, 168, 76)
+            y = self.get_y() + 1
+            self.line(self.l_margin, y, self.w - self.r_margin, y)
+            self.ln(4)
+
+        def footer(self):
+            self.set_y(-13)
+            self.set_font("Helvetica", "I", 8)
+            self.set_text_color(120, 110, 80)
+            self.cell(0, 8,
+                      _safe_latin1("Generated by SIGNAL Research Agent · aniagent.streamlit.app"),
+                      align="C")
+
+    pdf = SignalPDF()
+    pdf.set_auto_page_break(auto=True, margin=16)
+    pdf.set_margins(16, 22, 16)
+    pdf.add_page()
+
+    def _mc(h: float, txt: str):
+        pdf.multi_cell(0, h, _safe_latin1(txt),
+                       new_x="LMARGIN", new_y="NEXT")
+
+    for raw in body_markdown.split("\n"):
+        line = _strip_inline(raw).rstrip()
+        if not line.strip():
+            pdf.ln(2.5)
+            continue
+        if line.startswith("### "):
+            pdf.set_font("Helvetica", "B", 11)
+            pdf.set_text_color(201, 168, 76)
+            _mc(6, line[4:])
+            pdf.ln(0.5)
+        elif line.startswith("## "):
+            pdf.set_font("Helvetica", "B", 13)
+            pdf.set_text_color(201, 168, 76)
+            _mc(7, line[3:])
+            pdf.ln(0.8)
+        elif line.startswith("# "):
+            pdf.set_font("Helvetica", "B", 15)
+            pdf.set_text_color(201, 168, 76)
+            _mc(8, line[2:])
+            pdf.ln(1)
+        elif re.match(r"^[\-\*\+] ", line):
+            pdf.set_font("Helvetica", "", 10)
+            pdf.set_text_color(35, 35, 35)
+            _mc(5.3, "  -  " + line[2:].strip())
+        else:
+            pdf.set_font("Helvetica", "", 10)
+            pdf.set_text_color(35, 35, 35)
+            _mc(5.3, line)
+
+    raw_out = pdf.output(dest="S")
+    if isinstance(raw_out, (bytes, bytearray)):
+        return bytes(raw_out)
+    return raw_out.encode("latin-1", errors="replace")
+
+
+def safe_filename_chunk(s: str) -> str:
+    s = re.sub(r"[^A-Za-z0-9]+", "", s)
+    return s[:40] or "Memo"
+
+
+def pdf_download_button(label: str, title: str, subtitle: str,
+                        body: str, file_stub: str, key: str):
+    try:
+        data = build_pdf(title, subtitle, body)
+    except Exception as e:  # noqa: BLE001
+        st.warning(f"PDF generation failed: {e}")
+        return
+    st.download_button(
+        label,
+        data=data,
+        file_name=f"{file_stub}_{today_slug_compact()}.pdf",
+        mime="application/pdf",
+        use_container_width=True,
+        key=key,
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE / CSS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -305,7 +843,7 @@ st.set_page_config(
 st.markdown(
     """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600;700&family=Inter:wght@300;400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600;700&family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 html, body, .stApp {
     background-color: #0c0c0c !important;
@@ -398,6 +936,14 @@ a, a:visited {
     width: 100%;
 }
 
+.stDownloadButton > button {
+    font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace !important;
+    font-size: 0.72rem !important;
+    letter-spacing: 0.18rem !important;
+    padding: 0.55rem 1rem !important;
+    background-color: #0c0c0c !important;
+}
+
 .stButton > button:hover, .stDownloadButton > button:hover {
     background-color: #c9a84c !important;
     color: #0c0c0c !important;
@@ -455,12 +1001,150 @@ a, a:visited {
     max-width: 900px;
 }
 
+/* ── valuation legend ── */
+.val-legend {
+    display: flex; flex-wrap: wrap; justify-content: center; gap: 14px;
+    font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    color: #a8a395;
+    margin: 0.6rem auto 0.2rem;
+    text-transform: uppercase;
+}
+.val-legend .dot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    margin-right: 6px; vertical-align: middle;
+}
+
+/* ── divergence alert banners ── */
+.shift-banner {
+    font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    padding: 9px 14px;
+    margin: 4px 0;
+    border-radius: 2px;
+    border: 1px solid;
+    line-height: 1.5;
+}
+.shift-up   { background: #ef444420; border-color: #ef4444; color: #ef4444; }
+.shift-down { background: #4ade8020; border-color: #4ade80; color: #4ade80; }
+
+/* ── portfolio pulse cards ── */
+.pulse-card {
+    border: 1px solid #2a261b;
+    border-radius: 2px;
+    padding: 1.1rem 1.2rem;
+    background: #11100c;
+    margin-bottom: 0.6rem;
+    min-height: 100%;
+}
+.pulse-head {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 0.4rem;
+}
+.pulse-ticker {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1.35rem;
+    color: #c9a84c;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+}
+.pulse-name {
+    font-family: 'Inter', sans-serif;
+    font-size: 0.7rem;
+    color: #8a8470;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    margin-top: 2px;
+}
+.pulse-weight {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.66rem;
+    color: #c9a84c;
+    border: 1px solid #c9a84c;
+    padding: 2px 8px;
+    letter-spacing: 0.15em;
+    border-radius: 1px;
+}
+.pulse-status {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.66rem;
+    padding: 3px 10px;
+    border-radius: 1px;
+    letter-spacing: 0.18em;
+    font-weight: 600;
+    display: inline-block;
+    margin-top: 0.4rem;
+    margin-bottom: 0.5rem;
+}
+.pulse-body p { font-size: 0.98rem !important; line-height: 1.5; }
+.pulse-val-alert {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: #c9a84c;
+    margin-top: 0.5rem;
+    letter-spacing: 0.06em;
+    line-height: 1.55;
+    border-top: 1px dashed #2a261b;
+    padding-top: 0.5rem;
+}
+.pulse-skeleton {
+    border: 1px dashed #2a261b;
+    border-radius: 2px;
+    padding: 1.1rem 1.2rem;
+    background: #0f0e0a;
+    margin-bottom: 0.6rem;
+}
+.pulse-skeleton .bar {
+    background: linear-gradient(90deg, #1a1812, #25221a, #1a1812);
+    height: 8px; border-radius: 1px; margin: 8px 0;
+    background-size: 200% 100%;
+    animation: shimmer 1.6s linear infinite;
+}
+.pulse-skeleton .bar.short { width: 40%; }
+.pulse-skeleton .bar.mid   { width: 70%; }
+.pulse-skeleton .bar.long  { width: 92%; }
+@keyframes shimmer {
+    0%   { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+
+/* ── earnings calendar ── */
+.earn-card {
+    border: 1px solid #2a261b;
+    border-radius: 2px;
+    padding: 0.85rem 1rem;
+    background: #11100c;
+    margin-bottom: 0.5rem;
+    display: flex; flex-direction: column; gap: 0.25rem;
+}
+.earn-row {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.78rem;
+    color: #d8d2bf;
+    letter-spacing: 0.05em;
+}
+.earn-ticker { color: #c9a84c; font-weight: 600; font-size: 0.95rem; letter-spacing: 0.1em; }
+.earn-name   { color: #8a8470; font-family: 'Inter', sans-serif; font-size: 0.7rem;
+               letter-spacing: 0.15em; text-transform: uppercase; }
+.earn-date   { color: #e8e3d6; }
+.earn-meta   { color: #8a8470; font-size: 0.68rem; letter-spacing: 0.1em;
+               text-transform: uppercase; }
+.earn-days   { color: #c9a84c; font-size: 0.72rem; letter-spacing: 0.1em; }
+.sector-tag  { color: #6a6555; font-size: 0.62rem;
+               font-family: 'JetBrains Mono', monospace;
+               letter-spacing: 0.18em; text-transform: uppercase; }
+
 @media (max-width: 640px) {
     .signal-title { font-size: 3.4rem !important; letter-spacing: 0.4rem !important; }
     .signal-subtitle { font-size: 0.6rem !important; letter-spacing: 0.25rem !important; }
     .section-name { font-size: 1.4rem !important; }
     body, p, li, .stMarkdown p { font-size: 1rem !important; }
     .block-container { padding-top: 1rem !important; }
+    .pulse-ticker { font-size: 1.1rem; }
+    .val-legend { font-size: 9px; gap: 8px; }
 }
 </style>
 """,
@@ -483,14 +1167,20 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-if "memo_sections" not in st.session_state:
-    st.session_state.memo_sections = []
-if "memo_kind" not in st.session_state:
-    st.session_state.memo_kind = None
-if "memo_topic" not in st.session_state:
-    st.session_state.memo_topic = ""
-if "last_globe_click_id" not in st.session_state:
-    st.session_state.last_globe_click_id = None
+# session-state init
+for key, default in [
+    ("memo_sections", []),
+    ("memo_kind", None),
+    ("memo_topic", ""),
+    ("last_globe_click_id", None),
+    ("pulse_cards", {}),       # ticker -> {text, status_label, status_color, ...}
+    ("pulse_done_date", None), # iso date string
+    ("pulse_running", False),
+    ("pre_earnings_briefs", {}),  # ticker -> body text
+    ("valuation_shifts", []),
+]:
+    if key not in st.session_state:
+        st.session_state[key] = default
 
 api_key = get_api_key()
 if not api_key:
@@ -502,7 +1192,7 @@ if not api_key:
     st.stop()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CONTROLS
+# CONTROLS  (Sections I & II)
 # ─────────────────────────────────────────────────────────────────────────────
 
 st.markdown("<div class='status-line'>I · Full Research Cycle</div>", unsafe_allow_html=True)
@@ -524,26 +1214,86 @@ with dive_col2:
 
 st.markdown("<hr class='gold-rule'>", unsafe_allow_html=True)
 
-# ─── Section III · Global Markets ────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION III · GLOBAL MARKETS  (existing globe + valuation + alerts + legend)
+# ─────────────────────────────────────────────────────────────────────────────
+
 st.markdown("<div class='status-line'>III · Global Markets</div>", unsafe_allow_html=True)
 st.markdown(
     "<div style='font-family:\"Inter\",sans-serif; font-size:0.7rem; color:#6a6555; "
     "letter-spacing:0.15rem; margin-top:0.4rem; margin-bottom:0.8rem;'>"
-    "Tap a node to generate a country-level intelligence memo."
+    "Tap a node to generate a country-level intelligence memo. Nodes are colour-coded "
+    "by current ETF trailing P/E."
     "</div>",
     unsafe_allow_html=True,
 )
+
+# Pull live valuations (24h cache)
+valuations = fetch_valuations()
+
+# Detect band shifts & persist history. We only run shift detection ONCE per
+# session per day to keep the JSON file from being rewritten on every rerun.
+if (st.session_state.get("history_processed_date") != today_iso()):
+    shifts = update_history_and_detect_shifts(valuations)
+    st.session_state.valuation_shifts = shifts
+    st.session_state.history_processed_date = today_iso()
+else:
+    shifts = st.session_state.valuation_shifts
+
+# Divergence alert banners above the globe
+if shifts:
+    for s in shifts:
+        cls = "shift-up" if s["direction"] == "more_expensive" else "shift-down"
+        fp = f"{s['from_pe']:.1f}x" if s.get("from_pe") is not None else "—"
+        tp = f"{s['to_pe']:.1f}x" if s.get("to_pe") is not None else "—"
+        st.markdown(
+            f"<div class='shift-banner {cls}'>"
+            f"⚠  VALUATION SHIFT — {s['country']} moved from "
+            f"{s['from_band']} → {s['to_band']}  ({fp} → {tp})"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+# Build colored marker list for the globe
+markets_colored = []
+for m in MARKETS:
+    v = valuations.get(m["name"], {})
+    markets_colored.append({
+        "name":  m["name"],
+        "lat":   m["lat"],
+        "lng":   m["lng"],
+        "pe":    v.get("pe"),
+        "band":  v.get("band", BAND_NONE),
+        "color": v.get("color", GOLD),
+        "etf":   v.get("etf", ""),
+    })
+
 globe_event = globe_markets_component(
-    markets=MARKETS,
+    markets=markets_colored,
     height=560,
     key="signal_globe",
     default=None,
 )
 
+# Legend
+legend_items = [
+    (BAND_CHEAP,     "<12x"),
+    (BAND_FAIR,      "12-16x"),
+    (BAND_ELEVATED,  "16-20x"),
+    (BAND_EXPENSIVE, "20-24x"),
+    (BAND_VERY_EXP,  ">24x"),
+]
+legend_html = "<div class='val-legend'>" + "".join(
+    f"<span><span class='dot' style='background:{BAND_COLOR[b]}'></span>"
+    f"{b} {rng}</span>" for b, rng in legend_items
+) + "</div>"
+st.markdown(legend_html, unsafe_allow_html=True)
+
 st.markdown("<hr class='gold-rule'>", unsafe_allow_html=True)
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# EXECUTION
+# EXECUTION HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
 def render_section_header(num: str, name: str):
@@ -666,13 +1416,370 @@ elif run_deep and not topic.strip():
 elif new_globe_click:
     run_market_analysis(new_globe_click)
 
+# ─── Inline download buttons for I/II/III memos ──────────────────────────────
+if st.session_state.memo_sections:
+    full_memo = assemble_full_memo()
+    kind = st.session_state.memo_kind
+    if kind == "deep":
+        sub = f"DEEP DIVE — {st.session_state.memo_topic} · {now_full_str()}"
+        stub = f"SIGNAL_DeepDive_{safe_filename_chunk(st.session_state.memo_topic)}"
+        label = "⬇  DOWNLOAD DEEP DIVE"
+    elif kind == "market":
+        sub = f"GLOBAL MARKETS — {st.session_state.memo_topic} · {now_full_str()}"
+        stub = f"SIGNAL_Globe_{safe_filename_chunk(st.session_state.memo_topic)}"
+        label = "⬇  DOWNLOAD COUNTRY MEMO"
+    else:
+        sub = f"FULL RESEARCH CYCLE · {now_full_str()}"
+        stub = "SIGNAL_FullCycle"
+        label = "⬇  DOWNLOAD FULL MEMO"
+    pdf_download_button(
+        label,
+        title="SIGNAL",
+        subtitle=sub,
+        body=full_memo,
+        file_stub=stub,
+        key=f"pdf_main_{kind}",
+    )
+
+st.markdown("<hr class='gold-rule'>", unsafe_allow_html=True)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# COPY / DOWNLOAD
+# SECTION IV · PORTFOLIO PULSE  (auto-fires; sequential w/ 15s delays)
+# ─────────────────────────────────────────────────────────────────────────────
+
+st.markdown("<div class='status-line'>IV · Portfolio Pulse</div>", unsafe_allow_html=True)
+st.markdown(
+    "<div style='font-family:\"Inter\",sans-serif; font-size:0.7rem; color:#6a6555; "
+    "letter-spacing:0.15rem; margin-top:0.4rem; margin-bottom:0.9rem;'>"
+    "Live thesis check on each position. Auto-refreshes once daily."
+    "</div>",
+    unsafe_allow_html=True,
+)
+
+
+def render_pulse_skeleton(pos: dict) -> str:
+    return f"""
+<div class='pulse-skeleton'>
+  <div class='pulse-head'>
+    <div>
+      <div class='pulse-ticker'>{pos['ticker']}</div>
+      <div class='pulse-name'>{pos['name']}</div>
+    </div>
+    <div class='pulse-weight'>{pos['weight']}</div>
+  </div>
+  <div class='bar long'></div>
+  <div class='bar mid'></div>
+  <div class='bar long'></div>
+  <div class='bar short'></div>
+</div>"""
+
+
+def render_pulse_card(pos: dict, text: str, status_label: str, status_color: str,
+                      val_alerts: list[dict]) -> str:
+    # Escape HTML in the model output. Render basic markdown (bold, paragraph breaks).
+    body = text.strip()
+    body_html = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", body)
+    body_html = body_html.replace("\n\n", "</p><p>").replace("\n", "<br>")
+    body_html = f"<p>{body_html}</p>"
+
+    alerts_html = ""
+    if val_alerts:
+        rows = []
+        for s in val_alerts:
+            fp = f"{s['from_pe']:.1f}x" if s.get("from_pe") is not None else "—"
+            tp = f"{s['to_pe']:.1f}x" if s.get("to_pe") is not None else "—"
+            rows.append(
+                f"◈ VALUATION SIGNAL  {s['country']}: "
+                f"{s['from_band']} → {s['to_band']} ({fp} → {tp})"
+            )
+        alerts_html = "<div class='pulse-val-alert'>" + "<br>".join(rows) + "</div>"
+
+    return f"""
+<div class='pulse-card'>
+  <div class='pulse-head'>
+    <div>
+      <div class='pulse-ticker'>{pos['ticker']}</div>
+      <div class='pulse-name'>{pos['name']}</div>
+    </div>
+    <div class='pulse-weight'>{pos['weight']}</div>
+  </div>
+  <div class='pulse-status' style='border:1px solid {status_color}; color:{status_color};'>{status_label}</div>
+  <div class='pulse-body'>{body_html}</div>
+  {alerts_html}
+</div>"""
+
+
+def run_portfolio_pulse():
+    """Sequentially fetch all 4 cards with 15s delays."""
+    st.session_state.pulse_running = True
+    st.session_state.pulse_cards = {}
+
+    today = today_str()
+    col_left, col_right = st.columns(2)
+    placeholders = {
+        POSITIONS[0]["ticker"]: col_left.empty(),
+        POSITIONS[1]["ticker"]: col_right.empty(),
+        POSITIONS[2]["ticker"]: col_left.empty(),
+        POSITIONS[3]["ticker"]: col_right.empty(),
+    }
+    # Show skeletons up front
+    for pos in POSITIONS:
+        placeholders[pos["ticker"]].markdown(
+            render_pulse_skeleton(pos), unsafe_allow_html=True
+        )
+
+    try:
+        for i, pos in enumerate(POSITIONS):
+            if i > 0:
+                time.sleep(15)  # rate-limit padding
+            try:
+                text = collect_research(prompt_portfolio_pulse(today, pos), api_key)
+            except anthropic.APIStatusError as e:
+                text = f"_API error: {getattr(e, 'message', str(e))}_"
+            except Exception as e:  # noqa: BLE001
+                text = f"_Error: {e}_"
+
+            status_label, status_color = classify_status(text)
+            val_alerts = shifts_for_position(
+                st.session_state.valuation_shifts, pos["ticker"]
+            )
+            st.session_state.pulse_cards[pos["ticker"]] = {
+                "text": text,
+                "status_label": status_label,
+                "status_color": status_color,
+                "val_alerts": val_alerts,
+            }
+            placeholders[pos["ticker"]].markdown(
+                render_pulse_card(pos, text, status_label, status_color, val_alerts),
+                unsafe_allow_html=True,
+            )
+
+        st.session_state.pulse_done_date = today_iso()
+    finally:
+        st.session_state.pulse_running = False
+
+
+def render_cached_pulse():
+    col_left, col_right = st.columns(2)
+    cols = [col_left, col_right, col_left, col_right]
+    for i, pos in enumerate(POSITIONS):
+        info = st.session_state.pulse_cards.get(pos["ticker"])
+        if not info:
+            cols[i].markdown(render_pulse_skeleton(pos), unsafe_allow_html=True)
+            continue
+        cols[i].markdown(
+            render_pulse_card(
+                pos, info["text"], info["status_label"],
+                info["status_color"], info.get("val_alerts", [])
+            ),
+            unsafe_allow_html=True,
+        )
+
+
+# Auto-fire if not yet run today
+if (st.session_state.pulse_done_date != today_iso()
+        and not st.session_state.pulse_running):
+    run_portfolio_pulse()
+else:
+    render_cached_pulse()
+
+# Manual refresh + PDF download once all 4 cards are present
+pulse_complete = all(
+    pos["ticker"] in st.session_state.pulse_cards for pos in POSITIONS
+)
+if pulse_complete:
+    refresh_col, dl_col = st.columns(2)
+    with refresh_col:
+        if st.button("◆  Refresh Portfolio Pulse", key="refresh_pulse",
+                     use_container_width=True):
+            st.session_state.pulse_done_date = None
+            st.rerun()
+    with dl_col:
+        body_parts = [f"# SIGNAL · PORTFOLIO PULSE\n*{today_str()}*\n\n---\n"]
+        for pos in POSITIONS:
+            info = st.session_state.pulse_cards.get(pos["ticker"], {})
+            body_parts.append(
+                f"## {pos['ticker']} — {pos['name']} ({pos['weight']})\n"
+                f"**Status:** {info.get('status_label','—')}\n\n"
+                f"{info.get('text','').strip()}\n"
+            )
+            for s in info.get("val_alerts", []):
+                fp = f"{s['from_pe']:.1f}x" if s.get('from_pe') is not None else "—"
+                tp = f"{s['to_pe']:.1f}x" if s.get('to_pe') is not None else "—"
+                body_parts.append(
+                    f"\n*Valuation signal — {s['country']}: "
+                    f"{s['from_band']} → {s['to_band']} ({fp} → {tp})*\n"
+                )
+            body_parts.append("\n---\n")
+        pdf_download_button(
+            "⬇  DOWNLOAD PORTFOLIO PULSE",
+            title="SIGNAL",
+            subtitle=f"PORTFOLIO PULSE · {now_full_str()}",
+            body="\n".join(body_parts),
+            file_stub="SIGNAL_PortfolioPulse",
+            key="pdf_pulse",
+        )
+
+st.markdown("<hr class='gold-rule'>", unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION V · EARNINGS CALENDAR
+# ─────────────────────────────────────────────────────────────────────────────
+
+st.markdown("<div class='status-line'>V · Earnings Calendar</div>", unsafe_allow_html=True)
+st.markdown(
+    "<div style='font-family:\"Inter\",sans-serif; font-size:0.7rem; color:#6a6555; "
+    "letter-spacing:0.15rem; margin-top:0.4rem; margin-bottom:0.9rem;'>"
+    "Next earnings dates for each core position. Generate a pre-earnings brief "
+    "before each print."
+    "</div>",
+    unsafe_allow_html=True,
+)
+
+
+def fmt_eps(eps) -> str:
+    if eps is None:
+        return "—"
+    try:
+        return f"${float(eps):.2f}"
+    except Exception:
+        return "—"
+
+
+def fmt_days(days) -> str:
+    if days is None:
+        return "—"
+    if days < 0:
+        return f"{abs(days)}d ago"
+    if days == 0:
+        return "today"
+    return f"in {days}d"
+
+
+def render_earnings_card(ticker: str, name: str, e: dict, sector: str | None = None):
+    sector_html = (
+        f"<div class='sector-tag'>{sector}</div>" if sector else ""
+    )
+    return f"""
+<div class='earn-card'>
+  <div class='earn-row'>
+    <div>
+      <span class='earn-ticker'>{ticker}</span>
+      &nbsp;<span class='earn-name'>{name}</span>
+    </div>
+    {sector_html}
+  </div>
+  <div class='earn-row'>
+    <span class='earn-meta'>Next report</span>
+    <span class='earn-date'>{e['date_human']}</span>
+  </div>
+  <div class='earn-row'>
+    <span class='earn-meta'>Consensus EPS</span>
+    <span class='earn-meta'>{fmt_eps(e.get('eps_avg'))}</span>
+  </div>
+  <div class='earn-row'>
+    <span class='earn-meta'>Window</span>
+    <span class='earn-days'>{fmt_days(e.get('days_until'))}</span>
+  </div>
+</div>
+"""
+
+
+# Core positions
+for pos in POSITIONS:
+    e = fetch_earnings_one(pos["yf"])
+    st.markdown(render_earnings_card(pos["ticker"], pos["name"], e),
+                unsafe_allow_html=True)
+    if st.button(f"⬢  Generate Pre-Earnings Brief — {pos['ticker']}",
+                 key=f"preE_{pos['ticker']}", use_container_width=True):
+        render_section_header("PRE-EARNINGS BRIEF", pos["ticker"])
+        try:
+            brief_text = st.write_stream(
+                stream_research(
+                    prompt_pre_earnings(today_str(), pos, e["date_human"]),
+                    api_key,
+                )
+            )
+            if not isinstance(brief_text, str):
+                brief_text = "".join(brief_text) if brief_text else ""
+        except anthropic.APIStatusError as ex:
+            brief_text = f"_API error: {getattr(ex, 'message', str(ex))}_"
+            st.error(brief_text)
+        except Exception as ex:  # noqa: BLE001
+            brief_text = f"_Error: {ex}_"
+            st.error(brief_text)
+        st.session_state.pre_earnings_briefs[pos["ticker"]] = {
+            "text": brief_text,
+            "date": e["date_human"],
+        }
+
+    # If a brief exists for this ticker, surface its download button
+    cached = st.session_state.pre_earnings_briefs.get(pos["ticker"])
+    if cached:
+        body = (
+            f"# SIGNAL · PRE-EARNINGS BRIEF\n"
+            f"## {pos['ticker']} — {pos['name']}\n"
+            f"*Reporting {cached['date']} · brief generated {today_str()}*\n\n"
+            "---\n\n"
+            f"{cached['text']}"
+        )
+        pdf_download_button(
+            f"⬇  DOWNLOAD PRE-EARNINGS BRIEF — {pos['ticker']}",
+            title="SIGNAL",
+            subtitle=f"PRE-EARNINGS BRIEF — {pos['ticker']} · {now_full_str()}",
+            body=body,
+            file_stub=f"SIGNAL_PreEarnings_{pos['ticker']}",
+            key=f"pdf_preE_{pos['ticker']}",
+        )
+
+st.markdown(
+    "<div style='height:1.4rem'></div>"
+    "<div class='status-line'>Sector Watch — moves your positions</div>",
+    unsafe_allow_html=True,
+)
+st.markdown(
+    "<div style='font-family:\"Inter\",sans-serif; font-size:0.65rem; color:#6a6555; "
+    "letter-spacing:0.12rem; margin-top:0.3rem; margin-bottom:0.6rem;'>"
+    "Upcoming earnings from macro-relevant names that could move QCOM, KMI, or CRM."
+    "</div>",
+    unsafe_allow_html=True,
+)
+
+# Sector watch — filter & sort by days_until (closest first), within 60 days
+sector_rows = []
+for sym, name, sector in SECTOR_WATCH:
+    e = fetch_earnings_one(sym)
+    days = e.get("days_until")
+    if days is None or days < -3 or days > 60:
+        continue
+    sector_rows.append((sym, name, sector, e))
+sector_rows.sort(key=lambda r: (r[3].get("days_until") or 999))
+
+if sector_rows:
+    for sym, name, sector, e in sector_rows:
+        st.markdown(render_earnings_card(sym, name, e, sector=sector),
+                    unsafe_allow_html=True)
+else:
+    st.markdown(
+        "<div style='font-family:\"JetBrains Mono\",monospace; font-size:0.72rem; "
+        "color:#6a6555; padding:0.6rem 0;'>"
+        "No sector earnings in window."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+st.markdown("<hr class='gold-rule'>", unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COPY / DOWNLOAD  (legacy markdown export — preserved)
 # ─────────────────────────────────────────────────────────────────────────────
 
 if st.session_state.memo_sections:
-    st.markdown("<hr class='gold-rule'>", unsafe_allow_html=True)
-    st.markdown("<div class='status-line'>Export</div>", unsafe_allow_html=True)
+    st.markdown("<div class='status-line'>Export · Markdown</div>",
+                unsafe_allow_html=True)
 
     full_memo = assemble_full_memo()
     today_slug = today_str().replace(",", "").replace(" ", "-")
@@ -695,6 +1802,7 @@ if st.session_state.memo_sections:
             file_name=f"signal-{kind}{topic_slug}-{today_slug}.md",
             mime="text/markdown",
             use_container_width=True,
+            key="md_legacy",
         )
     with col_b:
         show_copy = st.toggle("Show copy-ready text", value=False)
