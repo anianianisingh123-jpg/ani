@@ -39,6 +39,7 @@
   }
   .country-label .pe-line { color: #e8e3d6; font-size: 10px; letter-spacing: 0.15em; }
   .country-label .band-line { font-size: 10px; letter-spacing: 0.25em; font-weight: 600; }
+  .country-label .meta-line { color: #e8e3d6; font-size: 10px; letter-spacing: 0.12em; max-width: 240px; white-space: normal; }
 
   #status {
     position: absolute;
@@ -180,6 +181,16 @@
   }
 
   function buildLabel(d) {
+    // Generic multi-line tooltip: node may carry `lines` = [{text,color}]
+    if (Array.isArray(d.lines) && d.lines.length) {
+      let inner = `<div>${d.name}</div>`;
+      for (const ln of d.lines) {
+        const col = ln && ln.color ? ` style="color:${ln.color}"` : '';
+        inner += `<div class="meta-line"${col}>${(ln && ln.text) || ''}</div>`;
+      }
+      return `<div class="country-label">${inner}</div>`;
+    }
+    // legacy markets tooltip (P/E + band)
     const peLine = (d.pe != null)
       ? `<div class="pe-line">P/E ${Number(d.pe).toFixed(1)}x</div>`
       : `<div class="pe-line">No data</div>`;
@@ -222,10 +233,21 @@
       document.body.style.height = height + 'px';
       setHeight(height);
 
+      if (args.title) {
+        const s = document.getElementById('status');
+        if (s) s.textContent = args.title;
+      }
+
       if (!initialized) {
         initialized = true;
         buildGlobe(args.markets || []);
       } else {
+        // live update nodes (e.g. layer toggle) without rebuilding the globe
+        if (args.markets) {
+          markets = args.markets;
+          globe.pointsData(markets).ringsData(markets);
+          refreshVisuals();
+        }
         resize();
       }
     }

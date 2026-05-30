@@ -1,103 +1,77 @@
 """
-SIGNAL — Ani Singh Private Research Agent
-Five modes:
-  I    Full 6-section daily research cycle
-  II   Topic deep dive
-  III  Interactive 3D Global Markets globe (P/E color-coded)
-  IV   Portfolio Pulse — auto-fires on every fresh session
-  V    Earnings Calendar with per-position pre-earnings briefs
-Plus PDF download buttons on every research output.
+SIGNAL — Ani Singh Private Research Agent  ·  Bloomberg-terminal build.
+
+Sections:
+  I/II  RESEARCH   — full daily cycle + topic deep dive
+  III   GLOBE      — 3-layer interactive globe: Markets / Geopolitics / Debt Cycle
+  IV    MARKETS    — global valuation screener + sovereign credit-stress monitor
+  V     DEBT CYCLE — Dalio MP tracker, central-bank policy, currency debasement
+  VI    PORTFOLIO  — Thesis War Room: position pulse + stress tests + macro theses
+  VII   EARNINGS   — calendar + pre-earnings briefs
+PDF download on every research output.
+
+Data sourcing is hybrid: market prices/valuations and currency-vs-gold are LIVE
+from yfinance (cached 1h); structural baselines (debt/GDP, CAPE, MP phase) are
+clearly labelled; the live AI+web-search layer fires lazily on demand.
 """
 
 from __future__ import annotations
 
-import os
+import html as _html
 import time
 from datetime import datetime
-from typing import Generator
 from zoneinfo import ZoneInfo
 
 import anthropic
 import streamlit as st
 import streamlit.components.v1 as components
-from dotenv import load_dotenv
 
+from signal_core import (
+    MODEL, get_api_key, today_str, now_str,
+    stream_research, call_research, call_json, parse_status,
+)
+import theme
+import market_data as mkt
 import valuation as val
+import debt_cycle as dc
+import signal_ai as ai
 import pdf_export
 
-load_dotenv()
-
+# ── Component ────────────────────────────────────────────────────────────────
+import os
 _GLOBE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "globe_component")
-globe_markets_component = components.declare_component("signal_globe", path=_GLOBE_DIR)
+globe_component = components.declare_component("signal_globe", path=_GLOBE_DIR)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────────────────────────────────────────────
+st.set_page_config(page_title="SIGNAL · Ani Singh", page_icon="◆",
+                   layout="wide", initial_sidebar_state="collapsed")
+theme.inject_theme()
 
-MODEL = "claude-sonnet-4-5"
-MAX_TOKENS = 8000
-WEB_SEARCH_TOOL = {
-    "type": "web_search_20250305",
-    "name": "web_search",
-    "max_uses": 6,
-}
+# ── Hero ─────────────────────────────────────────────────────────────────────
+st.markdown(
+    f"""
+<div style="text-align:center; margin-top:0.4rem; margin-bottom:1.4rem;">
+    <div class="signal-title">SIGNAL</div>
+    <div class="signal-subtitle">Ani Singh · Private Research Agent</div>
+    <div class="signal-meta">{now_str()}</div>
+</div>
+""",
+    unsafe_allow_html=True,
+)
 
-GOLD = "#c9a84c"
-BG = "#0c0c0c"
-
-
-def get_api_key() -> str | None:
-    key = os.environ.get("ANTHROPIC_API_KEY")
-    if key:
-        return key
-    try:
-        return st.secrets["ANTHROPIC_API_KEY"]
-    except Exception:
-        return None
-
-
-def today_str() -> str:
-    return datetime.now(ZoneInfo("America/New_York")).strftime("%A, %B %d, %Y")
-
-
-def now_str() -> str:
-    return datetime.now(ZoneInfo("America/New_York")).strftime("%H:%M ET · %a %b %d")
+api_key = get_api_key()
+if not api_key:
+    st.error(
+        "ANTHROPIC_API_KEY not set. Add it to .env locally, or to Streamlit "
+        "Cloud secrets as `ANTHROPIC_API_KEY=\"sk-ant-…\"`."
+    )
+    st.stop()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SYSTEM PROMPT — the lens
+# PROMPT BUILDERS  (research cycle / deep dive / market / pulse / earnings)
 # ─────────────────────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are a dedicated research agent for Anirudh Singh — a concentrated macro investor building toward running a concentrated macro fund.
-
-His analytical framework:
-- PRIMARY LENS: Ray Dalio — long-term debt cycle, changing world order, historical pattern recognition. Always ask: where are we in the machine?
-- SECONDARY LENS: George Soros reflexivity — identify self-reinforcing loops between perception and fundamentals
-- WRITING/THINKING DISCIPLINE: Howard Marks memo style — what is priced, where is the asymmetry, what is consensus wrong about, no filler, no hedging for cover
-- INVESTING PRINCIPLES: Concentration with conviction, long time horizons, no external validation needed, obligation as risk management
-
-His core positions:
-- QUALCOMM (QCOM) — 40% portfolio weight, largest holding. Thesis: edge AI inference dominance in power-constrained environments, automotive revenue ramp, QTL licensing moat. Structural multi-year advantage over Nvidia/AMD in mobile/edge due to mobile power-constraint engineering heritage.
-- KINDER MORGAN (KMI) — 17% portfolio weight, second largest holding. Energy midstream / pipeline infrastructure. Thesis: cash-flow-generative energy infrastructure, natural gas demand growth (including AI data center power demand), dividend yield, inflation-resilient real assets.
-- SALESFORCE (CRM) — Thesis: agentic AI platform consolidation, enterprise software stickiness, AI workflow monetization
-- XIAOMI (1810.HK) — Thesis: China consumer recovery, EV optionality, global hardware ecosystem expansion
-
-Standing watch-items (check every run):
-- Market sentiment — positioning, risk appetite, fear/greed, breadth, flows
-- Edge AI inference adoption curve
-- Semiconductor fab production capacity growth — TSMC ONLY
-- Inference AI news — developments specific to AI inference (not just training)
-
-ALWAYS: Use web search aggressively for current data and specific numbers. Apply the lens to everything — not just what happened, but what it means through the debt cycle, reflexivity, and risk asymmetry. Identify what consensus is missing. Write for a sophisticated investor who knows the basics — skip definitions, get to the edge.
-
-Format your output as a Howard Marks memo: tight paragraphs, specific numbers, no throat-clearing. Use markdown headers (## or ###) sparingly to organize. Bold key claims with **double asterisks**. Never apologize for uncertainty — state your view."""
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# THE 6 RESEARCH PROMPTS
-# ─────────────────────────────────────────────────────────────────────────────
-
-def prompt_macro(today: str) -> str:
+def prompt_macro(today):
     return f"""Today is {today}. Use web search for all current data.
 
 Produce the MACRO & RATES section. Cover:
@@ -112,7 +86,7 @@ Produce the MACRO & RATES section. Cover:
 Apply Dalio: where are we in the machine? Apply Marks: what is being priced for perfection in rates? Specific numbers only."""
 
 
-def prompt_earnings(today: str) -> str:
+def prompt_earnings(today):
     return f"""Today is {today}. Use web search for all current data.
 
 Produce the EARNINGS & CORPORATE section. Cover:
@@ -125,7 +99,7 @@ Produce the EARNINGS & CORPORATE section. Cover:
 Signal vs noise filter applied. Reflexivity lens: is any earnings narrative becoming self-reinforcing?"""
 
 
-def prompt_ai_tech(today: str) -> str:
+def prompt_ai_tech(today):
     return f"""Today is {today}. Use web search for all current data.
 
 Produce the AI & TECHNOLOGY section. Cover:
@@ -139,7 +113,7 @@ Produce the AI & TECHNOLOGY section. Cover:
 Frame edge AI through Dalio: early-to-middle cycle technology shift. What is the reflexivity loop forming?"""
 
 
-def prompt_geo(today: str) -> str:
+def prompt_geo(today):
     return f"""Today is {today}. Use web search for all current data.
 
 Produce the GEOPOLITICAL section. Cover:
@@ -152,7 +126,7 @@ Produce the GEOPOLITICAL section. Cover:
 Changing world order lens: which developments signal the structural transition Dalio describes?"""
 
 
-def prompt_cross_asset(today: str) -> str:
+def prompt_cross_asset(today):
     return f"""Today is {today}. Use web search for all current data.
 
 Produce the CROSS-ASSET section. Cover:
@@ -166,7 +140,7 @@ Produce the CROSS-ASSET section. Cover:
 Marks lens: where is risk being mispriced across these asset classes right now?"""
 
 
-def prompt_synthesis(today: str) -> str:
+def prompt_synthesis(today):
     return f"""Today is {today}. Based on all research today, produce the SYNTHESIS section. Cover:
 
 POSITION DESK — Thesis check for each (strengthened or challenged by today's data, be blunt):
@@ -184,7 +158,7 @@ THE ANCHOR — One paragraph. What should a concentrated macro investor be think
 SUBSTACK ANGLE — 1 essay idea from today's research. Give the hook and the structural argument in 3 sentences."""
 
 
-def prompt_deep_dive(today: str, query: str) -> str:
+def prompt_deep_dive(today, query):
     return f"""Today is {today}. Topic: "{query}"
 
 Use web search aggressively. Pull all current data, recent developments, analyst views, policy updates on this topic.
@@ -202,7 +176,7 @@ Produce a complete memo covering:
 Specific numbers only. Skip definitions. Write for a sophisticated investor who already knows the basics."""
 
 
-def prompt_market_analysis(today: str, country: str) -> str:
+def prompt_market_analysis(today, country):
     return f"""Today is {today}. Produce a complete market intelligence memo on {country} financial markets.
 
 Use web search aggressively for current data.
@@ -242,28 +216,6 @@ Any direct relevance to QCOM (40%), KMI (17%), Salesforce, or Xiaomi positions?
 Write in Howard Marks memo style. Specific numbers only. No generic statements."""
 
 
-MARKETS = [
-    {"name": "United States",  "lat": 40.7,  "lng":  -74.0},
-    {"name": "United Kingdom", "lat": 51.5,  "lng":   -0.1},
-    {"name": "Japan",          "lat": 35.7,  "lng":  139.7},
-    {"name": "Germany",        "lat": 50.1,  "lng":    8.7},
-    {"name": "France",         "lat": 48.9,  "lng":    2.3},
-    {"name": "China",          "lat": 31.2,  "lng":  121.5},
-    {"name": "Hong Kong",      "lat": 22.3,  "lng":  114.2},
-    {"name": "India",          "lat": 19.1,  "lng":   72.9},
-    {"name": "Brazil",         "lat": -23.5, "lng":  -46.6},
-    {"name": "Canada",         "lat": 43.7,  "lng":  -79.4},
-    {"name": "Australia",      "lat": -33.9, "lng":  151.2},
-    {"name": "South Korea",    "lat": 37.6,  "lng":  127.0},
-    {"name": "Singapore",      "lat":  1.3,  "lng":  103.8},
-    {"name": "Switzerland",    "lat": 47.4,  "lng":    8.5},
-    {"name": "Saudi Arabia",   "lat": 24.7,  "lng":   46.7},
-    {"name": "Taiwan",         "lat": 25.0,  "lng":  121.5},
-    {"name": "Mexico",         "lat": 19.4,  "lng":  -99.1},
-    {"name": "South Africa",   "lat": -26.2, "lng":   28.0},
-]
-
-
 SECTIONS = [
     ("MACRO & RATES", prompt_macro),
     ("EARNINGS & CORPORATE", prompt_earnings),
@@ -273,64 +225,43 @@ SECTIONS = [
     ("SYNTHESIS · POSITIONS · RISKS · SUBSTACK", prompt_synthesis),
 ]
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PORTFOLIO POSITIONS — used by Section IV (Pulse) and Section V (Calendar)
-# ─────────────────────────────────────────────────────────────────────────────
-
 POSITIONS = [
-    {
-        "ticker": "QCOM",
-        "yf_ticker": "QCOM",
-        "name": "QUALCOMM",
-        "weight": "40%",
-        "thesis": (
-            "Edge AI inference dominance in power-constrained environments, "
-            "automotive revenue ramp targeting $4B by 2026, QTL licensing moat, "
-            "structural multi-year advantage over Nvidia and AMD at the edge "
-            "due to mobile power-constraint engineering heritage. TSMC N2 "
-            "capacity ramp is a direct tailwind for QCOM product roadmap."
-        ),
-    },
-    {
-        "ticker": "KMI",
-        "yf_ticker": "KMI",
-        "name": "KINDER MORGAN",
-        "weight": "17%",
-        "thesis": (
-            "Cash-flow-generative midstream energy infrastructure, natural gas "
-            "demand growth driven by AI data center power buildout, 4–6% dividend "
-            "yield, inflation-resilient real asset, long-duration pipeline "
-            "contracts insulated from commodity price swings."
-        ),
-    },
-    {
-        "ticker": "CRM",
-        "yf_ticker": "CRM",
-        "name": "SALESFORCE",
-        "weight": "core",
-        "thesis": (
-            "Agentic AI platform consolidation, enterprise software stickiness, "
-            "Agentforce as the dominant AI workflow layer for enterprise, "
-            "remaining performance obligation as forward revenue visibility signal."
-        ),
-    },
-    {
-        "ticker": "XIAOMI",
-        "yf_ticker": "1810.HK",
-        "name": "XIAOMI",
-        "weight": "core",
-        "thesis": (
-            "China consumer recovery, EV optionality with growing delivery numbers, "
-            "global hardware ecosystem expansion, India smartphone market share. "
-            "Watch India revenue concentration — if above 30% of total, India "
-            "credit cycle becomes position-sizing concern."
-        ),
-    },
+    {"ticker": "QCOM", "yf_ticker": "QCOM", "name": "QUALCOMM", "weight": "40%",
+     "thesis": ("Edge AI inference dominance in power-constrained environments, automotive "
+                "revenue ramp targeting $4B by 2026, QTL licensing moat, structural multi-year "
+                "advantage over Nvidia and AMD at the edge due to mobile power-constraint "
+                "engineering heritage. TSMC N2 capacity ramp is a direct tailwind for QCOM product roadmap.")},
+    {"ticker": "KMI", "yf_ticker": "KMI", "name": "KINDER MORGAN", "weight": "17%",
+     "thesis": ("Cash-flow-generative midstream energy infrastructure, natural gas demand growth "
+                "driven by AI data center power buildout, 4–6% dividend yield, inflation-resilient "
+                "real asset, long-duration pipeline contracts insulated from commodity price swings.")},
+    {"ticker": "CRM", "yf_ticker": "CRM", "name": "SALESFORCE", "weight": "13%",
+     "thesis": ("Agentic AI platform consolidation, enterprise software stickiness, Agentforce as "
+                "the dominant AI workflow layer for enterprise, remaining performance obligation as "
+                "forward revenue visibility signal.")},
+    {"ticker": "XIAOMI", "yf_ticker": "1810.HK", "name": "XIAOMI", "weight": "9%",
+     "thesis": ("China consumer recovery, EV optionality with growing delivery numbers, global "
+                "hardware ecosystem expansion, India smartphone market share. Watch India revenue "
+                "concentration — if above 30% of total, India credit cycle becomes position-sizing concern.")},
+]
+
+MACRO_THESES = [
+    {"name": "Dalio Late-Cycle Debt Dynamics",
+     "established": "2024-01",
+     "desc": ("US fiscal dominance / MP3 transition — deficits ~6-7% of GDP at full employment, "
+              "debt monetization pressure, term premium and currency-debasement risk rising.")},
+    {"name": "Edge AI Inference Era",
+     "established": "2024-03",
+     "desc": ("QCOM heterogeneous-compute thesis — the AI value shift from training to inference, "
+              "inference moving on-device/edge, power-constrained engineering as the structural moat.")},
+    {"name": "Strait of Hormuz / Petrodollar Architecture",
+     "established": "2024-06",
+     "desc": ("Operation Epic Fury framework — energy chokepoint risk at Hormuz, petrodollar "
+              "recycling shifts, oil-supply disruption optionality with KMI/energy-infrastructure relevance.")},
 ]
 
 
-def prompt_pulse(today: str, pos: dict) -> str:
+def prompt_pulse(today, pos):
     return f"""Today is {today}. Use web search.
 
 Position check for {pos['yf_ticker']} ({pos['name']}), {pos['weight']} of portfolio.
@@ -345,1058 +276,892 @@ In 4–5 sentences cover:
 Be direct. No filler. If nothing material happened say so plainly."""
 
 
-def prompt_earnings_calendar(today: str) -> str:
-    return f"""Today is {today}. Use web search to find the next confirmed earnings date for each ticker below. Search investor-relations pages and reliable earnings sites (Zacks, Earnings Whispers, Nasdaq).
+def prompt_earnings_calendar(today):
+    return f"""Today is {today}. Use web search to find the next confirmed earnings date for each ticker below.
 
-PORTFOLIO POSITIONS:
-- QCOM (Qualcomm)
-- KMI (Kinder Morgan)
-- CRM (Salesforce)
-- 1810.HK (Xiaomi)
-
-SECTOR WATCH:
-- NVDA, AMD, TSM, MSFT, GOOGL, META  (AI / semiconductor — move QCOM)
-- OXY, ET, WMB, ENB                   (energy infrastructure — move KMI)
-- ORCL, SAP, SNOW                     (enterprise software — move CRM)
+PORTFOLIO POSITIONS: QCOM, KMI, CRM, 1810.HK
+SECTOR WATCH: NVDA, AMD, TSM, MSFT, GOOGL, META, OXY, ET, WMB, ENB, ORCL, SAP, SNOW
 
 Output ONE line per ticker in EXACTLY this pipe-delimited format:
-
 TICKER | YYYY-MM-DD | EPS_ESTIMATE | CONFIDENCE
 
-Where:
-- TICKER: the symbol as listed above
 - YYYY-MM-DD: expected earnings date; use TBD if not confirmed
-- EPS_ESTIMATE: consensus EPS estimate as a number with $ (e.g. $2.35) or TBD
-- CONFIDENCE: one of `confirmed`, `estimated`, `unknown`
+- EPS_ESTIMATE: consensus EPS with $ (e.g. $2.35) or TBD
+- CONFIDENCE: one of confirmed, estimated, unknown
 
 Output ONLY these lines — no commentary, no headers, no markdown fences."""
 
 
-def prompt_pre_earnings(today: str, ticker: str, earnings_date: str) -> str:
-    ticker_blocks = {
-        "QCOM": """For QCOM specifically watch:
-- Automotive segment revenue (thesis: $4B by 2026)
-- IoT segment revenue trend
-- Handset unit guidance and ASP
-- Any edge AI or on-device AI design win commentary
-- QTL licensing revenue and royalty rate""",
-        "KMI": """For KMI specifically watch:
-- Natural gas throughput volumes
-- Natural gas demand commentary — any AI data center customer mentions
-- LNG export capacity utilization
-- Dividend guidance or coverage ratio""",
-        "CRM": """For CRM specifically watch:
-- Agentforce seat adoption and revenue attach rate
-- Remaining Performance Obligation growth (forward revenue signal)
-- AI-driven deal sizes vs traditional deals
-- Net revenue retention rate""",
-        "XIAOMI": """For Xiaomi specifically watch:
-- EV delivery numbers and margin per unit
-- India revenue as % of total (alert if above 30%)
-- Gross margin trajectory across segments
-- Any commentary on China consumer demand trends""",
-        "1810.HK": """For Xiaomi specifically watch:
-- EV delivery numbers and margin per unit
-- India revenue as % of total (alert if above 30%)
-- Gross margin trajectory across segments
-- Any commentary on China consumer demand trends""",
+def prompt_pre_earnings(today, ticker, earnings_date):
+    blocks = {
+        "QCOM": "For QCOM watch: Automotive segment revenue (thesis $4B by 2026); IoT revenue trend; handset unit guidance and ASP; edge/on-device AI design-win commentary; QTL licensing revenue and royalty rate.",
+        "KMI": "For KMI watch: natural gas throughput volumes; gas-demand commentary incl. AI data center customers; LNG export capacity utilization; dividend guidance / coverage ratio.",
+        "CRM": "For CRM watch: Agentforce seat adoption and attach rate; Remaining Performance Obligation growth; AI-driven deal sizes vs traditional; net revenue retention.",
+        "1810.HK": "For Xiaomi watch: EV delivery numbers and margin per unit; India revenue as % of total (alert if >30%); gross-margin trajectory; China consumer demand commentary.",
     }
-    watch = ticker_blocks.get(ticker.upper(), "")
+    watch = blocks.get(ticker.upper(), "")
     return f"""Today is {today}. Use web search.
 
 Pre-earnings intelligence brief for {ticker} reporting approximately {earnings_date}.
 
-1. CONSENSUS EXPECTATIONS
-What is the street expecting for EPS, revenue, and key segment metrics? What is the whisper number vs official consensus?
-
-2. WHAT TO WATCH
-The 2–3 specific data points or guidance language that will move the stock.
-
-{watch}
-
-3. THESIS CHECK SCENARIOS
-What results would strengthen the thesis? What would challenge it? Specific numbers.
-
-4. HISTORICAL EARNINGS PATTERN
-How has this stock reacted to beats vs misses over the last 4 quarters? Any consistent pattern?
-
-5. POSITIONING INTO THE PRINT
-Given current valuation and thesis conviction, what is the rational response to a beat, a miss, and an in-line result?
+1. CONSENSUS EXPECTATIONS — Street EPS, revenue, key segment metrics; whisper vs official.
+2. WHAT TO WATCH — the 2–3 data points/guidance language that will move the stock. {watch}
+3. THESIS CHECK SCENARIOS — what results strengthen vs challenge the thesis. Specific numbers.
+4. HISTORICAL EARNINGS PATTERN — reaction to beats vs misses over last 4 quarters.
+5. POSITIONING INTO THE PRINT — rational response to a beat, a miss, an in-line result.
 
 Howard Marks memo style. Specific numbers only. No generic statements."""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STREAMING
+# SESSION STATE
 # ─────────────────────────────────────────────────────────────────────────────
-
-def stream_research(prompt: str, api_key: str) -> Generator[str, None, None]:
-    """Stream text deltas from Claude with web search enabled."""
-    client = anthropic.Anthropic(api_key=api_key)
-    with client.messages.stream(
-        model=MODEL,
-        max_tokens=MAX_TOKENS,
-        system=SYSTEM_PROMPT,
-        tools=[WEB_SEARCH_TOOL],
-        messages=[{"role": "user", "content": prompt}],
-    ) as stream:
-        for event in stream:
-            etype = getattr(event, "type", "")
-            if etype == "content_block_start":
-                block = getattr(event, "content_block", None)
-                if block is not None and getattr(block, "type", "") == "server_tool_use":
-                    yield "\n\n_◆ searching the web…_\n\n"
-            elif etype == "content_block_delta":
-                delta = getattr(event, "delta", None)
-                if delta is not None and getattr(delta, "type", "") == "text_delta":
-                    yield delta.text
-
-
-def call_research(prompt: str, api_key: str, max_tokens: int = 2000) -> str:
-    """Non-streaming Claude call with web search. Returns concatenated text."""
-    client = anthropic.Anthropic(api_key=api_key)
-    resp = client.messages.create(
-        model=MODEL,
-        max_tokens=max_tokens,
-        system=SYSTEM_PROMPT,
-        tools=[WEB_SEARCH_TOOL],
-        messages=[{"role": "user", "content": prompt}],
-    )
-    parts: list[str] = []
-    for block in resp.content:
-        if getattr(block, "type", "") == "text":
-            parts.append(getattr(block, "text", ""))
-    return "".join(parts).strip()
-
-
-def parse_status(text: str) -> tuple[str, str]:
-    """Return (label, hex_color) verdict for a position pulse response."""
-    upper = text.upper()
-    # Order matters — most-severe wins
-    if "ALERT" in upper and "ALERT TRIGGER" not in upper.replace("ALERT", "ALERT", 1):
-        return ("ALERT", "#ef4444")
-    if "WATCH" in upper:
-        return ("WATCH", "#f59e0b")
-    if "THESIS INTACT" in upper or "INTACT" in upper:
-        return ("THESIS INTACT", "#4ade80")
-    return ("PENDING", "#8a8470")
+_defaults = {
+    "research": None,           # {kind, topic, sections:[(title,text)]}
+    "globe_output": None,       # {country, text}
+    "last_globe_click_id": None,
+    "globe_layer": "MARKETS",
+    "geo_data": None,
+    "val_signals": None,
+    "cds_data": None,
+    "cb_data": None,
+    "debase_comment": None,
+    "pulse_results": {},
+    "stress_results": {},
+    "run_stress": None,
+    "macro_results": {},
+    "run_macro": None,
+    "debt_memo": {},            # country -> text
+    "earnings_calendar": None,
+    "pre_earnings_briefs": {},
+    "active_brief_ticker": None,
+    "valuation_alerts": None,
+}
+for k, v in _defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PAGE / CSS
+# SHARED HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-st.set_page_config(
-    page_title="SIGNAL · Ani Singh",
-    page_icon="◆",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
-
-st.markdown(
-    """
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600;700&family=Inter:wght@300;400;500;600&display=swap');
-
-html, body, .stApp {
-    background-color: #0c0c0c !important;
-    color: #e8e3d6 !important;
-}
-
-.stApp {
-    background: radial-gradient(ellipse at top, #131210 0%, #0c0c0c 60%) !important;
-}
-
-body, p, li, span, div, .stMarkdown, .stMarkdown p {
-    font-family: 'Cormorant Garamond', Georgia, serif !important;
-    font-size: 1.08rem;
-    line-height: 1.55;
-    color: #e8e3d6 !important;
-}
-
-h1, h2, h3, h4 {
-    font-family: 'Cormorant Garamond', Georgia, serif !important;
-    color: #c9a84c !important;
-    font-weight: 600 !important;
-}
-
-.stMarkdown h2 {
-    border-bottom: 1px solid #2a261b;
-    padding-bottom: 0.3rem;
-    margin-top: 1.5rem;
-}
-
-strong, b {
-    color: #f0e6c8 !important;
-    font-weight: 600 !important;
-}
-
-a, a:visited {
-    color: #c9a84c !important;
-    text-decoration: none !important;
-    border-bottom: 1px dotted #6a5828;
-}
-
-.signal-title {
-    font-family: 'Cormorant Garamond', Georgia, serif;
-    font-size: 5.5rem;
-    font-weight: 700;
-    letter-spacing: 0.7rem;
-    color: #c9a84c;
-    margin: 0;
-    line-height: 1;
-    text-shadow: 0 0 30px rgba(201, 168, 76, 0.15);
-}
-
-.signal-subtitle {
-    font-family: 'Inter', sans-serif;
-    font-size: 0.7rem;
-    font-weight: 500;
-    letter-spacing: 0.4rem;
-    color: #8a8470;
-    margin-top: 0.7rem;
-    text-transform: uppercase;
-}
-
-.signal-meta {
-    font-family: 'Inter', sans-serif;
-    font-size: 0.7rem;
-    color: #6a6555;
-    letter-spacing: 0.2rem;
-    margin-top: 0.8rem;
-    text-transform: uppercase;
-}
-
-.gold-rule {
-    border: none;
-    border-top: 1px solid #c9a84c;
-    opacity: 0.25;
-    margin: 1.5rem 0;
-}
-
-.stButton > button, .stDownloadButton > button {
-    background-color: transparent !important;
-    color: #c9a84c !important;
-    font-family: 'Inter', sans-serif !important;
-    font-weight: 500 !important;
-    font-size: 0.85rem !important;
-    letter-spacing: 0.25rem !important;
-    text-transform: uppercase !important;
-    border: 1px solid #c9a84c !important;
-    padding: 0.7rem 1.8rem !important;
-    border-radius: 1px !important;
-    transition: all 0.2s ease;
-    width: 100%;
-}
-
-.stButton > button:hover, .stDownloadButton > button:hover {
-    background-color: #c9a84c !important;
-    color: #0c0c0c !important;
-}
-
-.stButton > button:focus { box-shadow: none !important; outline: none !important; }
-
-.stTextInput > div > div > input {
-    background-color: #14130f !important;
-    color: #e8e3d6 !important;
-    border: 1px solid #2a261b !important;
-    border-radius: 1px !important;
-    font-family: 'Cormorant Garamond', Georgia, serif !important;
-    font-size: 1.1rem !important;
-    padding: 0.8rem 1rem !important;
-}
-.stTextInput > div > div > input:focus { border-color: #c9a84c !important; box-shadow: none !important; }
-
-.section-card { margin-top: 2rem; margin-bottom: 0.5rem; }
-.section-num {
-    font-family: 'Inter', sans-serif;
-    font-size: 0.65rem;
-    color: #6a6555;
-    letter-spacing: 0.3rem;
-    text-transform: uppercase;
-}
-.section-name {
-    font-family: 'Cormorant Garamond', Georgia, serif;
-    font-size: 1.9rem;
-    color: #c9a84c;
-    margin-top: 0.3rem;
-    border-bottom: 1px solid #2a261b;
-    padding-bottom: 0.4rem;
-    font-weight: 600;
-}
-
-.stProgress > div > div > div > div { background-color: #c9a84c !important; }
-.stProgress > div > div > div { background-color: #2a261b !important; }
-
-.status-line {
-    font-family: 'Inter', sans-serif;
-    font-size: 0.72rem;
-    color: #8a8470;
-    letter-spacing: 0.2rem;
-    text-transform: uppercase;
-    margin-top: 0.4rem;
-}
-
-.stCode, code { background-color: #14130f !important; color: #e8e3d6 !important; font-size: 0.85rem !important; }
-
-#MainMenu, footer, header { visibility: hidden; }
-
-.block-container {
-    padding-top: 2rem !important;
-    max-width: 900px;
-}
-
-/* ── Valuation legend (below globe) ─────────────────────────────────── */
-.legend-row {
-    display: flex; flex-wrap: wrap; justify-content: center; gap: 14px;
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 10px; letter-spacing: 0.15em;
-    color: #8a8470; margin-top: 0.6rem; margin-bottom: 0.4rem;
-}
-.legend-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
-    margin-right: 5px; vertical-align: middle; }
-
-/* ── Valuation alert banner above globe ─────────────────────────────── */
-.val-alert {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 11px; letter-spacing: 0.1em;
-    padding: 8px 12px; margin: 6px 0;
-    border-radius: 2px; border-width: 1px; border-style: solid;
-}
-.val-alert.up   { background: rgba(239, 68, 68, 0.12); border-color: #ef4444; color: #fca5a5; }
-.val-alert.down { background: rgba(74, 222, 128, 0.12); border-color: #4ade80; color: #86efac; }
-
-/* ── Portfolio Pulse cards ──────────────────────────────────────────── */
-.pulse-card {
-    background: #131210;
-    border: 1px solid #2a261b;
-    border-left: 3px solid #c9a84c;
-    border-radius: 2px;
-    padding: 1rem 1.1rem;
-    margin-bottom: 0.8rem;
-    min-height: 200px;
-    font-family: 'Cormorant Garamond', Georgia, serif;
-}
-.pulse-card .ticker {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 1.5rem; font-weight: 600; color: #c9a84c;
-    letter-spacing: 0.1em;
-}
-.pulse-card .company {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 0.7rem; color: #8a8470;
-    letter-spacing: 0.25em; text-transform: uppercase;
-    margin-bottom: 0.4rem;
-}
-.pulse-card .weight {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 0.65rem; color: #6a6555;
-    letter-spacing: 0.25em; text-transform: uppercase;
-}
-.pulse-card .status-badge {
-    display: inline-block;
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 0.65rem; font-weight: 600;
-    letter-spacing: 0.25em; text-transform: uppercase;
-    padding: 3px 8px;
-    border-radius: 1px;
-    margin-top: 0.4rem;
-}
-.pulse-card .body {
-    font-size: 0.95rem; line-height: 1.5;
-    color: #e8e3d6; margin-top: 0.7rem;
-}
-.pulse-card .val-signal {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 10px; color: #c9a84c;
-    letter-spacing: 0.1em; margin-top: 0.6rem;
-    padding-top: 0.4rem; border-top: 1px dotted #2a261b;
-}
-.pulse-card.skeleton .body::after {
-    content: "researching…";
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 0.7rem; color: #6a6555; letter-spacing: 0.25em;
-    animation: pulse 1.4s ease-in-out infinite;
-}
-@keyframes pulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 0.9; } }
-
-/* ── Earnings Calendar rows ─────────────────────────────────────────── */
-.cal-row {
-    display: grid;
-    grid-template-columns: 80px 1fr 130px 90px 100px;
-    gap: 0.8rem; align-items: center;
-    padding: 0.7rem 0.9rem;
-    border-bottom: 1px solid #1f1c14;
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 0.8rem;
-}
-.cal-row .tk { color: #c9a84c; font-weight: 600; letter-spacing: 0.15em; }
-.cal-row .nm { color: #e8e3d6; font-family: 'Cormorant Garamond', Georgia, serif;
-    font-size: 1rem; }
-.cal-row .dt { color: #e8e3d6; letter-spacing: 0.1em; }
-.cal-row .ep { color: #8a8470; letter-spacing: 0.1em; }
-.cal-row .du { color: #6a6555; letter-spacing: 0.15em; text-align: right; }
-.cal-row.head {
-    color: #6a6555; font-size: 0.65rem;
-    letter-spacing: 0.3em; text-transform: uppercase;
-    border-bottom: 1px solid #c9a84c; opacity: 0.55;
-}
-.cal-row.head .nm { font-family: 'JetBrains Mono', monospace; font-size: 0.65rem; }
-.sector-watch-row {
-    display: grid;
-    grid-template-columns: 80px 1fr 130px 100px;
-    gap: 0.8rem; padding: 0.5rem 0.9rem;
-    border-bottom: 1px solid #1f1c14;
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 0.75rem;
-}
-.sector-watch-row .tk { color: #c9a84c; letter-spacing: 0.15em; }
-.sector-watch-row .dt { color: #e8e3d6; }
-.sector-watch-row .ep { color: #8a8470; }
-.sector-watch-row .cf { color: #6a6555; text-align: right; letter-spacing: 0.2em; }
-
-@media (max-width: 640px) {
-    .signal-title { font-size: 3.4rem !important; letter-spacing: 0.4rem !important; }
-    .signal-subtitle { font-size: 0.6rem !important; letter-spacing: 0.25rem !important; }
-    .section-name { font-size: 1.4rem !important; }
-    body, p, li, .stMarkdown p { font-size: 1rem !important; }
-    .block-container { padding-top: 1rem !important; }
-    .cal-row, .sector-watch-row { grid-template-columns: 1fr; gap: 0.2rem; }
-    .cal-row .du { text-align: left; }
-    .legend-row { gap: 8px; font-size: 9px; }
-}
-</style>
-""",
-    unsafe_allow_html=True,
-)
-
-# Import JetBrains Mono once
-st.markdown(
-    "<link href='https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap' rel='stylesheet'>",
-    unsafe_allow_html=True,
-)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# HERO
-# ─────────────────────────────────────────────────────────────────────────────
-
-st.markdown(
-    f"""
-<div style="text-align:center; margin-top:1rem; margin-bottom:2rem;">
-    <div class="signal-title">SIGNAL</div>
-    <div class="signal-subtitle">Ani Singh · Private Research Agent</div>
-    <div class="signal-meta">{now_str()}</div>
-</div>
-<hr class="gold-rule">
-""",
-    unsafe_allow_html=True,
-)
-
-if "memo_sections" not in st.session_state:
-    st.session_state.memo_sections = []
-if "memo_kind" not in st.session_state:
-    st.session_state.memo_kind = None
-if "memo_topic" not in st.session_state:
-    st.session_state.memo_topic = ""
-if "last_globe_click_id" not in st.session_state:
-    st.session_state.last_globe_click_id = None
-
-api_key = get_api_key()
-if not api_key:
-    st.error(
-        "ANTHROPIC_API_KEY not set. Add it to .env locally, or to "
-        "Streamlit Cloud secrets (Settings → Secrets) as "
-        "`ANTHROPIC_API_KEY=\"sk-ant-…\"`."
-    )
-    st.stop()
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CONTROLS
-# ─────────────────────────────────────────────────────────────────────────────
-
-st.markdown("<div class='status-line'>I · Full Research Cycle</div>", unsafe_allow_html=True)
-run_full = st.button("◆  Run Full Research Cycle", key="run_full", use_container_width=True)
-
-st.markdown("<div style='height:1.5rem'></div>", unsafe_allow_html=True)
-st.markdown("<div class='status-line'>II · Deep Dive</div>", unsafe_allow_html=True)
-
-dive_col1, dive_col2 = st.columns([4, 1])
-with dive_col1:
-    topic = st.text_input(
-        "topic",
-        placeholder="e.g. Japan yield crisis · private credit stress · Qualcomm edge AI",
-        label_visibility="collapsed",
-        key="topic_input",
-    )
-with dive_col2:
-    run_deep = st.button("Research", key="run_deep", use_container_width=True)
-
-st.markdown("<hr class='gold-rule'>", unsafe_allow_html=True)
-
-# ─── Section III · Global Markets ────────────────────────────────────────────
-st.markdown("<div class='status-line'>III · Global Markets</div>", unsafe_allow_html=True)
-st.markdown(
-    "<div style='font-family:\"Inter\",sans-serif; font-size:0.7rem; color:#6a6555; "
-    "letter-spacing:0.15rem; margin-top:0.4rem; margin-bottom:0.6rem;'>"
-    "Nodes color-coded by trailing P/E. Tap a node for a country memo."
-    "</div>",
-    unsafe_allow_html=True,
-)
-
-# Fetch P/E once per session (24h cache), enrich markets, compute alerts
-pe_map = val.fetch_pe_ratios()
-if "valuation_alerts" not in st.session_state:
-    st.session_state.valuation_alerts = val.update_history_and_alerts(pe_map)
-valuation_alerts = st.session_state.valuation_alerts
-position_alerts = val.alerts_for_position(valuation_alerts)
-
-# Alert banners above the globe
-for a in valuation_alerts:
-    cls = "up" if a["direction"] == "expensive" else "down"
-    prev_pe = f"{a['prev_pe']:.1f}x" if a.get("prev_pe") is not None else "—"
-    new_pe = f"{a['new_pe']:.1f}x" if a.get("new_pe") is not None else "—"
-    st.markdown(
-        f"<div class='val-alert {cls}'>⚠  VALUATION SHIFT — "
-        f"{a['country']} moved from {a['prev_band']} → {a['new_band']} "
-        f"({prev_pe} → {new_pe})</div>",
-        unsafe_allow_html=True,
-    )
-
-# Enrich markets with color, pe, band for the globe payload
-markets_enriched = []
-for m in MARKETS:
-    pe = pe_map.get(m["name"])
-    band, color = val.band_for(pe)
-    markets_enriched.append({**m, "pe": pe, "band": band, "color": color})
-
-globe_event = globe_markets_component(
-    markets=markets_enriched,
-    height=560,
-    key="signal_globe",
-    default=None,
-)
-
-# Color legend below the globe
-st.markdown(
-    """
-<div class="legend-row">
-    <span><span class="legend-dot" style="background:#4ade80"></span>CHEAP &lt;12x</span>
-    <span><span class="legend-dot" style="background:#a3e635"></span>FAIR 12–16x</span>
-    <span><span class="legend-dot" style="background:#f59e0b"></span>ELEVATED 16–20x</span>
-    <span><span class="legend-dot" style="background:#f97316"></span>EXPENSIVE 20–24x</span>
-    <span><span class="legend-dot" style="background:#ef4444"></span>VERY EXPENSIVE &gt;24x</span>
-    <span><span class="legend-dot" style="background:#c9a84c"></span>NO DATA</span>
-</div>
-""",
-    unsafe_allow_html=True,
-)
-
-st.markdown("<hr class='gold-rule'>", unsafe_allow_html=True)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# EXECUTION
-# ─────────────────────────────────────────────────────────────────────────────
-
-def render_section_header(num: str, name: str):
-    st.markdown(
-        f"""
-<div class="section-card">
-    <div class="section-num">§ {num}</div>
-    <div class="section-name">{name}</div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
+def fmt_num(v, dec=2, suffix=""):
+    if v is None or (isinstance(v, float) and v != v):
+        return "—"
+    if abs(v) >= 1000:
+        return f"{v:,.0f}{suffix}"
+    return f"{v:.{dec}f}{suffix}"
 
 
-def run_full_cycle():
-    today = today_str()
-    st.session_state.memo_sections = []
-    st.session_state.memo_kind = "full"
-    st.session_state.memo_topic = ""
-
-    progress = st.progress(0.0, text="initializing…")
-
-    for i, (title, build_prompt) in enumerate(SECTIONS):
-        render_section_header(f"{i+1:02d} / {len(SECTIONS):02d}", title)
-        progress.progress(i / len(SECTIONS), text=f"{title} …")
-
-        try:
-            full_text = st.write_stream(stream_research(build_prompt(today), api_key))
-            if not isinstance(full_text, str):
-                full_text = "".join(full_text) if full_text else ""
-            st.session_state.memo_sections.append((title, full_text))
-        except anthropic.APIStatusError as e:
-            msg = getattr(e, "message", str(e))
-            st.error(f"API error in {title}: {msg}")
-            st.session_state.memo_sections.append((title, f"_API error: {msg}_"))
-        except Exception as e:  # noqa: BLE001
-            st.error(f"Error in {title}: {e}")
-            st.session_state.memo_sections.append((title, f"_Error: {e}_"))
-
-        progress.progress((i + 1) / len(SECTIONS), text=f"{title} complete")
-
-    progress.progress(1.0, text="memo complete")
+def fmt_pct(v, dec=1):
+    if v is None or (isinstance(v, float) and v != v):
+        return '<span class="mut">—</span>'
+    cls = "pos" if v >= 0 else "neg"
+    return f'<span class="{cls}">{v:+.{dec}f}%</span>'
 
 
-def run_deep_dive(query: str):
-    today = today_str()
-    st.session_state.memo_sections = []
-    st.session_state.memo_kind = "deep"
-    st.session_state.memo_topic = query
-
-    render_section_header("DEEP DIVE", query.upper())
+def run_stream(prompt, err_prefix="Error"):
+    """Stream a memo into a bordered container; return full text (or error str)."""
     try:
-        full_text = st.write_stream(stream_research(prompt_deep_dive(today, query), api_key))
-        if not isinstance(full_text, str):
-            full_text = "".join(full_text) if full_text else ""
-        st.session_state.memo_sections.append((query.upper(), full_text))
+        with st.container(border=True):
+            out = st.write_stream(stream_research(prompt, api_key))
+        return out if isinstance(out, str) else "".join(out or [])
     except anthropic.APIStatusError as e:
         msg = getattr(e, "message", str(e))
-        st.error(f"API error: {msg}")
-        st.session_state.memo_sections.append((query.upper(), f"_API error: {msg}_"))
+        st.error(f"{err_prefix}: {msg}")
+        return f"_{err_prefix}: {msg}_"
     except Exception as e:  # noqa: BLE001
-        st.error(f"Error: {e}")
-        st.session_state.memo_sections.append((query.upper(), f"_Error: {e}_"))
+        st.error(f"{err_prefix}: {e}")
+        return f"_{err_prefix}: {e}_"
 
 
-def run_market_analysis(country: str):
-    today = today_str()
-    st.session_state.memo_sections = []
-    st.session_state.memo_kind = "market"
-    st.session_state.memo_topic = country
-
-    render_section_header("GLOBAL MARKETS", country.upper())
+def pdf_button(label, section_code, title, subtitle, body, suffix="", key=""):
     try:
-        full_text = st.write_stream(
-            stream_research(prompt_market_analysis(today, country), api_key)
-        )
-        if not isinstance(full_text, str):
-            full_text = "".join(full_text) if full_text else ""
-        st.session_state.memo_sections.append((country.upper(), full_text))
-    except anthropic.APIStatusError as e:
-        msg = getattr(e, "message", str(e))
-        st.error(f"API error: {msg}")
-        st.session_state.memo_sections.append((country.upper(), f"_API error: {msg}_"))
-    except Exception as e:  # noqa: BLE001
-        st.error(f"Error: {e}")
-        st.session_state.memo_sections.append((country.upper(), f"_Error: {e}_"))
-
-
-def assemble_full_memo() -> str:
-    today = today_str()
-    if st.session_state.memo_kind == "deep":
-        header = f"# SIGNAL · DEEP DIVE\n## {st.session_state.memo_topic}\n*{today}*\n\n---\n\n"
-    elif st.session_state.memo_kind == "market":
-        header = (
-            f"# SIGNAL · GLOBAL MARKETS\n"
-            f"## {st.session_state.memo_topic}\n*{today}*\n\n---\n\n"
-        )
-    else:
-        header = f"# SIGNAL · DAILY MEMO\n*{today}*\n\n---\n\n"
-    body = "\n\n---\n\n".join(
-        f"## {title}\n\n{text}" for title, text in st.session_state.memo_sections
-    )
-    return header + body
-
-
-# Detect a fresh globe click (deduplicated by click_id)
-new_globe_click = None
-if isinstance(globe_event, dict):
-    cid = globe_event.get("click_id")
-    if cid and cid != st.session_state.get("last_globe_click_id"):
-        st.session_state.last_globe_click_id = cid
-        new_globe_click = globe_event.get("country")
-
-if run_full:
-    run_full_cycle()
-elif run_deep and topic.strip():
-    run_deep_dive(topic.strip())
-elif run_deep and not topic.strip():
-    st.warning("Enter a topic first.")
-elif new_globe_click:
-    run_market_analysis(new_globe_click)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# DOWNLOAD — PDF for whichever memo just rendered (I / II / III)
-# ─────────────────────────────────────────────────────────────────────────────
-
-if st.session_state.memo_sections:
-    st.markdown("<div class='status-line'>Export</div>", unsafe_allow_html=True)
-
-    full_memo = assemble_full_memo()
-    kind = st.session_state.memo_kind
-
-    if kind == "deep":
-        pdf_section, btn_label = "DeepDive", "⬇  Download Deep Dive (PDF)"
-        section_title = "DEEP DIVE"
-    elif kind == "market":
-        pdf_section, btn_label = "Globe", "⬇  Download Country Memo (PDF)"
-        section_title = "GLOBAL MARKETS — " + st.session_state.memo_topic
-    else:
-        pdf_section, btn_label = "FullCycle", "⬇  Download Full Memo (PDF)"
-        section_title = "FULL RESEARCH CYCLE"
-
-    try:
-        pdf_bytes = pdf_export.memo_to_pdf(
-            section_title,
-            today_str(),
-            full_memo,
-        )
+        data = pdf_export.memo_to_pdf(title, subtitle, body)
         st.download_button(
-            btn_label,
-            data=pdf_bytes,
-            file_name=pdf_export.filename(pdf_section, st.session_state.memo_topic),
-            mime="application/pdf",
-            use_container_width=True,
-            key=f"dl_{kind}_pdf",
+            label, data=data,
+            file_name=pdf_export.filename(section_code, suffix),
+            mime="application/pdf", use_container_width=True, key=key,
         )
     except Exception as e:  # noqa: BLE001
         st.error(f"PDF generation failed: {e}")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION IV — PORTFOLIO PULSE  (auto-fires once per session)
-# ─────────────────────────────────────────────────────────────────────────────
 
-st.markdown("<hr class='gold-rule'>", unsafe_allow_html=True)
-st.markdown("<div class='status-line'>IV · Portfolio Pulse</div>", unsafe_allow_html=True)
+# ═════════════════════════════════════════════════════════════════════════════
+# I / II — RESEARCH
+# ═════════════════════════════════════════════════════════════════════════════
+theme.section_header("I · II", "RESEARCH", "research")
+
+c_full, c_dive, c_btn = st.columns([1.1, 2.2, 0.9])
+with c_full:
+    run_full = st.button("◆  Full Research Cycle", key="run_full", use_container_width=True)
+with c_dive:
+    topic = st.text_input("topic", placeholder="Deep dive — e.g. Japan yield crisis · private credit stress",
+                          label_visibility="collapsed", key="topic_input")
+with c_btn:
+    run_deep = st.button("Research", key="run_deep", use_container_width=True)
+
+if run_full:
+    today = today_str()
+    sections = []
+    prog = st.progress(0.0, text="initializing…")
+    for i, (title, builder) in enumerate(SECTIONS):
+        st.markdown(f'<div class="sig-sub">{i+1:02d} / {len(SECTIONS):02d} · {title}</div>',
+                    unsafe_allow_html=True)
+        prog.progress(i / len(SECTIONS), text=f"{title} …")
+        text = run_stream(builder(today), err_prefix=f"Error in {title}")
+        sections.append((title, text))
+        prog.progress((i + 1) / len(SECTIONS), text=f"{title} complete")
+    prog.progress(1.0, text="memo complete")
+    st.session_state.research = {"kind": "full", "topic": "", "sections": sections}
+
+elif run_deep and topic.strip():
+    st.markdown(f'<div class="sig-sub">DEEP DIVE · {_html.escape(topic.strip())}</div>',
+                unsafe_allow_html=True)
+    text = run_stream(prompt_deep_dive(today_str(), topic.strip()), err_prefix="Error")
+    st.session_state.research = {"kind": "deep", "topic": topic.strip(),
+                                 "sections": [(topic.strip().upper(), text)]}
+elif run_deep:
+    st.warning("Enter a topic first.")
+
+# Render cached research (on plain reruns) + PDF
+_r = st.session_state.research
+if _r and not (run_full or run_deep):
+    if _r["kind"] == "full":
+        for title, text in _r["sections"]:
+            st.markdown(f'<div class="sig-sub">{title}</div>', unsafe_allow_html=True)
+            with st.container(border=True):
+                st.markdown(f'<div class="memo-body">{text}</div>', unsafe_allow_html=True)
+    else:
+        with st.container(border=True):
+            st.markdown(f'<div class="memo-body">{_r["sections"][0][1]}</div>', unsafe_allow_html=True)
+
+if _r:
+    body = "\n\n---\n\n".join(f"## {t}\n\n{x}" for t, x in _r["sections"])
+    if _r["kind"] == "deep":
+        pdf_button("⬇  Download Deep Dive (PDF)", "DeepDive", "DEEP DIVE",
+                   f'{_r["topic"]} · {today_str()}', body, _r["topic"], key="dl_deep")
+    else:
+        pdf_button("⬇  Download Full Memo (PDF)", "FullCycle", "FULL RESEARCH CYCLE",
+                   today_str(), body, key="dl_full")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# III — GLOBE  (Markets / Geopolitics / Debt Cycle)
+# ═════════════════════════════════════════════════════════════════════════════
+theme.section_header("III", "GLOBE", "globe")
+
+with st.spinner("◆ loading live market valuations…"):
+    market_dict = mkt.fetch_market_data()
+
+# valuation history / divergence alerts off the live labels
+if st.session_state.valuation_alerts is None:
+    st.session_state.valuation_alerts = val.update_history_and_alerts(
+        mkt.country_label_map(market_dict)
+    )
+valuation_alerts = st.session_state.valuation_alerts
+position_alerts = val.alerts_for_position(valuation_alerts)
+
+layer = st.radio("Globe layer", ["MARKETS", "GEOPOLITICS", "DEBT CYCLE"],
+                 horizontal=True, label_visibility="collapsed",
+                 key="globe_layer_radio",
+                 index=["MARKETS", "GEOPOLITICS", "DEBT CYCLE"].index(st.session_state.globe_layer))
+st.session_state.globe_layer = layer
+
+# Build nodes for the active layer
+if layer == "MARKETS":
+    theme.caption("Nodes color-coded by P/E vs each market's own 10-year average. Tap a node for a country memo.")
+    base_nodes = mkt.globe_nodes(market_dict)
+    nodes = []
+    for n in base_nodes:
+        pe = f"{n['pe']:.1f}x" if n.get("pe") is not None else "n/a"
+        ytd = f"{n['ytd']:+.1f}% YTD" if n.get("ytd") is not None else ""
+        lines = [{"text": f"{n['index']} · P/E {pe}", "color": "#e8e3d6"},
+                 {"text": n["band"], "color": n["color"]}]
+        if ytd:
+            lines.append({"text": ytd, "color": "#8a8470"})
+        nodes.append({**n, "lines": lines})
+    globe_title = "◆ Markets · valuation"
+
+elif layer == "GEOPOLITICS":
+    theme.caption("Nodes color-coded by current geopolitical-risk intensity (live AI + web search).")
+    if st.session_state.geo_data is None:
+        if st.button("⟲  Load geopolitical risk map", key="load_geo"):
+            with st.spinner("◆ assessing global geopolitical risk…"):
+                countries = [n["name"] for n in mkt.globe_nodes(market_dict)]
+                st.session_state.geo_data = ai.load_geopolitics(api_key, countries)
+            st.rerun()
+    geo = st.session_state.geo_data or {}
+    nodes = []
+    for n in mkt.globe_nodes(market_dict):
+        rec = geo.get(n["name"], {})
+        lvl = (rec.get("level") or "UNKNOWN").upper()
+        color = ai.geo_color(lvl)
+        lines = [{"text": lvl, "color": color}]
+        if rec.get("brief"):
+            lines.append({"text": rec["brief"], "color": "#e8e3d6"})
+        if rec.get("assets"):
+            lines.append({"text": "↳ " + ", ".join(rec["assets"][:2]), "color": "#8a8470"})
+        elif not rec:
+            lines.append({"text": "tap Load above", "color": "#8a8470"})
+        nodes.append({**n, "color": color, "lines": lines})
+    globe_title = "◆ Geopolitics · risk"
+
+else:  # DEBT CYCLE
+    theme.caption("Nodes color-coded by Dalio Monetary-Policy phase (framework baseline). Deep profiles in Section V.")
+    nodes = []
+    for country, b in dc.COUNTRY_BASELINES.items():
+        color = dc.phase_color(b["phase"])
+        lines = [{"text": dc.phase_label(b["phase"]), "color": color}]
+        if b.get("sub"):
+            lines.append({"text": b["sub"], "color": "#8a8470"})
+        nodes.append({"name": country, "lat": b["lat"], "lng": b["lng"],
+                      "color": color, "lines": lines})
+    globe_title = "◆ Debt cycle · MP phase"
+
+# Divergence alert banners (markets layer)
+if layer == "MARKETS":
+    for a in valuation_alerts:
+        cls = "neg" if a["direction"] == "expensive" else "pos"
+        arrow = "▲" if a["direction"] == "expensive" else "▼"
+        st.markdown(
+            f'<div class="hotspot" style="border-left-color:'
+            f'{"#e05c5c" if a["direction"]=="expensive" else "#4ade80"};">'
+            f'<span class="hs-name">{arrow} VALUATION SHIFT</span> '
+            f'<span class="hs-brief" style="display:inline;">{theme.esc(a["country"])}: '
+            f'{a["prev_band"]} → {a["new_band"]}</span></div>',
+            unsafe_allow_html=True,
+        )
+
+globe_event = globe_component(markets=nodes, height=560, title=globe_title,
+                              key="signal_globe", default=None)
+
+# Legend per layer
+if layer == "MARKETS":
+    legend = [("CHEAP", mkt.VAL_COLORS["CHEAP"]), ("FAIR", mkt.VAL_COLORS["FAIR"]),
+              ("RICH", mkt.VAL_COLORS["RICH"]), ("EXPENSIVE", mkt.VAL_COLORS["EXPENSIVE"]),
+              ("NO DATA", mkt.VAL_COLORS["NO DATA"])]
+elif layer == "GEOPOLITICS":
+    legend = [(lv, ai.GEO_RISK_COLORS[lv]) for lv in ai.GEO_RISK_ORDER]
+else:
+    legend = [(dc.phase_label(p), dc.phase_color(p)) for p in
+              ["MP1", "MP2", "MP3", "TRANSITIONING"]]
 st.markdown(
-    "<div style='font-family:\"Inter\",sans-serif; font-size:0.7rem; color:#6a6555; "
-    "letter-spacing:0.15rem; margin-top:0.4rem; margin-bottom:0.8rem;'>"
-    "Live agent check on every position. Auto-refreshes on each new session."
+    '<div class="legend-row">' +
+    "".join(f'<span><span class="legend-dot" style="background:{c}"></span>{theme.esc(l)}</span>'
+            for l, c in legend) +
     "</div>",
     unsafe_allow_html=True,
 )
 
-if "pulse_results" not in st.session_state:
-    st.session_state.pulse_results = {}  # ticker -> raw memo text
+# Hotspots panel (geopolitics)
+if layer == "GEOPOLITICS" and st.session_state.geo_data:
+    hot = [(name, r) for name, r in st.session_state.geo_data.items()
+           if (r.get("level") or "").upper() in ("ESCALATING", "HOT", "CRISIS")]
+    order = {"CRISIS": 0, "HOT": 1, "ESCALATING": 2}
+    hot.sort(key=lambda x: order.get((x[1].get("level") or "").upper(), 9))
+    if hot:
+        theme.subheader("Hotspots")
+        for name, r in hot[:5]:
+            lvl = (r.get("level") or "").upper()
+            col = ai.geo_color(lvl)
+            st.markdown(
+                f'<div class="hotspot"><span class="hs-name">{theme.esc(name)}</span>'
+                f'<span class="hs-lvl" style="background:{col}33;color:{col};">{lvl}</span>'
+                f'<div class="hs-brief">{theme.esc(r.get("brief",""))}</div></div>',
+                unsafe_allow_html=True,
+            )
 
-refresh_col, _ = st.columns([1, 4])
-with refresh_col:
-    if st.button("↻  Refresh Pulse", key="pulse_refresh", use_container_width=True):
-        st.session_state.pulse_results = {}
-        st.rerun()
+# Globe click → country market memo
+new_click = None
+if isinstance(globe_event, dict):
+    cid = globe_event.get("click_id")
+    if cid and cid != st.session_state.last_globe_click_id:
+        st.session_state.last_globe_click_id = cid
+        new_click = globe_event.get("country")
+
+if new_click:
+    theme.subheader(f"Country Memo · {new_click}")
+    text = run_stream(prompt_market_analysis(today_str(), new_click), err_prefix="Error")
+    st.session_state.globe_output = {"country": new_click, "text": text}
+elif st.session_state.globe_output:
+    go = st.session_state.globe_output
+    theme.subheader(f"Country Memo · {go['country']}")
+    with st.container(border=True):
+        st.markdown(f'<div class="memo-body">{go["text"]}</div>', unsafe_allow_html=True)
+
+if st.session_state.globe_output:
+    go = st.session_state.globe_output
+    pdf_button("⬇  Download Country Memo (PDF)", "Globe", f'GLOBAL MARKETS — {go["country"]}',
+               today_str(), f'## {go["country"]}\n\n{go["text"]}', go["country"], key="dl_globe")
 
 
-def _alert_html_for_card(ticker: str) -> str:
+# ═════════════════════════════════════════════════════════════════════════════
+# IV — GLOBAL MARKETS  (valuation screener + credit stress)
+# ═════════════════════════════════════════════════════════════════════════════
+theme.section_header("IV", "GLOBAL MARKETS", "markets")
+theme.caption(f"Live prices &amp; P/E from yfinance (cached 1h). CAPE &amp; 10yr-avg P/E are "
+              f"structural baselines ({mkt.BASELINE_ASOF}). Valuation = live P/E vs that market's 10yr avg.")
+
+rows = list(market_dict.values())
+
+f1, f2, f3 = st.columns(3)
+with f1:
+    region = st.selectbox("Region", mkt.REGION_FILTERS, key="scr_region")
+with f2:
+    valfilter = st.selectbox("Valuation", ["All", "Cheap+Fair", "Rich+Expensive"], key="scr_val")
+with f3:
+    sort_by = st.selectbox("Sort by", ["Valuation (rich→cheap)", "P/E (high→low)",
+                                       "YTD (high→low)", "CAPE (high→low)", "Country (A→Z)"],
+                           key="scr_sort")
+
+def _region_ok(r):
+    if region == "All":
+        return True
+    if region == "EM":
+        return r["em"]
+    if region == "ME+Africa":
+        return r["continent"] == "ME-Africa"
+    return r["continent"] == region
+
+def _val_ok(r):
+    if valfilter == "Cheap+Fair":
+        return r["valuation"] in ("CHEAP", "FAIR")
+    if valfilter == "Rich+Expensive":
+        return r["valuation"] in ("RICH", "EXPENSIVE")
+    return True
+
+filtered = [r for r in rows if _region_ok(r) and _val_ok(r)]
+
+_valrank = {"EXPENSIVE": 4, "RICH": 3, "FAIR": 2, "CHEAP": 1, "NO DATA": 0}
+def _key(r):
+    if sort_by.startswith("Valuation"):
+        return -_valrank.get(r["valuation"], 0)
+    if sort_by.startswith("P/E"):
+        return -(r["pe"] if r["pe"] is not None else -1)
+    if sort_by.startswith("YTD"):
+        return -(r["ytd"] if r["ytd"] is not None else -9999)
+    if sort_by.startswith("CAPE"):
+        return -(r["cape"] if r["cape"] is not None else -1)
+    return r["country"]
+filtered.sort(key=_key)
+
+signals = (st.session_state.val_signals or {}).get("signals", {}) if st.session_state.val_signals else {}
+SIGNAL_COLORS = {"AVOID": "#e05c5c", "WATCH": "#d6c645", "ACCUMULATE": "#a3e635", "BUY": "#4ade80"}
+
+thead = ("<tr><th class='l'>Market</th><th class='l'>Index</th><th>Price</th><th>P/E</th>"
+         "<th>CAPE†</th><th>P/B</th><th>YTD</th><th>52w hi</th><th>Valuation</th><th>Signal</th></tr>")
+trows = []
+for r in filtered:
+    sig = signals.get(r["country"], "")
+    sig_html = (f'<span class="pill" style="background:{SIGNAL_COLORS.get(sig,"#8a8470")}22;'
+                f'color:{SIGNAL_COLORS.get(sig,"#8a8470")};">{sig}</span>') if sig else '<span class="mut">—</span>'
+    val_html = (f'<span class="pill" style="background:{r["color"]}22;color:{r["color"]};">'
+                f'{r["valuation"]}</span>')
+    trows.append(
+        "<tr>"
+        f"<td class='l tk'>{theme.esc(r['country'])}</td>"
+        f"<td class='l mut'>{theme.esc(r['index'])}</td>"
+        f"<td>{fmt_num(r['price'])}</td>"
+        f"<td>{fmt_num(r['pe'],1)}</td>"
+        f"<td>{fmt_num(r['cape'],1)}</td>"
+        f"<td>{fmt_num(r['pb'],1)}</td>"
+        f"<td>{fmt_pct(r['ytd'])}</td>"
+        f"<td>{fmt_pct(r['hi52'])}</td>"
+        f"<td>{val_html}</td>"
+        f"<td>{sig_html}</td>"
+        "</tr>"
+    )
+st.markdown(f'<div class="table-scroll"><table class="sig-table">{thead}{"".join(trows)}</table></div>',
+            unsafe_allow_html=True)
+st.markdown('<div class="sig-caption">† CAPE = cyclically-adjusted P/E, structural baseline estimate; '
+            'verify via the AI commentary below.</div>', unsafe_allow_html=True)
+
+if st.button("⟲  Load AI signals & world valuation read", key="load_signals"):
+    with st.spinner("◆ scoring global valuations through the framework…"):
+        st.session_state.val_signals = ai.load_valuation_signals(
+            api_key, [r for r in filtered if r["pe"] is not None] or filtered)
+    st.rerun()
+
+if st.session_state.val_signals and st.session_state.val_signals.get("commentary"):
+    with st.container(border=True):
+        st.markdown(f'<div class="memo-body">{st.session_state.val_signals["commentary"]}</div>',
+                    unsafe_allow_html=True)
+
+# ── Credit Stress Monitor ────────────────────────────────────────────────────
+theme.subheader("Credit Stress Monitor · Sovereign CDS")
+theme.caption("5-year sovereign CDS spreads (bps) — the market's price of default risk. "
+              "CDS is not free real-time; figures are best-available estimates from public data.")
+
+if st.button("⟲  Load sovereign CDS spreads", key="load_cds"):
+    with st.spinner("◆ pulling sovereign credit-default-swap spreads…"):
+        st.session_state.cds_data = ai.load_cds(api_key)
+    st.rerun()
+
+def _cds_stress(bps):
+    if bps is None:
+        return ("—", "#8a8470")
+    if bps < 100:
+        return ("LOW", "#4ade80")
+    if bps < 300:
+        return ("ELEVATED", "#d6c645")
+    if bps < 600:
+        return ("HIGH", "#e0954c")
+    return ("SEVERE", "#e05c5c")
+
+cds = st.session_state.cds_data
+if cds and cds.get("rows"):
+    crows = sorted(cds["rows"], key=lambda x: -(x.get("cds") or 0))
+    thead = ("<tr><th class='l'>Country</th><th>CDS 5Y</th><th>1W</th><th>1M</th>"
+             "<th>Trend</th><th>Stress</th><th class='l'>Driver</th></tr>")
+    body = []
+    for r in crows[:25]:
+        lvl, col = _cds_stress(r.get("cds"))
+        body.append(
+            "<tr>"
+            f"<td class='l tk'>{theme.esc(r.get('country',''))}</td>"
+            f"<td>{fmt_num(r.get('cds'),0,' bps')}</td>"
+            f"<td>{fmt_pct(r.get('w_chg'),0) if r.get('w_chg') is not None else '<span class=mut>—</span>'}</td>"
+            f"<td>{fmt_pct(r.get('m_chg'),0) if r.get('m_chg') is not None else '<span class=mut>—</span>'}</td>"
+            f"<td class='mut'>{theme.esc(r.get('trend',''))}</td>"
+            f"<td><span class='pill' style='background:{col}22;color:{col};'>{lvl}</span></td>"
+            f"<td class='l mut'>{theme.esc(r.get('note',''))}</td>"
+            "</tr>"
+        )
+    st.markdown(f'<div class="table-scroll"><table class="sig-table">{thead}{"".join(body)}</table></div>',
+                unsafe_allow_html=True)
+    st.markdown(f'<div class="sig-caption">As of: {theme.esc(cds.get("asof","recent estimate"))}</div>',
+                unsafe_allow_html=True)
+else:
+    st.markdown('<div class="sig-caption">No CDS data loaded yet.</div>', unsafe_allow_html=True)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# V — DEBT CYCLE TRACKER
+# ═════════════════════════════════════════════════════════════════════════════
+theme.section_header("V", "DEBT CYCLE TRACKER", "debtcycle")
+theme.caption(f"Ray Dalio MP0–MP3 framework. Structural indicators are a framework baseline "
+              f"({dc.DEBT_ASOF}); the generated memo verifies current figures via web search.")
+
+sel = st.selectbox("Country", dc.COUNTRY_ORDER, key="dc_country")
+b = dc.COUNTRY_BASELINES[sel]
+pcol = dc.phase_color(b["phase"])
+st.markdown(
+    f'<div class="dc-card"><div class="dc-name">{theme.esc(sel)}</div>'
+    f'<span class="dc-phase" style="background:{pcol}33;color:{pcol};">'
+    f'{dc.phase_label(b["phase"])} · {theme.esc(b["sub"])}</span>'
+    f'<div class="dc-ind">'
+    f'<span class="k">Debt / GDP</span><span class="v">{b["debt_gdp"]}%</span>'
+    f'<span class="k">Real policy rate</span><span class="v">{b["real_rate"]:+.1f}%</span>'
+    f'<span class="k">CB balance sheet</span><span class="v">{b["cb_bs"]}% GDP</span>'
+    f'<span class="k">Fiscal balance</span><span class="v">{b["deficit"]:+.1f}% GDP</span>'
+    f'</div>'
+    f'<div class="sig-caption" style="margin-top:0.8rem;">Cycle marker — {theme.esc(b["start"])}</div>'
+    f'<div class="sig-caption">Parallel — {theme.esc(b["parallel"])}</div>'
+    f'</div>',
+    unsafe_allow_html=True,
+)
+
+if st.button(f"◆  Generate {sel} debt-cycle memo", key="gen_debt_memo"):
+    st.session_state.debt_memo.pop(sel, None)
+    theme.subheader(f"Debt Cycle Memo · {sel}")
+    text = run_stream(ai.prompt_debt_memo(today_str(), sel, b), err_prefix="Error")
+    st.session_state.debt_memo[sel] = text
+elif st.session_state.debt_memo.get(sel):
+    theme.subheader(f"Debt Cycle Memo · {sel}")
+    with st.container(border=True):
+        st.markdown(f'<div class="memo-body">{st.session_state.debt_memo[sel]}</div>',
+                    unsafe_allow_html=True)
+
+if st.session_state.debt_memo.get(sel):
+    pdf_button("⬇  Download Debt-Cycle Memo (PDF)", "DebtCycle", f"DEBT CYCLE — {sel}",
+               today_str(), f"## {sel}\n\n{st.session_state.debt_memo[sel]}", sel, key="dl_debt")
+
+# ── Central Bank Policy Tracker ──────────────────────────────────────────────
+theme.subheader("Central Bank Policy Tracker")
+if st.button("⟲  Load central-bank policy tracker", key="load_cb"):
+    with st.spinner("◆ pulling current policy rates…"):
+        st.session_state.cb_data = ai.load_central_banks(api_key)
+    st.rerun()
+
+cb = st.session_state.cb_data
+if cb and cb.get("rows"):
+    thead = ("<tr><th class='l'>Central Bank</th><th class='l'>Country</th><th>Rate</th>"
+             "<th>Dir</th><th>CPI</th><th>Real</th><th>MP</th><th class='l'>Next</th></tr>")
+    body = []
+    DIRC = {"HIKING": ("▲ HIKING", "#e05c5c"), "CUTTING": ("▼ CUTTING", "#4ade80"),
+            "PAUSED": ("— PAUSED", "#8a8470")}
+    for r in cb["rows"]:
+        dlabel, dcol = DIRC.get((r.get("direction") or "").upper(), ("—", "#8a8470"))
+        rate = r.get("rate"); cpi = r.get("cpi")
+        real = (rate - cpi) if (isinstance(rate, (int, float)) and isinstance(cpi, (int, float))) else None
+        real_html = (f'<span class="{"neg" if real < 0 else "pos"}">{real:+.1f}%</span>'
+                     if real is not None else '<span class="mut">—</span>')
+        mp = (r.get("mp_phase") or "").upper()
+        mpcol = dc.phase_color(mp) if mp in ("MP1", "MP2", "MP3", "TRANSITIONING") else "#8a8470"
+        body.append(
+            "<tr>"
+            f"<td class='l tk'>{theme.esc(r.get('bank',''))}</td>"
+            f"<td class='l mut'>{theme.esc(r.get('country',''))}</td>"
+            f"<td>{fmt_num(rate,2,'%')}</td>"
+            f"<td style='color:{dcol};'>{dlabel}</td>"
+            f"<td>{fmt_num(cpi,1,'%')}</td>"
+            f"<td>{real_html}</td>"
+            f"<td><span class='pill' style='background:{mpcol}22;color:{mpcol};'>{mp or '—'}</span></td>"
+            f"<td class='l mut'>{theme.esc(r.get('next_meeting','TBD'))}</td>"
+            "</tr>"
+        )
+    st.markdown(f'<div class="table-scroll"><table class="sig-table">{thead}{"".join(body)}</table></div>',
+                unsafe_allow_html=True)
+    if cb.get("commentary"):
+        with st.container(border=True):
+            st.markdown(f'<div class="memo-body">{cb["commentary"]}</div>', unsafe_allow_html=True)
+else:
+    st.markdown('<div class="sig-caption">No central-bank data loaded yet.</div>', unsafe_allow_html=True)
+
+# ── Currency Debasement Dashboard ────────────────────────────────────────────
+theme.subheader("Currency Debasement vs Gold")
+theme.caption("5-year change of each currency measured against gold (negative = debased). "
+              "Live from yfinance gold + FX histories.")
+
+with st.spinner("◆ computing currency debasement vs gold…"):
+    debase = mkt.fetch_currency_debasement()
+
+valid = [d for d in debase if d.get("chg5y") is not None]
+if valid:
+    lo = min(d["chg5y"] for d in valid)
+    hi = max(d["chg5y"] for d in valid)
+    span = max(abs(lo), abs(hi), 1.0)
+    bars = []
+    for d in sorted(valid, key=lambda x: x["chg5y"]):
+        v = d["chg5y"]
+        clipped = max(-100.0, min(100.0, v))
+        width = abs(clipped) / 100.0 * 50.0  # half-track max 50%
+        color = "#4ade80" if v >= 0 else ("#e05c5c" if v > -90 else "#8b0000")
+        side = "left:50%;" if v >= 0 else f"left:{50 - width}%;"
+        tag = f"{v:+.0f}%" + (" (clipped)" if abs(v) > 100 else "")
+        bars.append(
+            f'<div style="display:flex;align-items:center;gap:8px;margin:3px 0;font-size:11px;">'
+            f'<span style="width:120px;color:#c9a84c;">{theme.esc(d["label"])}</span>'
+            f'<div style="position:relative;flex:1;height:14px;background:#141414;border:1px solid #1e1e1e;">'
+            f'<div style="position:absolute;top:0;height:100%;width:1px;left:50%;background:#3a3a3a;"></div>'
+            f'<div style="position:absolute;top:0;height:100%;{side}width:{width}%;background:{color};"></div>'
+            f'</div>'
+            f'<span style="width:90px;text-align:right;color:{color};">{tag}</span>'
+            f'</div>'
+        )
+    st.markdown('<div class="table-scroll" style="padding:10px;">' + "".join(bars) + "</div>",
+                unsafe_allow_html=True)
+
+    srt = sorted(valid, key=lambda x: x["chg5y"])
+    dcol1, dcol2 = st.columns(2)
+    with dcol1:
+        theme.subheader("Most Debased (5y)")
+        for d in srt[:5]:
+            st.markdown(f'<div class="sig-caption" style="font-size:12px;">'
+                        f'<span style="color:#e05c5c;">▼</span> {theme.esc(d["label"])} '
+                        f'{d["chg5y"]:+.0f}%</div>', unsafe_allow_html=True)
+    with dcol2:
+        theme.subheader("Most Stable (5y)")
+        for d in reversed(srt[-5:]):
+            st.markdown(f'<div class="sig-caption" style="font-size:12px;">'
+                        f'<span style="color:#4ade80;">▲</span> {theme.esc(d["label"])} '
+                        f'{d["chg5y"]:+.0f}%</div>', unsafe_allow_html=True)
+else:
+    st.markdown('<div class="sig-caption">Debasement data unavailable (FX feed unreachable).</div>',
+                unsafe_allow_html=True)
+
+if st.button("⟲  Load debasement commentary", key="load_debase"):
+    with st.spinner("◆ connecting debasement to the MP3 thesis…"):
+        st.session_state.debase_comment = ai.load_debasement_commentary(api_key, debase)
+    st.rerun()
+if st.session_state.debase_comment:
+    with st.container(border=True):
+        st.markdown(f'<div class="memo-body">{st.session_state.debase_comment}</div>',
+                    unsafe_allow_html=True)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# VI — THESIS WAR ROOM
+# ═════════════════════════════════════════════════════════════════════════════
+theme.section_header("VI", "THESIS WAR ROOM", "portfolio")
+theme.caption("Live agent check on every position (auto-fires once per session). "
+              "Run a stress test on demand; track the standing macro theses.")
+
+if st.button("↻  Refresh Pulse", key="pulse_refresh"):
+    st.session_state.pulse_results = {}
+    st.rerun()
+
+
+def _alert_html(ticker):
     rows = position_alerts.get(ticker, [])
     if not rows:
         return ""
-    pieces = []
-    for a in rows:
-        prev_pe = f"{a['prev_pe']:.1f}x" if a.get("prev_pe") is not None else "—"
-        new_pe = f"{a['new_pe']:.1f}x" if a.get("new_pe") is not None else "—"
-        pieces.append(
-            f"◈ VALUATION SIGNAL  {a['country']}: "
-            f"{a['prev_band']} → {a['new_band']} ({prev_pe} → {new_pe})"
-        )
-    return "<div class='val-signal'>" + "<br>".join(pieces) + "</div>"
+    pieces = [f"◈ VALUATION SIGNAL {a['country']}: {a['prev_band']} → {a['new_band']}" for a in rows]
+    return '<div class="val-signal">' + "<br>".join(pieces) + "</div>"
 
 
-def card_html(pos: dict, body_text: str | None) -> str:
-    if body_text is None:
-        return f"""
-<div class="pulse-card skeleton">
-    <div class="ticker">{pos['ticker']}</div>
-    <div class="company">{pos['name']}</div>
-    <div class="weight">{pos['weight']} weight</div>
-    <div class="body"></div>
-</div>
-"""
-    label, color = parse_status(body_text)
-    import html as _html
-    body_clean = _html.escape(body_text).replace("\n", "<br>")
-    return f"""
-<div class="pulse-card">
-    <div class="ticker">{pos['ticker']}</div>
-    <div class="company">{pos['name']}</div>
-    <div class="weight">{pos['weight']} weight</div>
-    <span class="status-badge"
-          style="background:{color}20; color:{color}; border:1px solid {color};">
-        {label}
-    </span>
-    <div class="body">{body_clean}</div>
-    {_alert_html_for_card(pos['ticker'])}
-</div>
-"""
+def card_html(pos, text):
+    if text is None:
+        return (f'<div class="pulse-card skeleton"><div class="ticker">{pos["ticker"]}</div>'
+                f'<div class="company">{pos["name"]}</div>'
+                f'<div class="weight">{pos["weight"]} weight</div><div class="body"></div></div>')
+    label, color = parse_status(text)
+    body = _html.escape(text).replace("\n", "<br>")
+    return (f'<div class="pulse-card"><div class="ticker">{pos["ticker"]}</div>'
+            f'<div class="company">{pos["name"]}</div>'
+            f'<div class="weight">{pos["weight"]} weight</div>'
+            f'<span class="status-badge" style="background:{color}20;color:{color};border:1px solid {color};">{label}</span>'
+            f'<div class="body">{body}</div>{_alert_html(pos["ticker"])}</div>')
 
 
-# 2x2 grid of placeholders
-row1 = st.columns(2, gap="small")
-row2 = st.columns(2, gap="small")
-slots = [row1[0].empty(), row1[1].empty(), row2[0].empty(), row2[1].empty()]
+def stress_card_html(res):
+    momentum = (res.get("momentum") or "NEUTRAL").upper()
+    cls = {"STRENGTHENING": "strong", "WEAKENING": "weak"}.get(momentum, "neutral")
+    mcol = {"STRENGTHENING": "#4ade80", "WEAKENING": "#e05c5c"}.get(momentum, "#c9a84c")
+    helps = "".join(f"<div class='row' style='color:#86efac;'>+ {theme.esc(h)}</div>"
+                    for h in (res.get("helps") or [])[:4])
+    hurts = "".join(f"<div class='row' style='color:#fca5a5;'>− {theme.esc(h)}</div>"
+                    for h in (res.get("hurts") or [])[:4])
+    return (f'<div class="stress-card {cls}">'
+            f'<div class="lbl">Helps (+{res.get("help_score","?")})</div>{helps or "<div class=row>—</div>"}'
+            f'<div class="lbl" style="margin-top:8px;">Hurts (−{res.get("hurt_score","?")})</div>{hurts or "<div class=row>—</div>"}'
+            f'<div style="margin-top:10px;">'
+            f'<span class="pill" style="background:{mcol}22;color:{mcol};">{momentum}</span> '
+            f'<span class="pill" style="background:#c9a84c22;color:#c9a84c;">ACTION: {theme.esc(res.get("action","WATCH"))}</span>'
+            f'</div>'
+            f'<div class="row" style="margin-top:8px;color:#e8e3d6;">{theme.esc(res.get("summary",""))}</div>'
+            f'</div>')
 
-# Initial render: from cache or skeleton
-for i, pos in enumerate(POSITIONS):
-    body = st.session_state.pulse_results.get(pos["ticker"])
-    slots[i].markdown(card_html(pos, body), unsafe_allow_html=True)
 
-# Fire missing ones sequentially with 15s delays
+pulse_status = st.empty()
+slots, stress_slots = {}, {}
+for row_positions in (POSITIONS[:2], POSITIONS[2:]):
+    cols = st.columns(2, gap="small")
+    for col, pos in zip(cols, row_positions):
+        with col:
+            slots[pos["ticker"]] = st.empty()
+            if st.button(f"⚡ Stress Test · {pos['ticker']}", key=f"stress_{pos['ticker']}"):
+                st.session_state.run_stress = pos["ticker"]
+            stress_slots[pos["ticker"]] = st.empty()
+
+# initial render (cached or skeleton)
+for pos in POSITIONS:
+    slots[pos["ticker"]].markdown(
+        card_html(pos, st.session_state.pulse_results.get(pos["ticker"])),
+        unsafe_allow_html=True)
+
+# fire missing pulse calls sequentially (15s gaps, with countdown)
 missing = [p for p in POSITIONS if p["ticker"] not in st.session_state.pulse_results]
 if missing:
     today = today_str()
     for j, pos in enumerate(missing):
         if j > 0:
-            time.sleep(15)
+            for rem in range(15, 0, -1):
+                pulse_status.markdown(
+                    f'<div class="sig-caption">⏳ rate-limit pause · next position ({pos["ticker"]}) in {rem}s…</div>',
+                    unsafe_allow_html=True)
+                time.sleep(1)
+        pulse_status.markdown(
+            f'<div class="sig-caption"><span class="dot" style="background:#c9a84c;"></span>'
+            f'researching {pos["ticker"]}…</div>', unsafe_allow_html=True)
         try:
-            text = call_research(prompt_pulse(today, pos), api_key, max_tokens=1500)
-            if not text:
-                text = "_No response received._"
+            text = call_research(prompt_pulse(today, pos), api_key, max_tokens=1500) or "_No response._"
         except anthropic.APIStatusError as e:
             text = f"_API error: {getattr(e, 'message', str(e))}_"
         except Exception as e:  # noqa: BLE001
             text = f"_Error: {e}_"
         st.session_state.pulse_results[pos["ticker"]] = text
-        i = POSITIONS.index(pos)
-        slots[i].markdown(card_html(pos, text), unsafe_allow_html=True)
+        slots[pos["ticker"]].markdown(card_html(pos, text), unsafe_allow_html=True)
+    pulse_status.empty()
 
-# Once all four are present, offer a PDF
+# render any existing stress results
+for pos in POSITIONS:
+    res = st.session_state.stress_results.get(pos["ticker"])
+    if res:
+        stress_slots[pos["ticker"]].markdown(stress_card_html(res), unsafe_allow_html=True)
+
+# handle a freshly requested stress test
+if st.session_state.run_stress:
+    tkr = st.session_state.run_stress
+    st.session_state.run_stress = None
+    pos = next((p for p in POSITIONS if p["ticker"] == tkr), None)
+    if pos:
+        with st.spinner(f"◆ stress-testing {tkr}…"):
+            res = ai.load_stress_test(api_key, tkr, pos["name"], pos["thesis"])
+        if res:
+            st.session_state.stress_results[tkr] = res
+            stress_slots[tkr].markdown(stress_card_html(res), unsafe_allow_html=True)
+
+# Portfolio Pulse PDF
 if len(st.session_state.pulse_results) >= len(POSITIONS):
-    pulse_memo_lines = [f"# PORTFOLIO PULSE\n*{today_str()}*\n"]
+    lines = [f"# THESIS WAR ROOM · PORTFOLIO PULSE\n*{today_str()}*\n"]
     for pos in POSITIONS:
         text = st.session_state.pulse_results.get(pos["ticker"], "")
         label, _ = parse_status(text)
-        pulse_memo_lines.append(
-            f"\n## {pos['ticker']} · {pos['name']}  ({pos['weight']} weight) — {label}\n\n{text}\n"
+        lines.append(f"\n## {pos['ticker']} · {pos['name']} ({pos['weight']}) — {label}\n\n{text}\n")
+        res = st.session_state.stress_results.get(pos["ticker"])
+        if res:
+            lines.append(f"\n*Stress test — momentum {res.get('momentum')}, action {res.get('action')}: "
+                         f"{res.get('summary','')}*\n")
+    pdf_button("⬇  Download Portfolio Pulse (PDF)", "PortfolioPulse", "PORTFOLIO PULSE",
+               today_str(), "\n".join(lines), key="dl_pulse")
+
+# ── Macro Thesis Tracker ─────────────────────────────────────────────────────
+theme.subheader("Macro Thesis Tracker")
+mcols = st.columns(3, gap="small")
+for col, mt in zip(mcols, MACRO_THESES):
+    with col:
+        res = st.session_state.macro_results.get(mt["name"])
+        if res:
+            conf = res.get("confirmation", "?")
+            status = (res.get("status") or "ACTIVE").upper()
+            scol = {"ACTIVE": "#4ade80", "WATCH": "#d6c645", "PAUSED": "#8a8470"}.get(status, "#c9a84c")
+            ev = "".join(f"<div class='row' style='font-size:12px;color:#e8e3d6;'>• {theme.esc(e)}</div>"
+                         for e in (res.get("evidence") or [])[:3])
+            inner = (f'<span class="pill" style="background:{scol}22;color:{scol};">{status}</span> '
+                     f'<span class="pill" style="background:#c9a84c22;color:#c9a84c;">CONF {conf}/10</span>'
+                     f'<div class="row" style="margin-top:8px;color:#e8e3d6;font-size:13px;">{theme.esc(res.get("summary",""))}</div>'
+                     f'{ev}')
+        else:
+            inner = '<div class="sig-caption">Not yet updated.</div>'
+        st.markdown(
+            f'<div class="pulse-card" style="min-height:auto;">'
+            f'<div class="ticker" style="font-size:1rem;">{theme.esc(mt["name"])}</div>'
+            f'<div class="weight">est. {mt["established"]}</div>'
+            f'<div class="body">{inner}</div></div>',
+            unsafe_allow_html=True,
         )
-        for a in position_alerts.get(pos["ticker"], []):
-            prev_pe = f"{a['prev_pe']:.1f}x" if a.get("prev_pe") is not None else "—"
-            new_pe = f"{a['new_pe']:.1f}x" if a.get("new_pe") is not None else "—"
-            pulse_memo_lines.append(
-                f"\n*Valuation signal — {a['country']}: "
-                f"{a['prev_band']} → {a['new_band']} ({prev_pe} → {new_pe})*\n"
-            )
-    pulse_memo = "\n".join(pulse_memo_lines)
-    try:
-        pulse_pdf = pdf_export.memo_to_pdf("PORTFOLIO PULSE", today_str(), pulse_memo)
-        st.download_button(
-            "⬇  Download Portfolio Pulse (PDF)",
-            data=pulse_pdf,
-            file_name=pdf_export.filename("PortfolioPulse"),
-            mime="application/pdf",
-            use_container_width=True,
-            key="dl_pulse_pdf",
-        )
-    except Exception as e:  # noqa: BLE001
-        st.error(f"Pulse PDF generation failed: {e}")
+        if st.button(f"⟲ Update", key=f"macro_{mt['name'][:12]}"):
+            st.session_state.run_macro = mt["name"]
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION V — EARNINGS CALENDAR
-# ─────────────────────────────────────────────────────────────────────────────
-
-st.markdown("<hr class='gold-rule'>", unsafe_allow_html=True)
-st.markdown("<div class='status-line'>V · Earnings Calendar</div>", unsafe_allow_html=True)
-st.markdown(
-    "<div style='font-family:\"Inter\",sans-serif; font-size:0.7rem; color:#6a6555; "
-    "letter-spacing:0.15rem; margin-top:0.4rem; margin-bottom:0.8rem;'>"
-    "Next earnings dates for portfolio holdings, plus sector-watch names that "
-    "move them. Tap a position to generate a pre-earnings brief."
-    "</div>",
-    unsafe_allow_html=True,
-)
-
-if "earnings_calendar" not in st.session_state:
-    st.session_state.earnings_calendar = None  # list of dicts once loaded
-if "pre_earnings_briefs" not in st.session_state:
-    st.session_state.pre_earnings_briefs = {}  # ticker -> text
-if "active_brief_ticker" not in st.session_state:
-    st.session_state.active_brief_ticker = None
+if st.session_state.run_macro:
+    name = st.session_state.run_macro
+    st.session_state.run_macro = None
+    mt = next((m for m in MACRO_THESES if m["name"] == name), None)
+    if mt:
+        with st.spinner(f"◆ updating thesis: {name}…"):
+            st.session_state.macro_results[name] = ai.load_macro_thesis(api_key, name, mt["desc"])
+        st.rerun()
 
 
-def _parse_calendar(raw: str) -> list[dict]:
-    rows = []
-    for line in raw.splitlines():
+# ═════════════════════════════════════════════════════════════════════════════
+# VII — EARNINGS CALENDAR
+# ═════════════════════════════════════════════════════════════════════════════
+theme.section_header("VII", "EARNINGS CALENDAR", "earnings")
+theme.caption("Next earnings dates for holdings + sector-watch names. Generate a pre-earnings brief per position.")
+
+PORTFOLIO_TICKERS = {"QCOM", "KMI", "CRM", "1810.HK"}
+TICKER_TO_NAME = {
+    "QCOM": "Qualcomm", "KMI": "Kinder Morgan", "CRM": "Salesforce", "1810.HK": "Xiaomi",
+    "NVDA": "Nvidia", "AMD": "AMD", "TSM": "TSMC", "MSFT": "Microsoft", "GOOGL": "Alphabet",
+    "META": "Meta", "OXY": "Occidental", "ET": "Energy Transfer", "WMB": "Williams",
+    "ENB": "Enbridge", "ORCL": "Oracle", "SAP": "SAP", "SNOW": "Snowflake",
+}
+
+
+def _parse_calendar(raw):
+    out = []
+    for line in (raw or "").splitlines():
         line = line.strip().strip("`").strip()
-        if not line or "|" not in line:
+        if "|" not in line:
             continue
         parts = [p.strip() for p in line.split("|")]
-        if len(parts) < 3:
+        if len(parts) < 2 or not parts[0] or len(parts[0]) > 12:
             continue
-        ticker = parts[0]
-        date = parts[1] if len(parts) > 1 else "TBD"
-        eps = parts[2] if len(parts) > 2 else "TBD"
-        conf = parts[3].lower() if len(parts) > 3 else "unknown"
-        if not ticker or len(ticker) > 12:
-            continue
-        rows.append({"ticker": ticker, "date": date, "eps": eps, "confidence": conf})
-    return rows
+        out.append({"ticker": parts[0],
+                    "date": parts[1] if len(parts) > 1 else "TBD",
+                    "eps": parts[2] if len(parts) > 2 else "TBD",
+                    "confidence": parts[3].lower() if len(parts) > 3 else "unknown"})
+    return out
 
 
-def _days_until(date_str: str) -> str:
+def _days_until(date_str):
     try:
         d = datetime.strptime(date_str, "%Y-%m-%d").date()
-        today = datetime.now(ZoneInfo("America/New_York")).date()
-        delta = (d - today).days
-        if delta < 0:
-            return "passed"
-        if delta == 0:
-            return "today"
-        if delta == 1:
-            return "1 day"
-        return f"{delta} days"
+        delta = (d - datetime.now(ZoneInfo("America/New_York")).date()).days
+        return "passed" if delta < 0 else ("today" if delta == 0 else f"{delta}d")
     except Exception:
         return "—"
 
 
-PORTFOLIO_TICKERS = {"QCOM", "KMI", "CRM", "1810.HK"}
-TICKER_TO_NAME = {
-    "QCOM": "Qualcomm", "KMI": "Kinder Morgan",
-    "CRM": "Salesforce", "1810.HK": "Xiaomi",
-    "NVDA": "Nvidia", "AMD": "AMD", "TSM": "TSMC",
-    "MSFT": "Microsoft", "GOOGL": "Alphabet", "META": "Meta",
-    "OXY": "Occidental", "ET": "Energy Transfer", "WMB": "Williams", "ENB": "Enbridge",
-    "ORCL": "Oracle", "SAP": "SAP", "SNOW": "Snowflake",
-}
-
-
-cal_col1, cal_col2 = st.columns([1, 3])
-with cal_col1:
-    load_cal = st.button("Load Calendar", key="load_cal", use_container_width=True)
-
-if load_cal:
-    st.session_state.earnings_calendar = None  # force refresh
+if st.button("⟲  Load / refresh calendar", key="load_cal"):
+    st.session_state.earnings_calendar = None
     st.session_state.pre_earnings_briefs = {}
 
 if st.session_state.earnings_calendar is None:
     with st.spinner("◆ fetching earnings calendar…"):
         try:
-            raw = call_research(prompt_earnings_calendar(today_str()), api_key, max_tokens=2000)
+            raw = call_research(prompt_earnings_calendar(today_str()), api_key, max_tokens=1500)
             st.session_state.earnings_calendar = _parse_calendar(raw)
         except Exception as e:  # noqa: BLE001
             st.error(f"Calendar fetch failed: {e}")
             st.session_state.earnings_calendar = []
 
 cal_rows = st.session_state.earnings_calendar or []
-portfolio_rows = [r for r in cal_rows if r["ticker"].upper() in PORTFOLIO_TICKERS]
-sector_rows = [r for r in cal_rows if r["ticker"].upper() not in PORTFOLIO_TICKERS]
+pf_rows = [r for r in cal_rows if r["ticker"].upper() in PORTFOLIO_TICKERS]
+sw_rows = [r for r in cal_rows if r["ticker"].upper() not in PORTFOLIO_TICKERS]
 
-# Portfolio table
-if portfolio_rows:
-    st.markdown(
-        "<div class='cal-row head'>"
-        "<span>TICKER</span><span class='nm'>NAME</span>"
-        "<span>EARNINGS DATE</span><span>EPS EST</span><span class='du'>IN</span>"
-        "</div>",
-        unsafe_allow_html=True,
-    )
-    for r in portfolio_rows:
+if pf_rows:
+    st.markdown('<div class="cal-row head"><span>Ticker</span><span class="nm">Name</span>'
+                '<span>Date</span><span>EPS</span><span class="du">In</span></div>',
+                unsafe_allow_html=True)
+    for r in pf_rows:
         nm = TICKER_TO_NAME.get(r["ticker"].upper(), r["ticker"])
-        date_disp = r["date"] if r["date"] and r["date"].upper() != "TBD" else "TBD — verify on IR page"
-        days = _days_until(r["date"])
+        date_disp = r["date"] if r["date"].upper() != "TBD" else "TBD — verify on IR page"
         st.markdown(
-            f"<div class='cal-row'>"
-            f"<span class='tk'>{r['ticker']}</span>"
-            f"<span class='nm'>{nm}</span>"
-            f"<span class='dt'>{date_disp}</span>"
-            f"<span class='ep'>{r['eps']}</span>"
-            f"<span class='du'>{days}</span>"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
-        bcol1, bcol2, _ = st.columns([2, 2, 3])
-        with bcol1:
-            if st.button(
-                f"◆  Pre-Earnings Brief · {r['ticker']}",
-                key=f"brief_{r['ticker']}",
-                use_container_width=True,
-            ):
+            f'<div class="cal-row"><span class="tk">{r["ticker"]}</span>'
+            f'<span class="nm">{nm}</span><span class="dt">{date_disp}</span>'
+            f'<span class="ep">{r["eps"]}</span><span class="du">{_days_until(r["date"])}</span></div>',
+            unsafe_allow_html=True)
+        bc, _ = st.columns([2, 3])
+        with bc:
+            if st.button(f"◆ Pre-Earnings Brief · {r['ticker']}", key=f"brief_{r['ticker']}"):
                 st.session_state.active_brief_ticker = r["ticker"]
                 st.session_state.pre_earnings_briefs.pop(r["ticker"], None)
 
-# Sector watch
-if sector_rows:
-    st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
-    st.markdown(
-        "<div class='status-line'>Sector Watch</div>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        "<div class='sector-watch-row' style='border-bottom:1px solid #c9a84c; opacity:0.55;'>"
-        "<span class='tk'>TICKER</span><span class='dt'>NAME</span>"
-        "<span class='dt'>DATE</span><span class='cf'>EPS / CONF</span>"
-        "</div>",
-        unsafe_allow_html=True,
-    )
-    for r in sector_rows:
+if sw_rows:
+    theme.subheader("Sector Watch")
+    st.markdown('<div class="cal-row head"><span>Ticker</span><span class="nm">Name</span>'
+                '<span>Date</span><span>EPS</span><span class="du">Conf</span></div>',
+                unsafe_allow_html=True)
+    for r in sw_rows:
         nm = TICKER_TO_NAME.get(r["ticker"].upper(), r["ticker"])
-        date_disp = r["date"] if r["date"] and r["date"].upper() != "TBD" else "TBD"
+        date_disp = r["date"] if r["date"].upper() != "TBD" else "TBD"
         st.markdown(
-            f"<div class='sector-watch-row'>"
-            f"<span class='tk'>{r['ticker']}</span>"
-            f"<span class='dt'>{nm}</span>"
-            f"<span class='dt'>{date_disp}</span>"
-            f"<span class='cf'>{r['eps']} · {r['confidence']}</span>"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
+            f'<div class="cal-row"><span class="tk">{r["ticker"]}</span>'
+            f'<span class="nm">{nm}</span><span class="dt">{date_disp}</span>'
+            f'<span class="ep">{r["eps"]}</span><span class="du">{r["confidence"]}</span></div>',
+            unsafe_allow_html=True)
 
 if not cal_rows:
-    st.markdown(
-        "<div style='font-family:\"JetBrains Mono\",monospace; font-size:0.75rem; "
-        "color:#6a6555; letter-spacing:0.2rem; text-align:center; margin:1rem 0;'>"
-        "NO CALENDAR DATA YET"
-        "</div>",
-        unsafe_allow_html=True,
-    )
+    st.markdown('<div class="sig-caption" style="text-align:center;">NO CALENDAR DATA YET</div>',
+                unsafe_allow_html=True)
 
-# Pre-earnings brief render
 if st.session_state.active_brief_ticker:
-    ticker = st.session_state.active_brief_ticker
-    earnings_date = next(
-        (r["date"] for r in cal_rows if r["ticker"].upper() == ticker.upper()),
-        "TBD",
-    )
-    st.markdown("<hr class='gold-rule'>", unsafe_allow_html=True)
-    render_section_header("PRE-EARNINGS BRIEF", f"{ticker} · {earnings_date}")
-
-    if ticker not in st.session_state.pre_earnings_briefs:
-        try:
-            full_text = st.write_stream(
-                stream_research(
-                    prompt_pre_earnings(today_str(), ticker, earnings_date),
-                    api_key,
-                )
-            )
-            if not isinstance(full_text, str):
-                full_text = "".join(full_text) if full_text else ""
-            st.session_state.pre_earnings_briefs[ticker] = full_text
-        except anthropic.APIStatusError as e:
-            msg = getattr(e, "message", str(e))
-            st.error(f"API error: {msg}")
-            st.session_state.pre_earnings_briefs[ticker] = f"_API error: {msg}_"
-        except Exception as e:  # noqa: BLE001
-            st.error(f"Error: {e}")
-            st.session_state.pre_earnings_briefs[ticker] = f"_Error: {e}_"
+    tkr = st.session_state.active_brief_ticker
+    edate = next((r["date"] for r in cal_rows if r["ticker"].upper() == tkr.upper()), "TBD")
+    theme.subheader(f"Pre-Earnings Brief · {tkr} · {edate}")
+    if tkr not in st.session_state.pre_earnings_briefs:
+        text = run_stream(prompt_pre_earnings(today_str(), tkr, edate), err_prefix="Error")
+        st.session_state.pre_earnings_briefs[tkr] = text
     else:
-        st.markdown(st.session_state.pre_earnings_briefs[ticker])
+        with st.container(border=True):
+            st.markdown(f'<div class="memo-body">{st.session_state.pre_earnings_briefs[tkr]}</div>',
+                        unsafe_allow_html=True)
+    bt = st.session_state.pre_earnings_briefs.get(tkr, "")
+    if bt:
+        pdf_button("⬇  Download Pre-Earnings Brief (PDF)", "PreEarnings",
+                   f"PRE-EARNINGS BRIEF — {tkr}", f"{edate} · {today_str()}",
+                   f"## {tkr}\n\n{bt}", tkr, key=f"dl_brief_{tkr}")
 
-    brief_text = st.session_state.pre_earnings_briefs.get(ticker, "")
-    if brief_text:
-        try:
-            brief_pdf = pdf_export.memo_to_pdf(
-                f"PRE-EARNINGS BRIEF — {ticker}",
-                f"{earnings_date} · {today_str()}",
-                brief_text,
-            )
-            st.download_button(
-                "⬇  Download Pre-Earnings Brief (PDF)",
-                data=brief_pdf,
-                file_name=pdf_export.filename("PreEarnings", ticker),
-                mime="application/pdf",
-                use_container_width=True,
-                key=f"dl_brief_{ticker}",
-            )
-        except Exception as e:  # noqa: BLE001
-            st.error(f"Brief PDF failed: {e}")
 
-st.markdown("<div style='height:4rem'></div>", unsafe_allow_html=True)
+# ── Footer ───────────────────────────────────────────────────────────────────
+st.markdown("<div style='height:3rem'></div>", unsafe_allow_html=True)
 st.markdown(
-    f"""
-<div style="text-align:center; font-family:'Inter',sans-serif; font-size:0.6rem;
-            color:#4a4538; letter-spacing:0.3rem; text-transform:uppercase;
-            margin-top:2rem;">
-    Signal · {MODEL} · web search enabled
-</div>
-""",
+    f'<div style="text-align:center;font-size:9px;color:#4a4538;letter-spacing:0.3em;'
+    f'text-transform:uppercase;">SIGNAL · {MODEL} · web search enabled · '
+    f'data: yfinance + live AI</div>',
     unsafe_allow_html=True,
 )
