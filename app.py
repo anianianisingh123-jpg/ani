@@ -28,7 +28,7 @@ import streamlit.components.v1 as components
 
 from signal_core import (
     MODEL, get_api_key, today_str, now_str,
-    stream_research, call_research, call_json, parse_status,
+    stream_research, call_research, parse_status,
 )
 import theme
 import market_data as mkt
@@ -1033,7 +1033,7 @@ for col, mt in zip(mcols, MACRO_THESES):
             f'<div class="body">{inner}</div></div>',
             unsafe_allow_html=True,
         )
-        if st.button(f"⟲ Update", key=f"macro_{mt['name'][:12]}"):
+        if st.button("⟲ Update", key=f"macro_{mt['name'][:12]}"):
             st.session_state.run_macro = mt["name"]
 
 if st.session_state.run_macro:
