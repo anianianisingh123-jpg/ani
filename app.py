@@ -19,8 +19,6 @@ from __future__ import annotations
 
 import html as _html
 import time
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 import anthropic
 import streamlit as st
@@ -29,6 +27,7 @@ import streamlit.components.v1 as components
 from signal_core import (
     MODEL, get_api_key, today_str, now_str,
     stream_research, call_research, parse_status,
+    strip_citations, strip_citations_stream,
 )
 import theme
 import market_data as mkt
@@ -276,43 +275,6 @@ In 4–5 sentences cover:
 Be direct. No filler. If nothing material happened say so plainly."""
 
 
-def prompt_earnings_calendar(today):
-    return f"""Today is {today}. Use web search to find the next confirmed earnings date for each ticker below.
-
-PORTFOLIO POSITIONS: QCOM, KMI, CRM, 1810.HK
-SECTOR WATCH: NVDA, AMD, TSM, MSFT, GOOGL, META, OXY, ET, WMB, ENB, ORCL, SAP, SNOW
-
-Output ONE line per ticker in EXACTLY this pipe-delimited format:
-TICKER | YYYY-MM-DD | EPS_ESTIMATE | CONFIDENCE
-
-- YYYY-MM-DD: expected earnings date; use TBD if not confirmed
-- EPS_ESTIMATE: consensus EPS with $ (e.g. $2.35) or TBD
-- CONFIDENCE: one of confirmed, estimated, unknown
-
-Output ONLY these lines — no commentary, no headers, no markdown fences."""
-
-
-def prompt_pre_earnings(today, ticker, earnings_date):
-    blocks = {
-        "QCOM": "For QCOM watch: Automotive segment revenue (thesis $4B by 2026); IoT revenue trend; handset unit guidance and ASP; edge/on-device AI design-win commentary; QTL licensing revenue and royalty rate.",
-        "KMI": "For KMI watch: natural gas throughput volumes; gas-demand commentary incl. AI data center customers; LNG export capacity utilization; dividend guidance / coverage ratio.",
-        "CRM": "For CRM watch: Agentforce seat adoption and attach rate; Remaining Performance Obligation growth; AI-driven deal sizes vs traditional; net revenue retention.",
-        "1810.HK": "For Xiaomi watch: EV delivery numbers and margin per unit; India revenue as % of total (alert if >30%); gross-margin trajectory; China consumer demand commentary.",
-    }
-    watch = blocks.get(ticker.upper(), "")
-    return f"""Today is {today}. Use web search.
-
-Pre-earnings intelligence brief for {ticker} reporting approximately {earnings_date}.
-
-1. CONSENSUS EXPECTATIONS — Street EPS, revenue, key segment metrics; whisper vs official.
-2. WHAT TO WATCH — the 2–3 data points/guidance language that will move the stock. {watch}
-3. THESIS CHECK SCENARIOS — what results strengthen vs challenge the thesis. Specific numbers.
-4. HISTORICAL EARNINGS PATTERN — reaction to beats vs misses over last 4 quarters.
-5. POSITIONING INTO THE PRINT — rational response to a beat, a miss, an in-line result.
-
-Howard Marks memo style. Specific numbers only. No generic statements."""
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # SESSION STATE
 # ─────────────────────────────────────────────────────────────────────────────
@@ -333,9 +295,6 @@ _defaults = {
     "macro_results": {},
     "run_macro": None,
     "debt_memo": {},            # country -> text
-    "earnings_calendar": None,
-    "pre_earnings_briefs": {},
-    "active_brief_ticker": None,
     "valuation_alerts": None,
 }
 for k, v in _defaults.items():
@@ -366,8 +325,9 @@ def run_stream(prompt, err_prefix="Error"):
     """Stream a memo into a bordered container; return full text (or error str)."""
     try:
         with st.container(border=True):
-            out = st.write_stream(stream_research(prompt, api_key))
-        return out if isinstance(out, str) else "".join(out or [])
+            out = st.write_stream(strip_citations_stream(stream_research(prompt, api_key)))
+        text = out if isinstance(out, str) else "".join(out or [])
+        return strip_citations(text)
     except anthropic.APIStatusError as e:
         msg = getattr(e, "message", str(e))
         st.error(f"{err_prefix}: {msg}")
@@ -406,13 +366,21 @@ def cached_geopolitics(_key, countries):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def debtcycle_nodes():
-    """Static MP-phase nodes for the globe (framework baseline — cache-friendly)."""
+    """Static MP-phase nodes for the globe (framework baseline — cache-friendly).
+
+    Tooltip carries the MP phase plus the key debt indicators so the DEBT CYCLE
+    layer shows genuinely different data from the MARKETS / GEOPOLITICS layers.
+    """
     nodes = []
     for country, b in dc.COUNTRY_BASELINES.items():
         color = dc.phase_color(b["phase"])
         lines = [{"text": dc.phase_label(b["phase"]), "color": color}]
         if b.get("sub"):
             lines.append({"text": b["sub"], "color": "#8a8470"})
+        lines.append({"text": f"Debt/GDP {b['debt_gdp']}% · real rate {b['real_rate']:+.1f}%",
+                      "color": "#e8e3d6"})
+        lines.append({"text": f"CB B/S {b['cb_bs']}% · deficit {b['deficit']:+.1f}%",
+                      "color": "#8a8470"})
         nodes.append({"name": country, "lat": b["lat"], "lng": b["lng"],
                       "color": color, "lines": lines})
     return nodes
@@ -526,6 +494,7 @@ def render_globe():
                     st.session_state.geo_data = safe_ai(
                         "Geopolitics", cached_geopolitics, api_key, tuple(countries), fallback={})
                 st.rerun()
+        geo_loaded = st.session_state.geo_data is not None
         geo = st.session_state.geo_data or {}
         nodes = []
         for n in mkt.globe_nodes(market_dict):
@@ -537,7 +506,9 @@ def render_globe():
                 lines.append({"text": rec["brief"], "color": "#e8e3d6"})
             if rec.get("assets"):
                 lines.append({"text": "↳ " + ", ".join(rec["assets"][:2]), "color": "#8a8470"})
-            elif not rec:
+            # Only show the placeholder if the geopolitics data has not been
+            # fetched yet — never once a risk map is loaded.
+            if not geo_loaded:
                 lines.append({"text": "tap Load above", "color": "#8a8470"})
             nodes.append({**n, "color": color, "lines": lines})
         globe_title = "◆ Geopolitics · risk"
@@ -559,6 +530,20 @@ def render_globe():
                 f'{a["prev_band"]} → {a["new_band"]}</span></div>',
                 unsafe_allow_html=True,
             )
+
+    # Deduplicate by country name — one node per country (keep the first, which
+    # is the most data-complete). Stops overlapping/z-fighting nodes that also
+    # cause hover flicker.
+    seen = {}
+    for node in nodes:
+        name = node.get("name")
+        if name not in seen:
+            seen[name] = node
+    nodes = list(seen.values())
+
+    # Persist the active layer's node set so identical reruns send identical data
+    # to the globe iframe (the component skips redundant redraws → no flicker).
+    st.session_state.globe_nodes = nodes
 
     globe_event = globe_component(markets=nodes, height=560, title=globe_title,
                                   key="signal_globe", default=None)
@@ -1089,118 +1074,6 @@ def render_portfolio():
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# EARNINGS CALENDAR
-# ═════════════════════════════════════════════════════════════════════════════
-PORTFOLIO_TICKERS = {"QCOM", "KMI", "CRM", "1810.HK"}
-TICKER_TO_NAME = {
-    "QCOM": "Qualcomm", "KMI": "Kinder Morgan", "CRM": "Salesforce", "1810.HK": "Xiaomi",
-    "NVDA": "Nvidia", "AMD": "AMD", "TSM": "TSMC", "MSFT": "Microsoft", "GOOGL": "Alphabet",
-    "META": "Meta", "OXY": "Occidental", "ET": "Energy Transfer", "WMB": "Williams",
-    "ENB": "Enbridge", "ORCL": "Oracle", "SAP": "SAP", "SNOW": "Snowflake",
-}
-
-
-def _parse_calendar(raw):
-    out = []
-    for line in (raw or "").splitlines():
-        line = line.strip().strip("`").strip()
-        if "|" not in line:
-            continue
-        parts = [p.strip() for p in line.split("|")]
-        if len(parts) < 2 or not parts[0] or len(parts[0]) > 12:
-            continue
-        out.append({"ticker": parts[0],
-                    "date": parts[1] if len(parts) > 1 else "TBD",
-                    "eps": parts[2] if len(parts) > 2 else "TBD",
-                    "confidence": parts[3].lower() if len(parts) > 3 else "unknown"})
-    return out
-
-
-def _days_until(date_str):
-    try:
-        d = datetime.strptime(date_str, "%Y-%m-%d").date()
-        delta = (d - datetime.now(ZoneInfo("America/New_York")).date()).days
-        return "passed" if delta < 0 else ("today" if delta == 0 else f"{delta}d")
-    except Exception:
-        return "—"
-
-
-def render_earnings():
-    theme.section_header("VII", "EARNINGS CALENDAR")
-    theme.caption("Next earnings dates for holdings + sector-watch names. Generate a pre-earnings brief per position.")
-
-    if st.button("⟲  Load / refresh calendar", key="load_cal"):
-        st.session_state.earnings_calendar = None
-        st.session_state.pre_earnings_briefs = {}
-
-    if st.session_state.earnings_calendar is None:
-        with st.spinner("◆ fetching earnings calendar…"):
-            try:
-                raw = call_research(prompt_earnings_calendar(today_str()), api_key, max_tokens=1500)
-                st.session_state.earnings_calendar = _parse_calendar(raw)
-            except Exception as e:  # noqa: BLE001
-                st.error(f"Calendar fetch failed: {e}")
-                st.session_state.earnings_calendar = []
-
-    cal_rows = st.session_state.earnings_calendar or []
-    pf_rows = [r for r in cal_rows if r["ticker"].upper() in PORTFOLIO_TICKERS]
-    sw_rows = [r for r in cal_rows if r["ticker"].upper() not in PORTFOLIO_TICKERS]
-
-    if pf_rows:
-        st.markdown('<div class="cal-row head"><span>Ticker</span><span class="nm">Name</span>'
-                    '<span>Date</span><span>EPS</span><span class="du">In</span></div>',
-                    unsafe_allow_html=True)
-        for r in pf_rows:
-            nm = TICKER_TO_NAME.get(r["ticker"].upper(), r["ticker"])
-            date_disp = r["date"] if r["date"].upper() != "TBD" else "TBD — verify on IR page"
-            st.markdown(
-                f'<div class="cal-row"><span class="tk">{r["ticker"]}</span>'
-                f'<span class="nm">{nm}</span><span class="dt">{date_disp}</span>'
-                f'<span class="ep">{r["eps"]}</span><span class="du">{_days_until(r["date"])}</span></div>',
-                unsafe_allow_html=True)
-            bc, _ = st.columns([2, 3])
-            with bc:
-                if st.button(f"◆ Pre-Earnings Brief · {r['ticker']}", key=f"brief_{r['ticker']}"):
-                    st.session_state.active_brief_ticker = r["ticker"]
-                    st.session_state.pre_earnings_briefs.pop(r["ticker"], None)
-
-    if sw_rows:
-        theme.subheader("Sector Watch")
-        st.markdown('<div class="cal-row head"><span>Ticker</span><span class="nm">Name</span>'
-                    '<span>Date</span><span>EPS</span><span class="du">Conf</span></div>',
-                    unsafe_allow_html=True)
-        for r in sw_rows:
-            nm = TICKER_TO_NAME.get(r["ticker"].upper(), r["ticker"])
-            date_disp = r["date"] if r["date"].upper() != "TBD" else "TBD"
-            st.markdown(
-                f'<div class="cal-row"><span class="tk">{r["ticker"]}</span>'
-                f'<span class="nm">{nm}</span><span class="dt">{date_disp}</span>'
-                f'<span class="ep">{r["eps"]}</span><span class="du">{r["confidence"]}</span></div>',
-                unsafe_allow_html=True)
-
-    if not cal_rows:
-        st.markdown('<div class="sig-caption" style="text-align:center;">NO CALENDAR DATA YET</div>',
-                    unsafe_allow_html=True)
-
-    if st.session_state.active_brief_ticker:
-        tkr = st.session_state.active_brief_ticker
-        edate = next((r["date"] for r in cal_rows if r["ticker"].upper() == tkr.upper()), "TBD")
-        theme.subheader(f"Pre-Earnings Brief · {tkr} · {edate}")
-        if tkr not in st.session_state.pre_earnings_briefs:
-            text = run_stream(prompt_pre_earnings(today_str(), tkr, edate), err_prefix="Error")
-            st.session_state.pre_earnings_briefs[tkr] = text
-        else:
-            with st.container(border=True):
-                st.markdown(f'<div class="memo-body">{st.session_state.pre_earnings_briefs[tkr]}</div>',
-                            unsafe_allow_html=True)
-        bt = st.session_state.pre_earnings_briefs.get(tkr, "")
-        if bt:
-            pdf_button("⬇  Download Pre-Earnings Brief (PDF)", "PreEarnings",
-                       f"PRE-EARNINGS BRIEF — {tkr}", f"{edate} · {today_str()}",
-                       f"## {tkr}\n\n{bt}", tkr, key=f"dl_brief_{tkr}")
-
-
-# ═════════════════════════════════════════════════════════════════════════════
 # SHARED LIVE DATA  (cheap + cached — needed by Globe / Markets / Portfolio)
 # ═════════════════════════════════════════════════════════════════════════════
 with st.spinner("◆ loading live market valuations…"):
@@ -1217,8 +1090,8 @@ position_alerts = val.alerts_for_position(valuation_alerts)
 # ═════════════════════════════════════════════════════════════════════════════
 # TABS  (one section per tab; SIGNAL header stays above)
 # ═════════════════════════════════════════════════════════════════════════════
-tab_research, tab_globe, tab_markets, tab_debt, tab_portfolio, tab_earnings = st.tabs(
-    ["Research", "Globe", "Markets", "Debt Cycle", "Portfolio", "Earnings"]
+tab_research, tab_globe, tab_markets, tab_debt, tab_portfolio = st.tabs(
+    ["Research", "Globe", "Markets", "Debt Cycle", "Portfolio"]
 )
 
 with tab_research:
@@ -1231,8 +1104,6 @@ with tab_debt:
     render_debtcycle()
 with tab_portfolio:
     render_portfolio()
-with tab_earnings:
-    render_earnings()
 
 
 # ── Footer ───────────────────────────────────────────────────────────────────

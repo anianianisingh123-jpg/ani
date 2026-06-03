@@ -15,6 +15,8 @@ Every yfinance call is wrapped; failures degrade to None so nothing breaks.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import streamlit as st
 
 # As-of stamp for the curated structural baselines below.
@@ -138,20 +140,47 @@ def fetch_market_data() -> dict:
         rec.update({"price": None, "pe": None, "pb": None, "ytd": None, "hi52": None})
 
         if yf is not None:
-            # Price / YTD / 52w from the headline index
+            idx = yf.Ticker(meta["index_sym"])
+            last = None
+
+            # Current price + true 52-week high from 1y history.
             try:
-                hist = yf.Ticker(meta["index_sym"]).history(period="1y", auto_adjust=False)
+                hist = idx.history(period="1y", auto_adjust=False)
                 if hist is not None and not hist.empty:
                     closes = hist["Close"].dropna()
                     if len(closes):
                         last = float(closes.iloc[-1])
                         rec["price"] = last
-                        first = float(closes.iloc[0])
-                        if first > 0:
-                            rec["ytd"] = (last / first - 1.0) * 100.0
-                        hi = float(closes.max())
+                        hi = float(closes.max())          # actual 52-week high
                         if hi > 0:
                             rec["hi52"] = (last / hi - 1.0) * 100.0
+            except Exception:
+                pass
+
+            # Prefer the broker-reported 52-week high when it is available.
+            try:
+                info_idx = idx.info or {}
+                hi_info = _safe_num(info_idx.get("fiftyTwoWeekHigh"))
+                if hi_info and hi_info > 0 and last is not None:
+                    rec["hi52"] = (last / hi_info - 1.0) * 100.0
+            except Exception:
+                pass
+
+            # YTD: real year-to-date return from Jan 1 of the CURRENT year
+            # (the previous code used a trailing-12-month period, which is why
+            # the S&P was showing ~+27% instead of the true YTD figure).
+            try:
+                year = datetime.now().year
+                ytd_hist = idx.history(start=f"{year}-01-01", auto_adjust=False)
+                if ytd_hist is not None and not ytd_hist.empty:
+                    yc = ytd_hist["Close"].dropna()
+                    if len(yc) >= 1:
+                        first = float(yc.iloc[0])
+                        cur = float(yc.iloc[-1])
+                        if rec["price"] is None:
+                            rec["price"] = cur
+                        if first > 0:
+                            rec["ytd"] = (cur / first - 1.0) * 100.0
             except Exception:
                 pass
 

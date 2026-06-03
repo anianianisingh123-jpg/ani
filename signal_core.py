@@ -93,6 +93,45 @@ Format your output as a Howard Marks memo: tight paragraphs, specific numbers, n
 
 # ── Anthropic helpers ────────────────────────────────────────────────────────
 
+# Claude's web-search responses can embed citation markup like
+#   <cite index="20-1,20-3">Since 28 February 2026...</cite>
+# which must never reach the UI. strip_citations removes the tags but keeps the
+# inner prose; the catch-all only targets real tags (a letter/"/" after "<") so
+# math like "<30%" or "GDP < 2%" in a memo is left untouched.
+_CITE_PAIR_RE = re.compile(r"<cite[^>]*>(.*?)</cite>", re.DOTALL)
+_TAG_RE = re.compile(r"</?[a-zA-Z][^>]*>")
+# A trailing partial tag (e.g. "<cite index=\"" arriving split across chunks).
+# "<30%" is NOT matched because the char after "<" is not a letter or "/".
+_PARTIAL_TAG_RE = re.compile(r"<(?:/?[a-zA-Z][^>]*)?$")
+
+
+def strip_citations(text: str) -> str:
+    """Strip Claude citation/XML markup, keeping only the readable inner text."""
+    if not text:
+        return text
+    text = _CITE_PAIR_RE.sub(r"\1", text)
+    text = _TAG_RE.sub("", text)
+    return text
+
+
+def strip_citations_stream(gen: Generator[str, None, None]) -> Generator[str, None, None]:
+    """Streaming-safe version: strips citation/XML markup that may straddle chunks."""
+    buf = ""
+    for chunk in gen:
+        buf += chunk
+        buf = _CITE_PAIR_RE.sub(r"\1", buf)   # collapse complete <cite>..</cite>
+        buf = _TAG_RE.sub("", buf)            # drop any other complete tags
+        m = _PARTIAL_TAG_RE.search(buf)       # hold back only a real partial tag
+        if m:
+            yield buf[: m.start()]
+            buf = buf[m.start():]
+        else:
+            yield buf
+            buf = ""
+    if buf:
+        yield _TAG_RE.sub("", buf)
+
+
 def stream_research(prompt: str, api_key: str) -> Generator[str, None, None]:
     """Stream text deltas from Claude with web search enabled."""
     client = anthropic.Anthropic(api_key=api_key)
@@ -136,7 +175,7 @@ def call_research(
     for block in resp.content:
         if getattr(block, "type", "") == "text":
             parts.append(getattr(block, "text", ""))
-    return "".join(parts).strip()
+    return strip_citations("".join(parts).strip())
 
 
 def call_json(prompt: str, api_key: str, max_tokens: int = 3000) -> dict | list | None:
