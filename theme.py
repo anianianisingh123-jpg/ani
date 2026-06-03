@@ -18,13 +18,9 @@ TEXT = "#e8e3d6"
 MUTED = "#8a8470"
 
 def inject_theme() -> None:
-    # IMPORTANT: the markdown string MUST begin with <style> so CommonMark treats
-    # it as a single raw-HTML block that ends only at </style>. (A leading <link>
-    # tag would open a different HTML block that terminates at the first blank
-    # line, leaking the rest of the CSS onto the page as visible text.) The font
-    # is therefore pulled in via @import as the first line inside the stylesheet.
-    st.markdown(
-        f"""<style>
+    # CSS body only (no <style> wrapper here). The font is pulled in via @import
+    # as the first line so there is no leading <link> tag.
+    css = f"""
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Cormorant+Garamond:wght@500;600&display=swap');
 :root {{
   --gold:{GOLD}; --gold-dark:{GOLD_DARK}; --bg:{BG};
@@ -279,10 +275,12 @@ div[role="radiogroup"] label {{ font-size:11px !important; letter-spacing:0.1em;
   .signal-nav .brand {{ display:none; }}
   .legend-row {{ gap:8px; font-size:9px; }}
 }}
-</style>
-""",
-        unsafe_allow_html=True,
-    )
+"""
+    # Strip blank lines so the <style> block can never be split by the markdown
+    # renderer and leak CSS as visible text, then inject ONCE via the canonical
+    # Streamlit pattern: st.markdown("<style>...</style>", unsafe_allow_html=True).
+    css = "\n".join(line for line in css.splitlines() if line.strip())
+    st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
 
 
 def anchor(aid: str) -> None:
