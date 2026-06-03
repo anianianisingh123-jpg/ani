@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SIGNAL · Globe</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #0c0c0c;
+    overflow: hidden;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    color: #e8e3d6;
+    width: 100%;
+    height: 100%;
+  }
+  #globeViz {
+    width: 100%;
+    height: 100%;
+    cursor: grab;
+  }
+  #globeViz:active { cursor: grabbing; }
+
+  .country-label {
+    font-family: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace;
+    color: #c9a84c;
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    font-weight: 500;
+    background: #141414;
+    border: 1px solid #c9a84c;
+    padding: 6px 12px;
+    border-radius: 1px;
+    pointer-events: none;
+    white-space: nowrap;
+    line-height: 1.6;
+  }
+  .country-label .pe-line { color: #e8e3d6; font-size: 10px; letter-spacing: 0.15em; }
+  .country-label .band-line { font-size: 10px; letter-spacing: 0.25em; font-weight: 600; }
+  .country-label .meta-line { color: #e8e3d6; font-size: 10px; letter-spacing: 0.12em; max-width: 240px; white-space: normal; }
+
+  #status {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    font-size: 10px;
+    letter-spacing: 0.25em;
+    text-transform: uppercase;
+    color: #6a6555;
+    pointer-events: none;
+    z-index: 10;
+  }
+
+  #current {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    font-size: 10px;
+    letter-spacing: 0.25em;
+    text-transform: uppercase;
+    color: #c9a84c;
+    pointer-events: none;
+    z-index: 10;
+    text-align: right;
+    max-width: 60%;
+  }
+
+  #hint {
+    position: absolute;
+    bottom: 12px;
+    left: 0;
+    right: 0;
+    text-align: center;
+    font-size: 10px;
+    letter-spacing: 0.3em;
+    text-transform: uppercase;
+    color: #4a4538;
+    pointer-events: none;
+    z-index: 10;
+  }
+</style>
+<script src="https://unpkg.com/three@0.158.0/build/three.min.js"></script>
+<script src="https://unpkg.com/globe.gl@2.32.6/dist/globe.gl.min.js"></script>
+</head>
+<body>
+<div id="globeViz"></div>
+<div id="status">◆ Global Markets</div>
+<div id="current"></div>
+<div id="hint">Tap a node · drag to rotate</div>
+
+<script>
+  const GOLD = '#c9a84c';
+  const GOLD_RGB = '201, 168, 76';
+  const HOT = '#fff5d8';
+
+  // ───── Streamlit bridge (postMessage protocol) ─────
+  function sendMessage(type, data) {
+    const msg = Object.assign({ isStreamlitMessage: true, type: 'streamlit:' + type }, data);
+    window.parent.postMessage(msg, '*');
+  }
+  function sendReady() { sendMessage('componentReady', { apiVersion: 1 }); }
+  function setHeight(h) { sendMessage('setFrameHeight', { height: h }); }
+  function sendValue(value) {
+    sendMessage('setComponentValue', { value: value, dataType: 'json' });
+  }
+
+  let globe = null;
+  let lastClicked = null;
+  let clickSeq = 0;
+  let markets = [];
+  let lastDataSig = null;
+
+  function buildGlobe(data) {
+    markets = data;
+    const el = document.getElementById('globeViz');
+    const w = el.clientWidth || window.innerWidth;
+    const h = el.clientHeight || window.innerHeight;
+
+    globe = Globe()(el)
+      .width(w)
+      .height(h)
+      .backgroundColor('#0c0c0c')
+      .globeImageUrl('https://unpkg.com/three-globe/example/img/earth-dark.jpg')
+      .bumpImageUrl('https://unpkg.com/three-globe/example/img/earth-topology.png')
+      .showAtmosphere(true)
+      .atmosphereColor(GOLD)
+      .atmosphereAltitude(0.18)
+      .pointsData(markets)
+      .pointLat('lat').pointLng('lng')
+      .pointColor(d => d === lastClicked ? HOT : (d.color || GOLD))
+      .pointRadius(0.55)
+      .pointAltitude(0.012)
+      .pointLabel(buildLabel)
+      .onPointClick(handleClick)
+      .ringsData(markets)
+      .ringLat('lat').ringLng('lng')
+      .ringColor(d => (t => hexToRgba(d.color || GOLD, 0.85 * (1 - t))))
+      .ringMaxRadius(d => d === lastClicked ? 6 : 2.8)
+      .ringPropagationSpeed(d => d === lastClicked ? 3.5 : 1.3)
+      .ringRepeatPeriod(d => d === lastClicked ? 600 : 1800)
+      .ringAltitude(0.008);
+
+    const controls = globe.controls();
+    controls.autoRotate = true;
+    controls.autoRotateSpeed = 0.35;
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.minDistance = 180;
+    controls.maxDistance = 500;
+
+    // Slight camera tilt
+    globe.pointOfView({ lat: 20, lng: -20, altitude: 2.2 }, 0);
+
+    // Pause auto-rotate on user interaction
+    el.addEventListener('pointerdown', () => { controls.autoRotate = false; });
+
+    window.addEventListener('resize', resize);
+  }
+
+  function resize() {
+    if (!globe) return;
+    const el = document.getElementById('globeViz');
+    globe.width(el.clientWidth).height(el.clientHeight);
+  }
+
+  function refreshVisuals() {
+    if (!globe) return;
+    globe
+      .pointColor(d => d === lastClicked ? HOT : (d.color || GOLD))
+      .ringMaxRadius(d => d === lastClicked ? 6 : 2.8)
+      .ringPropagationSpeed(d => d === lastClicked ? 3.5 : 1.3)
+      .ringRepeatPeriod(d => d === lastClicked ? 600 : 1800);
+  }
+
+  function hexToRgba(hex, alpha) {
+    const m = /^#?([a-f0-9]{6})$/i.exec(hex);
+    if (!m) return `rgba(${GOLD_RGB}, ${alpha})`;
+    const v = parseInt(m[1], 16);
+    return `rgba(${(v >> 16) & 255}, ${(v >> 8) & 255}, ${v & 255}, ${alpha})`;
+  }
+
+  function buildLabel(d) {
+    // Generic multi-line tooltip: node may carry `lines` = [{text,color}]
+    if (Array.isArray(d.lines) && d.lines.length) {
+      let inner = `<div>${d.name}</div>`;
+      for (const ln of d.lines) {
+        const col = ln && ln.color ? ` style="color:${ln.color}"` : '';
+        inner += `<div class="meta-line"${col}>${(ln && ln.text) || ''}</div>`;
+      }
+      return `<div class="country-label">${inner}</div>`;
+    }
+    // legacy markets tooltip (P/E + band)
+    const peLine = (d.pe != null)
+      ? `<div class="pe-line">P/E ${Number(d.pe).toFixed(1)}x</div>`
+      : `<div class="pe-line">No data</div>`;
+    const band = d.band || 'NO DATA';
+    const bandColor = d.color || GOLD;
+    return `<div class="country-label">
+      <div>${d.name}</div>
+      ${peLine}
+      <div class="band-line" style="color:${bandColor}">${band}</div>
+    </div>`;
+  }
+
+  function handleClick(d) {
+    lastClicked = d;
+    clickSeq += 1;
+    refreshVisuals();
+    globe.controls().autoRotate = false;
+    // Zoom toward the clicked point
+    globe.pointOfView({ lat: d.lat, lng: d.lng, altitude: 1.8 }, 900);
+    // Show current label
+    document.getElementById('current').textContent = '◆ ' + d.name;
+    // Send to Streamlit; click_id changes every click so deduplication works
+    sendValue({
+      country: d.name,
+      lat: d.lat,
+      lng: d.lng,
+      click_id: clickSeq + '-' + Date.now()
+    });
+  }
+
+  // ───── Streamlit render handshake ─────
+  let initialized = false;
+  window.addEventListener('message', (event) => {
+    const data = event.data || {};
+    if (data.type === 'streamlit:render') {
+      const args = (data.args || {});
+      const height = args.height || 560;
+      const el = document.getElementById('globeViz');
+      el.style.height = height + 'px';
+      document.body.style.height = height + 'px';
+      setHeight(height);
+
+      if (args.title) {
+        const s = document.getElementById('status');
+        if (s) s.textContent = args.title;
+      }
+
+      if (!initialized) {
+        initialized = true;
+        lastDataSig = JSON.stringify(args.markets || []);
+        buildGlobe(args.markets || []);
+      } else {
+        // live update nodes (e.g. layer toggle) without rebuilding the globe —
+        // but ONLY when the data actually changed. Re-applying identical data on
+        // every unrelated rerun resets the ring animations and causes flicker.
+        if (args.markets) {
+          const sig = JSON.stringify(args.markets);
+          if (sig !== lastDataSig) {
+            lastDataSig = sig;
+            markets = args.markets;
+            globe.pointsData(markets).ringsData(markets);
+            refreshVisuals();
+          }
+        }
+        resize();
+      }
+    }
+  });
+
+  sendReady();
+</script>
+</body>
+</html>
