@@ -17,25 +17,15 @@ BORDER = "#1e1e1e"
 TEXT = "#e8e3d6"
 MUTED = "#8a8470"
 
-# Sticky-nav jump targets: (anchor id, label)
-NAV_LINKS = [
-    ("research", "RESEARCH"),
-    ("globe", "GLOBE"),
-    ("markets", "MARKETS"),
-    ("debtcycle", "DEBT CYCLE"),
-    ("portfolio", "PORTFOLIO"),
-    ("earnings", "EARNINGS"),
-]
-
-
 def inject_theme() -> None:
-    nav_html = "".join(
-        f'<a href="#{aid}">{label}</a>' for aid, label in NAV_LINKS
-    )
+    # IMPORTANT: the markdown string MUST begin with <style> so CommonMark treats
+    # it as a single raw-HTML block that ends only at </style>. (A leading <link>
+    # tag would open a different HTML block that terminates at the first blank
+    # line, leaking the rest of the CSS onto the page as visible text.) The font
+    # is therefore pulled in via @import as the first line inside the stylesheet.
     st.markdown(
-        f"""
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Cormorant+Garamond:wght@500;600&display=swap" rel="stylesheet">
-<style>
+        f"""<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Cormorant+Garamond:wght@500;600&display=swap');
 :root {{
   --gold:{GOLD}; --gold-dark:{GOLD_DARK}; --bg:{BG};
   --card:{CARD}; --border:{BORDER}; --text:{TEXT}; --muted:{MUTED};
@@ -77,32 +67,31 @@ a, a:visited {{ color: var(--gold) !important; text-decoration: none !important;
 #MainMenu, footer, header {{ visibility: hidden; }}
 
 .block-container {{
-  padding-top: 4.6rem !important;
+  padding-top: 1.6rem !important;
   max-width: 1080px;
 }}
 
-/* ── Sticky nav ─────────────────────────────────────────────────────── */
-.signal-nav {{
-  position: fixed; top: 0; left: 0; right: 0; z-index: 999;
-  display: flex; flex-wrap: wrap; justify-content: center; gap: 6px;
-  padding: 10px 14px;
-  background: rgba(10,10,10,0.82);
-  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+/* ── Tabs (the primary navigation) ──────────────────────────────────── */
+.stTabs [data-baseweb="tab-list"] {{
+  gap: 2px; justify-content: center; flex-wrap: wrap;
   border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; z-index: 50;
+  background: rgba(10,10,10,0.92);
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
 }}
-.signal-nav .brand {{
-  color: var(--gold); font-weight: 700; letter-spacing: 0.35em;
-  font-size: 12px; margin-right: 14px;
+.stTabs [data-baseweb="tab"] {{
+  background: transparent !important; color: var(--muted) !important;
+  font-family: 'JetBrains Mono', monospace !important; font-size: 11px !important;
+  letter-spacing: 0.2em; text-transform: uppercase; font-weight: 500;
+  padding: 10px 16px;
 }}
-.signal-nav a {{
-  color: var(--muted) !important; font-size: 10px; letter-spacing: 0.22em;
-  font-weight: 500; padding: 3px 8px; border-radius: 2px;
-  transition: all 0.15s ease; text-transform: uppercase;
-}}
-.signal-nav a:hover {{ color: var(--gold) !important; background: rgba(201,168,76,0.10); }}
+.stTabs [data-baseweb="tab"]:hover {{ color: var(--gold) !important; }}
+.stTabs [aria-selected="true"] {{ color: var(--gold) !important; }}
+.stTabs [data-baseweb="tab-highlight"],
+.stTabs [data-baseweb="tab-border"] {{ background-color: var(--gold) !important; }}
 
-/* anchor offset so sticky nav doesn't cover section tops */
-.anchor {{ position: relative; top: -78px; visibility: hidden; display: block; height: 0; }}
+/* anchor (kept harmless; tabs are the real nav now) */
+.anchor {{ display: none; }}
 
 /* ── Hero ───────────────────────────────────────────────────────────── */
 .signal-title {{
@@ -249,6 +238,24 @@ table.sig-table .mut {{ color:var(--muted); }}
 .dc-ind .k {{ color:#6a6555; letter-spacing:0.1em; }}
 .dc-ind .v {{ color:var(--text); text-align:right; }}
 
+/* ── Native st.metric cards (debt-cycle indicators) ─────────────────── */
+div[data-testid="stMetric"] {{
+  background: var(--card); border: 1px solid var(--border);
+  border-left: 3px solid var(--gold); border-radius: 3px;
+  padding: 0.7rem 0.9rem;
+}}
+div[data-testid="stMetric"] label,
+div[data-testid="stMetricLabel"], div[data-testid="stMetricLabel"] p {{
+  color: var(--muted) !important; font-size: 10px !important;
+  letter-spacing: 0.14em !important; text-transform: uppercase !important;
+  font-family: 'JetBrains Mono', monospace !important;
+}}
+div[data-testid="stMetricValue"] {{
+  color: var(--text) !important; font-family: 'JetBrains Mono', monospace !important;
+  font-size: 1.45rem !important; font-weight: 600 !important;
+}}
+.dc-badge-row {{ display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin:0.2rem 0 0.4rem 0; }}
+
 /* ── Earnings calendar rows ─────────────────────────────────────────── */
 .cal-row {{ display:grid; grid-template-columns:80px 1fr 150px 90px 90px; gap:0.8rem; align-items:center; padding:0.7rem 0.9rem; border-bottom:1px solid #161616; font-size:12px; }}
 .cal-row .tk {{ color:var(--gold); font-weight:600; letter-spacing:0.12em; }}
@@ -274,10 +281,6 @@ div[role="radiogroup"] label {{ font-size:11px !important; letter-spacing:0.1em;
 }}
 </style>
 """,
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        f'<div class="signal-nav"><span class="brand">SIGNAL</span>{nav_html}</div>',
         unsafe_allow_html=True,
     )
 

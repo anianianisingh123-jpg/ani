@@ -110,6 +110,7 @@
   let lastClicked = null;
   let clickSeq = 0;
   let markets = [];
+  let lastDataSig = null;
 
   function buildGlobe(data) {
     markets = data;
@@ -240,13 +241,20 @@
 
       if (!initialized) {
         initialized = true;
+        lastDataSig = JSON.stringify(args.markets || []);
         buildGlobe(args.markets || []);
       } else {
-        // live update nodes (e.g. layer toggle) without rebuilding the globe
+        // live update nodes (e.g. layer toggle) without rebuilding the globe —
+        // but ONLY when the data actually changed. Re-applying identical data on
+        // every unrelated rerun resets the ring animations and causes flicker.
         if (args.markets) {
-          markets = args.markets;
-          globe.pointsData(markets).ringsData(markets);
-          refreshVisuals();
+          const sig = JSON.stringify(args.markets);
+          if (sig !== lastDataSig) {
+            lastDataSig = sig;
+            markets = args.markets;
+            globe.pointsData(markets).ringsData(markets);
+            refreshVisuals();
+          }
         }
         resize();
       }

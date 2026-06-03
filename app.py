@@ -1,13 +1,13 @@
 """
 SIGNAL — Ani Singh Private Research Agent  ·  Bloomberg-terminal build.
 
-Sections:
-  I/II  RESEARCH   — full daily cycle + topic deep dive
-  III   GLOBE      — 3-layer interactive globe: Markets / Geopolitics / Debt Cycle
-  IV    MARKETS    — global valuation screener + sovereign credit-stress monitor
-  V     DEBT CYCLE — Dalio MP tracker, central-bank policy, currency debasement
-  VI    PORTFOLIO  — Thesis War Room: position pulse + stress tests + macro theses
-  VII   EARNINGS   — calendar + pre-earnings briefs
+Sections (now top-level tabs):
+  RESEARCH    — full daily cycle + topic deep dive
+  GLOBE       — 3-layer interactive globe: Markets / Geopolitics / Debt Cycle
+  MARKETS     — global valuation screener + sovereign credit-stress monitor
+  DEBT CYCLE  — Dalio MP tracker, central-bank policy, currency debasement
+  PORTFOLIO   — Thesis War Room: position pulse + stress tests + macro theses
+  EARNINGS    — calendar + pre-earnings briefs
 PDF download on every research output.
 
 Data sourcing is hybrid: market prices/valuations and currency-vs-gold are LIVE
@@ -49,7 +49,7 @@ theme.inject_theme()
 # ── Hero ─────────────────────────────────────────────────────────────────────
 st.markdown(
     f"""
-<div style="text-align:center; margin-top:0.4rem; margin-bottom:1.4rem;">
+<div style="text-align:center; margin-top:0.4rem; margin-bottom:1.1rem;">
     <div class="signal-title">SIGNAL</div>
     <div class="signal-subtitle">Ani Singh · Private Research Agent</div>
     <div class="signal-meta">{now_str()}</div>
@@ -327,6 +327,7 @@ _defaults = {
     "cb_data": None,
     "debase_comment": None,
     "pulse_results": {},
+    "pulse_fire": False,
     "stress_results": {},
     "run_stress": None,
     "macro_results": {},
@@ -376,6 +377,47 @@ def run_stream(prompt, err_prefix="Error"):
         return f"_{err_prefix}: {e}_"
 
 
+def safe_ai(label, fn, *args, fallback=None):
+    """Run an AI/network loader, surfacing a friendly error instead of crashing."""
+    try:
+        return fn(*args)
+    except anthropic.APIStatusError as e:
+        st.error(f"{label}: {getattr(e, 'message', str(e))}")
+    except Exception as e:  # noqa: BLE001
+        st.error(f"{label}: feed unavailable — {e}")
+    return fallback
+
+
+# Cached AI loaders (ttl 15min) — the api_key is excluded from the cache hash.
+@st.cache_data(ttl=900, show_spinner=False)
+def cached_cds(_key):
+    return ai.load_cds(_key)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def cached_central_banks(_key):
+    return ai.load_central_banks(_key)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def cached_geopolitics(_key, countries):
+    return ai.load_geopolitics(_key, list(countries))
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def debtcycle_nodes():
+    """Static MP-phase nodes for the globe (framework baseline — cache-friendly)."""
+    nodes = []
+    for country, b in dc.COUNTRY_BASELINES.items():
+        color = dc.phase_color(b["phase"])
+        lines = [{"text": dc.phase_label(b["phase"]), "color": color}]
+        if b.get("sub"):
+            lines.append({"text": b["sub"], "color": "#8a8470"})
+        nodes.append({"name": country, "lat": b["lat"], "lng": b["lng"],
+                      "color": color, "lines": lines})
+    return nodes
+
+
 def pdf_button(label, section_code, title, subtitle, body, suffix="", key=""):
     try:
         data = pdf_export.memo_to_pdf(title, subtitle, body)
@@ -389,511 +431,496 @@ def pdf_button(label, section_code, title, subtitle, body, suffix="", key=""):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# I / II — RESEARCH
+# RESEARCH
 # ═════════════════════════════════════════════════════════════════════════════
-theme.section_header("I · II", "RESEARCH", "research")
+def render_research():
+    theme.section_header("I · II", "RESEARCH")
 
-c_full, c_dive, c_btn = st.columns([1.1, 2.2, 0.9])
-with c_full:
-    run_full = st.button("◆  Full Research Cycle", key="run_full", use_container_width=True)
-with c_dive:
-    topic = st.text_input("topic", placeholder="Deep dive — e.g. Japan yield crisis · private credit stress",
-                          label_visibility="collapsed", key="topic_input")
-with c_btn:
-    run_deep = st.button("Research", key="run_deep", use_container_width=True)
+    c_full, c_dive, c_btn = st.columns([1.1, 2.2, 0.9])
+    with c_full:
+        run_full = st.button("◆  Full Research Cycle", key="run_full", use_container_width=True)
+    with c_dive:
+        topic = st.text_input("topic", placeholder="Deep dive — e.g. Japan yield crisis · private credit stress",
+                              label_visibility="collapsed", key="topic_input")
+    with c_btn:
+        run_deep = st.button("Research", key="run_deep", use_container_width=True)
 
-if run_full:
-    today = today_str()
-    sections = []
-    prog = st.progress(0.0, text="initializing…")
-    for i, (title, builder) in enumerate(SECTIONS):
-        st.markdown(f'<div class="sig-sub">{i+1:02d} / {len(SECTIONS):02d} · {title}</div>',
+    if run_full:
+        today = today_str()
+        sections = []
+        prog = st.progress(0.0, text="initializing…")
+        for i, (title, builder) in enumerate(SECTIONS):
+            st.markdown(f'<div class="sig-sub">{i+1:02d} / {len(SECTIONS):02d} · {title}</div>',
+                        unsafe_allow_html=True)
+            prog.progress(i / len(SECTIONS), text=f"{title} …")
+            text = run_stream(builder(today), err_prefix=f"Error in {title}")
+            sections.append((title, text))
+            prog.progress((i + 1) / len(SECTIONS), text=f"{title} complete")
+        prog.progress(1.0, text="memo complete")
+        st.session_state.research = {"kind": "full", "topic": "", "sections": sections}
+
+    elif run_deep and topic.strip():
+        st.markdown(f'<div class="sig-sub">DEEP DIVE · {_html.escape(topic.strip())}</div>',
                     unsafe_allow_html=True)
-        prog.progress(i / len(SECTIONS), text=f"{title} …")
-        text = run_stream(builder(today), err_prefix=f"Error in {title}")
-        sections.append((title, text))
-        prog.progress((i + 1) / len(SECTIONS), text=f"{title} complete")
-    prog.progress(1.0, text="memo complete")
-    st.session_state.research = {"kind": "full", "topic": "", "sections": sections}
+        text = run_stream(prompt_deep_dive(today_str(), topic.strip()), err_prefix="Error")
+        st.session_state.research = {"kind": "deep", "topic": topic.strip(),
+                                     "sections": [(topic.strip().upper(), text)]}
+    elif run_deep:
+        st.warning("Enter a topic first.")
 
-elif run_deep and topic.strip():
-    st.markdown(f'<div class="sig-sub">DEEP DIVE · {_html.escape(topic.strip())}</div>',
-                unsafe_allow_html=True)
-    text = run_stream(prompt_deep_dive(today_str(), topic.strip()), err_prefix="Error")
-    st.session_state.research = {"kind": "deep", "topic": topic.strip(),
-                                 "sections": [(topic.strip().upper(), text)]}
-elif run_deep:
-    st.warning("Enter a topic first.")
-
-# Render cached research (on plain reruns) + PDF
-_r = st.session_state.research
-if _r and not (run_full or run_deep):
-    if _r["kind"] == "full":
-        for title, text in _r["sections"]:
-            st.markdown(f'<div class="sig-sub">{title}</div>', unsafe_allow_html=True)
+    # Render cached research (on plain reruns) + PDF
+    _r = st.session_state.research
+    if _r and not (run_full or run_deep):
+        if _r["kind"] == "full":
+            for title, text in _r["sections"]:
+                st.markdown(f'<div class="sig-sub">{title}</div>', unsafe_allow_html=True)
+                with st.container(border=True):
+                    st.markdown(f'<div class="memo-body">{text}</div>', unsafe_allow_html=True)
+        else:
             with st.container(border=True):
-                st.markdown(f'<div class="memo-body">{text}</div>', unsafe_allow_html=True)
-    else:
-        with st.container(border=True):
-            st.markdown(f'<div class="memo-body">{_r["sections"][0][1]}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="memo-body">{_r["sections"][0][1]}</div>', unsafe_allow_html=True)
 
-if _r:
-    body = "\n\n---\n\n".join(f"## {t}\n\n{x}" for t, x in _r["sections"])
-    if _r["kind"] == "deep":
-        pdf_button("⬇  Download Deep Dive (PDF)", "DeepDive", "DEEP DIVE",
-                   f'{_r["topic"]} · {today_str()}', body, _r["topic"], key="dl_deep")
-    else:
-        pdf_button("⬇  Download Full Memo (PDF)", "FullCycle", "FULL RESEARCH CYCLE",
-                   today_str(), body, key="dl_full")
+    if _r:
+        body = "\n\n---\n\n".join(f"## {t}\n\n{x}" for t, x in _r["sections"])
+        if _r["kind"] == "deep":
+            pdf_button("⬇  Download Deep Dive (PDF)", "DeepDive", "DEEP DIVE",
+                       f'{_r["topic"]} · {today_str()}', body, _r["topic"], key="dl_deep")
+        else:
+            pdf_button("⬇  Download Full Memo (PDF)", "FullCycle", "FULL RESEARCH CYCLE",
+                       today_str(), body, key="dl_full")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# III — GLOBE  (Markets / Geopolitics / Debt Cycle)
+# GLOBE  (Markets / Geopolitics / Debt Cycle)
 # ═════════════════════════════════════════════════════════════════════════════
-theme.section_header("III", "GLOBE", "globe")
+def render_globe():
+    theme.section_header("III", "GLOBE")
 
-with st.spinner("◆ loading live market valuations…"):
-    market_dict = mkt.fetch_market_data()
+    layer = st.radio("Globe layer", ["MARKETS", "GEOPOLITICS", "DEBT CYCLE"],
+                     horizontal=True, label_visibility="collapsed",
+                     key="globe_layer_radio",
+                     index=["MARKETS", "GEOPOLITICS", "DEBT CYCLE"].index(st.session_state.globe_layer))
+    st.session_state.globe_layer = layer
 
-# valuation history / divergence alerts off the live labels
-if st.session_state.valuation_alerts is None:
-    st.session_state.valuation_alerts = val.update_history_and_alerts(
-        mkt.country_label_map(market_dict)
-    )
-valuation_alerts = st.session_state.valuation_alerts
-position_alerts = val.alerts_for_position(valuation_alerts)
+    # Build nodes for the active layer
+    if layer == "MARKETS":
+        theme.caption("Nodes color-coded by P/E vs each market's own 10-year average. Tap a node for a country memo.")
+        base_nodes = mkt.globe_nodes(market_dict)
+        nodes = []
+        for n in base_nodes:
+            pe = f"{n['pe']:.1f}x" if n.get("pe") is not None else "n/a"
+            ytd = f"{n['ytd']:+.1f}% YTD" if n.get("ytd") is not None else ""
+            lines = [{"text": f"{n['index']} · P/E {pe}", "color": "#e8e3d6"},
+                     {"text": n["band"], "color": n["color"]}]
+            if ytd:
+                lines.append({"text": ytd, "color": "#8a8470"})
+            nodes.append({**n, "lines": lines})
+        globe_title = "◆ Markets · valuation"
 
-layer = st.radio("Globe layer", ["MARKETS", "GEOPOLITICS", "DEBT CYCLE"],
-                 horizontal=True, label_visibility="collapsed",
-                 key="globe_layer_radio",
-                 index=["MARKETS", "GEOPOLITICS", "DEBT CYCLE"].index(st.session_state.globe_layer))
-st.session_state.globe_layer = layer
+    elif layer == "GEOPOLITICS":
+        theme.caption("Nodes color-coded by current geopolitical-risk intensity (live AI + web search).")
+        if st.session_state.geo_data is None:
+            if st.button("⟲  Load geopolitical risk map", key="load_geo"):
+                with st.spinner("◆ assessing global geopolitical risk…"):
+                    countries = [n["name"] for n in mkt.globe_nodes(market_dict)]
+                    st.session_state.geo_data = safe_ai(
+                        "Geopolitics", cached_geopolitics, api_key, tuple(countries), fallback={})
+                st.rerun()
+        geo = st.session_state.geo_data or {}
+        nodes = []
+        for n in mkt.globe_nodes(market_dict):
+            rec = geo.get(n["name"], {})
+            lvl = (rec.get("level") or "UNKNOWN").upper()
+            color = ai.geo_color(lvl)
+            lines = [{"text": lvl, "color": color}]
+            if rec.get("brief"):
+                lines.append({"text": rec["brief"], "color": "#e8e3d6"})
+            if rec.get("assets"):
+                lines.append({"text": "↳ " + ", ".join(rec["assets"][:2]), "color": "#8a8470"})
+            elif not rec:
+                lines.append({"text": "tap Load above", "color": "#8a8470"})
+            nodes.append({**n, "color": color, "lines": lines})
+        globe_title = "◆ Geopolitics · risk"
 
-# Build nodes for the active layer
-if layer == "MARKETS":
-    theme.caption("Nodes color-coded by P/E vs each market's own 10-year average. Tap a node for a country memo.")
-    base_nodes = mkt.globe_nodes(market_dict)
-    nodes = []
-    for n in base_nodes:
-        pe = f"{n['pe']:.1f}x" if n.get("pe") is not None else "n/a"
-        ytd = f"{n['ytd']:+.1f}% YTD" if n.get("ytd") is not None else ""
-        lines = [{"text": f"{n['index']} · P/E {pe}", "color": "#e8e3d6"},
-                 {"text": n["band"], "color": n["color"]}]
-        if ytd:
-            lines.append({"text": ytd, "color": "#8a8470"})
-        nodes.append({**n, "lines": lines})
-    globe_title = "◆ Markets · valuation"
+    else:  # DEBT CYCLE
+        theme.caption("Nodes color-coded by Dalio Monetary-Policy phase (framework baseline). Deep profiles in the Debt Cycle tab.")
+        nodes = debtcycle_nodes()
+        globe_title = "◆ Debt cycle · MP phase"
 
-elif layer == "GEOPOLITICS":
-    theme.caption("Nodes color-coded by current geopolitical-risk intensity (live AI + web search).")
-    if st.session_state.geo_data is None:
-        if st.button("⟲  Load geopolitical risk map", key="load_geo"):
-            with st.spinner("◆ assessing global geopolitical risk…"):
-                countries = [n["name"] for n in mkt.globe_nodes(market_dict)]
-                st.session_state.geo_data = ai.load_geopolitics(api_key, countries)
-            st.rerun()
-    geo = st.session_state.geo_data or {}
-    nodes = []
-    for n in mkt.globe_nodes(market_dict):
-        rec = geo.get(n["name"], {})
-        lvl = (rec.get("level") or "UNKNOWN").upper()
-        color = ai.geo_color(lvl)
-        lines = [{"text": lvl, "color": color}]
-        if rec.get("brief"):
-            lines.append({"text": rec["brief"], "color": "#e8e3d6"})
-        if rec.get("assets"):
-            lines.append({"text": "↳ " + ", ".join(rec["assets"][:2]), "color": "#8a8470"})
-        elif not rec:
-            lines.append({"text": "tap Load above", "color": "#8a8470"})
-        nodes.append({**n, "color": color, "lines": lines})
-    globe_title = "◆ Geopolitics · risk"
-
-else:  # DEBT CYCLE
-    theme.caption("Nodes color-coded by Dalio Monetary-Policy phase (framework baseline). Deep profiles in Section V.")
-    nodes = []
-    for country, b in dc.COUNTRY_BASELINES.items():
-        color = dc.phase_color(b["phase"])
-        lines = [{"text": dc.phase_label(b["phase"]), "color": color}]
-        if b.get("sub"):
-            lines.append({"text": b["sub"], "color": "#8a8470"})
-        nodes.append({"name": country, "lat": b["lat"], "lng": b["lng"],
-                      "color": color, "lines": lines})
-    globe_title = "◆ Debt cycle · MP phase"
-
-# Divergence alert banners (markets layer)
-if layer == "MARKETS":
-    for a in valuation_alerts:
-        cls = "neg" if a["direction"] == "expensive" else "pos"
-        arrow = "▲" if a["direction"] == "expensive" else "▼"
-        st.markdown(
-            f'<div class="hotspot" style="border-left-color:'
-            f'{"#e05c5c" if a["direction"]=="expensive" else "#4ade80"};">'
-            f'<span class="hs-name">{arrow} VALUATION SHIFT</span> '
-            f'<span class="hs-brief" style="display:inline;">{theme.esc(a["country"])}: '
-            f'{a["prev_band"]} → {a["new_band"]}</span></div>',
-            unsafe_allow_html=True,
-        )
-
-globe_event = globe_component(markets=nodes, height=560, title=globe_title,
-                              key="signal_globe", default=None)
-
-# Legend per layer
-if layer == "MARKETS":
-    legend = [("CHEAP", mkt.VAL_COLORS["CHEAP"]), ("FAIR", mkt.VAL_COLORS["FAIR"]),
-              ("RICH", mkt.VAL_COLORS["RICH"]), ("EXPENSIVE", mkt.VAL_COLORS["EXPENSIVE"]),
-              ("NO DATA", mkt.VAL_COLORS["NO DATA"])]
-elif layer == "GEOPOLITICS":
-    legend = [(lv, ai.GEO_RISK_COLORS[lv]) for lv in ai.GEO_RISK_ORDER]
-else:
-    legend = [(dc.phase_label(p), dc.phase_color(p)) for p in
-              ["MP1", "MP2", "MP3", "TRANSITIONING"]]
-st.markdown(
-    '<div class="legend-row">' +
-    "".join(f'<span><span class="legend-dot" style="background:{c}"></span>{theme.esc(l)}</span>'
-            for l, c in legend) +
-    "</div>",
-    unsafe_allow_html=True,
-)
-
-# Hotspots panel (geopolitics)
-if layer == "GEOPOLITICS" and st.session_state.geo_data:
-    hot = [(name, r) for name, r in st.session_state.geo_data.items()
-           if (r.get("level") or "").upper() in ("ESCALATING", "HOT", "CRISIS")]
-    order = {"CRISIS": 0, "HOT": 1, "ESCALATING": 2}
-    hot.sort(key=lambda x: order.get((x[1].get("level") or "").upper(), 9))
-    if hot:
-        theme.subheader("Hotspots")
-        for name, r in hot[:5]:
-            lvl = (r.get("level") or "").upper()
-            col = ai.geo_color(lvl)
+    # Divergence alert banners (markets layer)
+    if layer == "MARKETS":
+        for a in valuation_alerts:
+            arrow = "▲" if a["direction"] == "expensive" else "▼"
             st.markdown(
-                f'<div class="hotspot"><span class="hs-name">{theme.esc(name)}</span>'
-                f'<span class="hs-lvl" style="background:{col}33;color:{col};">{lvl}</span>'
-                f'<div class="hs-brief">{theme.esc(r.get("brief",""))}</div></div>',
+                f'<div class="hotspot" style="border-left-color:'
+                f'{"#e05c5c" if a["direction"]=="expensive" else "#4ade80"};">'
+                f'<span class="hs-name">{arrow} VALUATION SHIFT</span> '
+                f'<span class="hs-brief" style="display:inline;">{theme.esc(a["country"])}: '
+                f'{a["prev_band"]} → {a["new_band"]}</span></div>',
                 unsafe_allow_html=True,
             )
 
-# Globe click → country market memo
-new_click = None
-if isinstance(globe_event, dict):
-    cid = globe_event.get("click_id")
-    if cid and cid != st.session_state.last_globe_click_id:
-        st.session_state.last_globe_click_id = cid
-        new_click = globe_event.get("country")
+    globe_event = globe_component(markets=nodes, height=560, title=globe_title,
+                                  key="signal_globe", default=None)
 
-if new_click:
-    theme.subheader(f"Country Memo · {new_click}")
-    text = run_stream(prompt_market_analysis(today_str(), new_click), err_prefix="Error")
-    st.session_state.globe_output = {"country": new_click, "text": text}
-elif st.session_state.globe_output:
-    go = st.session_state.globe_output
-    theme.subheader(f"Country Memo · {go['country']}")
-    with st.container(border=True):
-        st.markdown(f'<div class="memo-body">{go["text"]}</div>', unsafe_allow_html=True)
-
-if st.session_state.globe_output:
-    go = st.session_state.globe_output
-    pdf_button("⬇  Download Country Memo (PDF)", "Globe", f'GLOBAL MARKETS — {go["country"]}',
-               today_str(), f'## {go["country"]}\n\n{go["text"]}', go["country"], key="dl_globe")
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# IV — GLOBAL MARKETS  (valuation screener + credit stress)
-# ═════════════════════════════════════════════════════════════════════════════
-theme.section_header("IV", "GLOBAL MARKETS", "markets")
-theme.caption(f"Live prices &amp; P/E from yfinance (cached 1h). CAPE &amp; 10yr-avg P/E are "
-              f"structural baselines ({mkt.BASELINE_ASOF}). Valuation = live P/E vs that market's 10yr avg.")
-
-rows = list(market_dict.values())
-
-f1, f2, f3 = st.columns(3)
-with f1:
-    region = st.selectbox("Region", mkt.REGION_FILTERS, key="scr_region")
-with f2:
-    valfilter = st.selectbox("Valuation", ["All", "Cheap+Fair", "Rich+Expensive"], key="scr_val")
-with f3:
-    sort_by = st.selectbox("Sort by", ["Valuation (rich→cheap)", "P/E (high→low)",
-                                       "YTD (high→low)", "CAPE (high→low)", "Country (A→Z)"],
-                           key="scr_sort")
-
-def _region_ok(r):
-    if region == "All":
-        return True
-    if region == "EM":
-        return r["em"]
-    if region == "ME+Africa":
-        return r["continent"] == "ME-Africa"
-    return r["continent"] == region
-
-def _val_ok(r):
-    if valfilter == "Cheap+Fair":
-        return r["valuation"] in ("CHEAP", "FAIR")
-    if valfilter == "Rich+Expensive":
-        return r["valuation"] in ("RICH", "EXPENSIVE")
-    return True
-
-filtered = [r for r in rows if _region_ok(r) and _val_ok(r)]
-
-_valrank = {"EXPENSIVE": 4, "RICH": 3, "FAIR": 2, "CHEAP": 1, "NO DATA": 0}
-def _key(r):
-    if sort_by.startswith("Valuation"):
-        return -_valrank.get(r["valuation"], 0)
-    if sort_by.startswith("P/E"):
-        return -(r["pe"] if r["pe"] is not None else -1)
-    if sort_by.startswith("YTD"):
-        return -(r["ytd"] if r["ytd"] is not None else -9999)
-    if sort_by.startswith("CAPE"):
-        return -(r["cape"] if r["cape"] is not None else -1)
-    return r["country"]
-filtered.sort(key=_key)
-
-signals = (st.session_state.val_signals or {}).get("signals", {}) if st.session_state.val_signals else {}
-SIGNAL_COLORS = {"AVOID": "#e05c5c", "WATCH": "#d6c645", "ACCUMULATE": "#a3e635", "BUY": "#4ade80"}
-
-thead = ("<tr><th class='l'>Market</th><th class='l'>Index</th><th>Price</th><th>P/E</th>"
-         "<th>CAPE†</th><th>P/B</th><th>YTD</th><th>52w hi</th><th>Valuation</th><th>Signal</th></tr>")
-trows = []
-for r in filtered:
-    sig = signals.get(r["country"], "")
-    sig_html = (f'<span class="pill" style="background:{SIGNAL_COLORS.get(sig,"#8a8470")}22;'
-                f'color:{SIGNAL_COLORS.get(sig,"#8a8470")};">{sig}</span>') if sig else '<span class="mut">—</span>'
-    val_html = (f'<span class="pill" style="background:{r["color"]}22;color:{r["color"]};">'
-                f'{r["valuation"]}</span>')
-    trows.append(
-        "<tr>"
-        f"<td class='l tk'>{theme.esc(r['country'])}</td>"
-        f"<td class='l mut'>{theme.esc(r['index'])}</td>"
-        f"<td>{fmt_num(r['price'])}</td>"
-        f"<td>{fmt_num(r['pe'],1)}</td>"
-        f"<td>{fmt_num(r['cape'],1)}</td>"
-        f"<td>{fmt_num(r['pb'],1)}</td>"
-        f"<td>{fmt_pct(r['ytd'])}</td>"
-        f"<td>{fmt_pct(r['hi52'])}</td>"
-        f"<td>{val_html}</td>"
-        f"<td>{sig_html}</td>"
-        "</tr>"
+    # Legend per layer
+    if layer == "MARKETS":
+        legend = [("CHEAP", mkt.VAL_COLORS["CHEAP"]), ("FAIR", mkt.VAL_COLORS["FAIR"]),
+                  ("RICH", mkt.VAL_COLORS["RICH"]), ("EXPENSIVE", mkt.VAL_COLORS["EXPENSIVE"]),
+                  ("NO DATA", mkt.VAL_COLORS["NO DATA"])]
+    elif layer == "GEOPOLITICS":
+        legend = [(lv, ai.GEO_RISK_COLORS[lv]) for lv in ai.GEO_RISK_ORDER]
+    else:
+        legend = [(dc.phase_label(p), dc.phase_color(p)) for p in
+                  ["MP1", "MP2", "MP3", "TRANSITIONING"]]
+    st.markdown(
+        '<div class="legend-row">' +
+        "".join(f'<span><span class="legend-dot" style="background:{c}"></span>{theme.esc(l)}</span>'
+                for l, c in legend) +
+        "</div>",
+        unsafe_allow_html=True,
     )
-st.markdown(f'<div class="table-scroll"><table class="sig-table">{thead}{"".join(trows)}</table></div>',
-            unsafe_allow_html=True)
-st.markdown('<div class="sig-caption">† CAPE = cyclically-adjusted P/E, structural baseline estimate; '
-            'verify via the AI commentary below.</div>', unsafe_allow_html=True)
 
-if st.button("⟲  Load AI signals & world valuation read", key="load_signals"):
-    with st.spinner("◆ scoring global valuations through the framework…"):
-        st.session_state.val_signals = ai.load_valuation_signals(
-            api_key, [r for r in filtered if r["pe"] is not None] or filtered)
-    st.rerun()
+    # Hotspots panel (geopolitics)
+    if layer == "GEOPOLITICS" and st.session_state.geo_data:
+        hot = [(name, r) for name, r in st.session_state.geo_data.items()
+               if (r.get("level") or "").upper() in ("ESCALATING", "HOT", "CRISIS")]
+        order = {"CRISIS": 0, "HOT": 1, "ESCALATING": 2}
+        hot.sort(key=lambda x: order.get((x[1].get("level") or "").upper(), 9))
+        if hot:
+            theme.subheader("Hotspots")
+            for name, r in hot[:5]:
+                lvl = (r.get("level") or "").upper()
+                col = ai.geo_color(lvl)
+                st.markdown(
+                    f'<div class="hotspot"><span class="hs-name">{theme.esc(name)}</span>'
+                    f'<span class="hs-lvl" style="background:{col}33;color:{col};">{lvl}</span>'
+                    f'<div class="hs-brief">{theme.esc(r.get("brief",""))}</div></div>',
+                    unsafe_allow_html=True,
+                )
 
-if st.session_state.val_signals and st.session_state.val_signals.get("commentary"):
-    with st.container(border=True):
-        st.markdown(f'<div class="memo-body">{st.session_state.val_signals["commentary"]}</div>',
-                    unsafe_allow_html=True)
+    # Globe click → country market memo
+    new_click = None
+    if isinstance(globe_event, dict):
+        cid = globe_event.get("click_id")
+        if cid and cid != st.session_state.last_globe_click_id:
+            st.session_state.last_globe_click_id = cid
+            new_click = globe_event.get("country")
 
-# ── Credit Stress Monitor ────────────────────────────────────────────────────
-theme.subheader("Credit Stress Monitor · Sovereign CDS")
-theme.caption("5-year sovereign CDS spreads (bps) — the market's price of default risk. "
-              "CDS is not free real-time; figures are best-available estimates from public data.")
-
-if st.button("⟲  Load sovereign CDS spreads", key="load_cds"):
-    with st.spinner("◆ pulling sovereign credit-default-swap spreads…"):
-        st.session_state.cds_data = ai.load_cds(api_key)
-    st.rerun()
-
-def _cds_stress(bps):
-    if bps is None:
-        return ("—", "#8a8470")
-    if bps < 100:
-        return ("LOW", "#4ade80")
-    if bps < 300:
-        return ("ELEVATED", "#d6c645")
-    if bps < 600:
-        return ("HIGH", "#e0954c")
-    return ("SEVERE", "#e05c5c")
-
-cds = st.session_state.cds_data
-if cds and cds.get("rows"):
-    crows = sorted(cds["rows"], key=lambda x: -(x.get("cds") or 0))
-    thead = ("<tr><th class='l'>Country</th><th>CDS 5Y</th><th>1W</th><th>1M</th>"
-             "<th>Trend</th><th>Stress</th><th class='l'>Driver</th></tr>")
-    body = []
-    for r in crows[:25]:
-        lvl, col = _cds_stress(r.get("cds"))
-        body.append(
-            "<tr>"
-            f"<td class='l tk'>{theme.esc(r.get('country',''))}</td>"
-            f"<td>{fmt_num(r.get('cds'),0,' bps')}</td>"
-            f"<td>{fmt_pct(r.get('w_chg'),0) if r.get('w_chg') is not None else '<span class=mut>—</span>'}</td>"
-            f"<td>{fmt_pct(r.get('m_chg'),0) if r.get('m_chg') is not None else '<span class=mut>—</span>'}</td>"
-            f"<td class='mut'>{theme.esc(r.get('trend',''))}</td>"
-            f"<td><span class='pill' style='background:{col}22;color:{col};'>{lvl}</span></td>"
-            f"<td class='l mut'>{theme.esc(r.get('note',''))}</td>"
-            "</tr>"
-        )
-    st.markdown(f'<div class="table-scroll"><table class="sig-table">{thead}{"".join(body)}</table></div>',
-                unsafe_allow_html=True)
-    st.markdown(f'<div class="sig-caption">As of: {theme.esc(cds.get("asof","recent estimate"))}</div>',
-                unsafe_allow_html=True)
-else:
-    st.markdown('<div class="sig-caption">No CDS data loaded yet.</div>', unsafe_allow_html=True)
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# V — DEBT CYCLE TRACKER
-# ═════════════════════════════════════════════════════════════════════════════
-theme.section_header("V", "DEBT CYCLE TRACKER", "debtcycle")
-theme.caption(f"Ray Dalio MP0–MP3 framework. Structural indicators are a framework baseline "
-              f"({dc.DEBT_ASOF}); the generated memo verifies current figures via web search.")
-
-sel = st.selectbox("Country", dc.COUNTRY_ORDER, key="dc_country")
-b = dc.COUNTRY_BASELINES[sel]
-pcol = dc.phase_color(b["phase"])
-st.markdown(
-    f'<div class="dc-card"><div class="dc-name">{theme.esc(sel)}</div>'
-    f'<span class="dc-phase" style="background:{pcol}33;color:{pcol};">'
-    f'{dc.phase_label(b["phase"])} · {theme.esc(b["sub"])}</span>'
-    f'<div class="dc-ind">'
-    f'<span class="k">Debt / GDP</span><span class="v">{b["debt_gdp"]}%</span>'
-    f'<span class="k">Real policy rate</span><span class="v">{b["real_rate"]:+.1f}%</span>'
-    f'<span class="k">CB balance sheet</span><span class="v">{b["cb_bs"]}% GDP</span>'
-    f'<span class="k">Fiscal balance</span><span class="v">{b["deficit"]:+.1f}% GDP</span>'
-    f'</div>'
-    f'<div class="sig-caption" style="margin-top:0.8rem;">Cycle marker — {theme.esc(b["start"])}</div>'
-    f'<div class="sig-caption">Parallel — {theme.esc(b["parallel"])}</div>'
-    f'</div>',
-    unsafe_allow_html=True,
-)
-
-if st.button(f"◆  Generate {sel} debt-cycle memo", key="gen_debt_memo"):
-    st.session_state.debt_memo.pop(sel, None)
-    theme.subheader(f"Debt Cycle Memo · {sel}")
-    text = run_stream(ai.prompt_debt_memo(today_str(), sel, b), err_prefix="Error")
-    st.session_state.debt_memo[sel] = text
-elif st.session_state.debt_memo.get(sel):
-    theme.subheader(f"Debt Cycle Memo · {sel}")
-    with st.container(border=True):
-        st.markdown(f'<div class="memo-body">{st.session_state.debt_memo[sel]}</div>',
-                    unsafe_allow_html=True)
-
-if st.session_state.debt_memo.get(sel):
-    pdf_button("⬇  Download Debt-Cycle Memo (PDF)", "DebtCycle", f"DEBT CYCLE — {sel}",
-               today_str(), f"## {sel}\n\n{st.session_state.debt_memo[sel]}", sel, key="dl_debt")
-
-# ── Central Bank Policy Tracker ──────────────────────────────────────────────
-theme.subheader("Central Bank Policy Tracker")
-if st.button("⟲  Load central-bank policy tracker", key="load_cb"):
-    with st.spinner("◆ pulling current policy rates…"):
-        st.session_state.cb_data = ai.load_central_banks(api_key)
-    st.rerun()
-
-cb = st.session_state.cb_data
-if cb and cb.get("rows"):
-    thead = ("<tr><th class='l'>Central Bank</th><th class='l'>Country</th><th>Rate</th>"
-             "<th>Dir</th><th>CPI</th><th>Real</th><th>MP</th><th class='l'>Next</th></tr>")
-    body = []
-    DIRC = {"HIKING": ("▲ HIKING", "#e05c5c"), "CUTTING": ("▼ CUTTING", "#4ade80"),
-            "PAUSED": ("— PAUSED", "#8a8470")}
-    for r in cb["rows"]:
-        dlabel, dcol = DIRC.get((r.get("direction") or "").upper(), ("—", "#8a8470"))
-        rate = r.get("rate"); cpi = r.get("cpi")
-        real = (rate - cpi) if (isinstance(rate, (int, float)) and isinstance(cpi, (int, float))) else None
-        real_html = (f'<span class="{"neg" if real < 0 else "pos"}">{real:+.1f}%</span>'
-                     if real is not None else '<span class="mut">—</span>')
-        mp = (r.get("mp_phase") or "").upper()
-        mpcol = dc.phase_color(mp) if mp in ("MP1", "MP2", "MP3", "TRANSITIONING") else "#8a8470"
-        body.append(
-            "<tr>"
-            f"<td class='l tk'>{theme.esc(r.get('bank',''))}</td>"
-            f"<td class='l mut'>{theme.esc(r.get('country',''))}</td>"
-            f"<td>{fmt_num(rate,2,'%')}</td>"
-            f"<td style='color:{dcol};'>{dlabel}</td>"
-            f"<td>{fmt_num(cpi,1,'%')}</td>"
-            f"<td>{real_html}</td>"
-            f"<td><span class='pill' style='background:{mpcol}22;color:{mpcol};'>{mp or '—'}</span></td>"
-            f"<td class='l mut'>{theme.esc(r.get('next_meeting','TBD'))}</td>"
-            "</tr>"
-        )
-    st.markdown(f'<div class="table-scroll"><table class="sig-table">{thead}{"".join(body)}</table></div>',
-                unsafe_allow_html=True)
-    if cb.get("commentary"):
+    if new_click:
+        theme.subheader(f"Country Memo · {new_click}")
+        text = run_stream(prompt_market_analysis(today_str(), new_click), err_prefix="Error")
+        st.session_state.globe_output = {"country": new_click, "text": text}
+    elif st.session_state.globe_output:
+        go = st.session_state.globe_output
+        theme.subheader(f"Country Memo · {go['country']}")
         with st.container(border=True):
-            st.markdown(f'<div class="memo-body">{cb["commentary"]}</div>', unsafe_allow_html=True)
-else:
-    st.markdown('<div class="sig-caption">No central-bank data loaded yet.</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="memo-body">{go["text"]}</div>', unsafe_allow_html=True)
 
-# ── Currency Debasement Dashboard ────────────────────────────────────────────
-theme.subheader("Currency Debasement vs Gold")
-theme.caption("5-year change of each currency measured against gold (negative = debased). "
-              "Live from yfinance gold + FX histories.")
+    if st.session_state.globe_output:
+        go = st.session_state.globe_output
+        pdf_button("⬇  Download Country Memo (PDF)", "Globe", f'GLOBAL MARKETS — {go["country"]}',
+                   today_str(), f'## {go["country"]}\n\n{go["text"]}', go["country"], key="dl_globe")
 
-with st.spinner("◆ computing currency debasement vs gold…"):
-    debase = mkt.fetch_currency_debasement()
 
-valid = [d for d in debase if d.get("chg5y") is not None]
-if valid:
-    lo = min(d["chg5y"] for d in valid)
-    hi = max(d["chg5y"] for d in valid)
-    span = max(abs(lo), abs(hi), 1.0)
-    bars = []
-    for d in sorted(valid, key=lambda x: x["chg5y"]):
-        v = d["chg5y"]
-        clipped = max(-100.0, min(100.0, v))
-        width = abs(clipped) / 100.0 * 50.0  # half-track max 50%
-        color = "#4ade80" if v >= 0 else ("#e05c5c" if v > -90 else "#8b0000")
-        side = "left:50%;" if v >= 0 else f"left:{50 - width}%;"
-        tag = f"{v:+.0f}%" + (" (clipped)" if abs(v) > 100 else "")
-        bars.append(
-            f'<div style="display:flex;align-items:center;gap:8px;margin:3px 0;font-size:11px;">'
-            f'<span style="width:120px;color:#c9a84c;">{theme.esc(d["label"])}</span>'
-            f'<div style="position:relative;flex:1;height:14px;background:#141414;border:1px solid #1e1e1e;">'
-            f'<div style="position:absolute;top:0;height:100%;width:1px;left:50%;background:#3a3a3a;"></div>'
-            f'<div style="position:absolute;top:0;height:100%;{side}width:{width}%;background:{color};"></div>'
-            f'</div>'
-            f'<span style="width:90px;text-align:right;color:{color};">{tag}</span>'
-            f'</div>'
+# ═════════════════════════════════════════════════════════════════════════════
+# GLOBAL MARKETS  (valuation screener + credit stress)
+# ═════════════════════════════════════════════════════════════════════════════
+def render_markets():
+    theme.section_header("IV", "GLOBAL MARKETS")
+    theme.caption(f"Live prices &amp; P/E from yfinance (cached 1h). CAPE &amp; 10yr-avg P/E are "
+                  f"structural baselines ({mkt.BASELINE_ASOF}). Valuation = live P/E vs that market's 10yr avg.")
+
+    rows = list(market_dict.values())
+
+    f1, f2, f3 = st.columns(3)
+    with f1:
+        region = st.selectbox("Region", mkt.REGION_FILTERS, key="scr_region")
+    with f2:
+        valfilter = st.selectbox("Valuation", ["All", "Cheap+Fair", "Rich+Expensive"], key="scr_val")
+    with f3:
+        sort_by = st.selectbox("Sort by", ["Valuation (rich→cheap)", "P/E (high→low)",
+                                           "YTD (high→low)", "CAPE (high→low)", "Country (A→Z)"],
+                               key="scr_sort")
+
+    def _region_ok(r):
+        if region == "All":
+            return True
+        if region == "EM":
+            return r["em"]
+        if region == "ME+Africa":
+            return r["continent"] == "ME-Africa"
+        return r["continent"] == region
+
+    def _val_ok(r):
+        if valfilter == "Cheap+Fair":
+            return r["valuation"] in ("CHEAP", "FAIR")
+        if valfilter == "Rich+Expensive":
+            return r["valuation"] in ("RICH", "EXPENSIVE")
+        return True
+
+    filtered = [r for r in rows if _region_ok(r) and _val_ok(r)]
+
+    _valrank = {"EXPENSIVE": 4, "RICH": 3, "FAIR": 2, "CHEAP": 1, "NO DATA": 0}
+    def _key(r):
+        if sort_by.startswith("Valuation"):
+            return -_valrank.get(r["valuation"], 0)
+        if sort_by.startswith("P/E"):
+            return -(r["pe"] if r["pe"] is not None else -1)
+        if sort_by.startswith("YTD"):
+            return -(r["ytd"] if r["ytd"] is not None else -9999)
+        if sort_by.startswith("CAPE"):
+            return -(r["cape"] if r["cape"] is not None else -1)
+        return r["country"]
+    filtered.sort(key=_key)
+
+    signals = (st.session_state.val_signals or {}).get("signals", {}) if st.session_state.val_signals else {}
+    SIGNAL_COLORS = {"AVOID": "#e05c5c", "WATCH": "#d6c645", "ACCUMULATE": "#a3e635", "BUY": "#4ade80"}
+
+    thead = ("<tr><th class='l'>Market</th><th class='l'>Index</th><th>Price</th><th>P/E</th>"
+             "<th>CAPE†</th><th>P/B</th><th>YTD</th><th>52w hi</th><th>Valuation</th><th>Signal</th></tr>")
+    trows = []
+    for r in filtered:
+        sig = signals.get(r["country"], "")
+        sig_html = (f'<span class="pill" style="background:{SIGNAL_COLORS.get(sig,"#8a8470")}22;'
+                    f'color:{SIGNAL_COLORS.get(sig,"#8a8470")};">{sig}</span>') if sig else '<span class="mut">—</span>'
+        val_html = (f'<span class="pill" style="background:{r["color"]}22;color:{r["color"]};">'
+                    f'{r["valuation"]}</span>')
+        trows.append(
+            "<tr>"
+            f"<td class='l tk'>{theme.esc(r['country'])}</td>"
+            f"<td class='l mut'>{theme.esc(r['index'])}</td>"
+            f"<td>{fmt_num(r['price'])}</td>"
+            f"<td>{fmt_num(r['pe'],1)}</td>"
+            f"<td>{fmt_num(r['cape'],1)}</td>"
+            f"<td>{fmt_num(r['pb'],1)}</td>"
+            f"<td>{fmt_pct(r['ytd'])}</td>"
+            f"<td>{fmt_pct(r['hi52'])}</td>"
+            f"<td>{val_html}</td>"
+            f"<td>{sig_html}</td>"
+            "</tr>"
         )
-    st.markdown('<div class="table-scroll" style="padding:10px;">' + "".join(bars) + "</div>",
+    st.markdown(f'<div class="table-scroll"><table class="sig-table">{thead}{"".join(trows)}</table></div>',
                 unsafe_allow_html=True)
+    st.markdown('<div class="sig-caption">† CAPE = cyclically-adjusted P/E, structural baseline estimate; '
+                'verify via the AI commentary below.</div>', unsafe_allow_html=True)
 
-    srt = sorted(valid, key=lambda x: x["chg5y"])
-    dcol1, dcol2 = st.columns(2)
-    with dcol1:
-        theme.subheader("Most Debased (5y)")
-        for d in srt[:5]:
-            st.markdown(f'<div class="sig-caption" style="font-size:12px;">'
-                        f'<span style="color:#e05c5c;">▼</span> {theme.esc(d["label"])} '
-                        f'{d["chg5y"]:+.0f}%</div>', unsafe_allow_html=True)
-    with dcol2:
-        theme.subheader("Most Stable (5y)")
-        for d in reversed(srt[-5:]):
-            st.markdown(f'<div class="sig-caption" style="font-size:12px;">'
-                        f'<span style="color:#4ade80;">▲</span> {theme.esc(d["label"])} '
-                        f'{d["chg5y"]:+.0f}%</div>', unsafe_allow_html=True)
-else:
-    st.markdown('<div class="sig-caption">Debasement data unavailable (FX feed unreachable).</div>',
-                unsafe_allow_html=True)
+    if st.button("⟲  Load AI signals & world valuation read", key="load_signals"):
+        with st.spinner("◆ scoring global valuations through the framework…"):
+            st.session_state.val_signals = safe_ai(
+                "Valuation signals", ai.load_valuation_signals,
+                api_key, [r for r in filtered if r["pe"] is not None] or filtered,
+                fallback={"signals": {}, "commentary": ""})
+        st.rerun()
 
-if st.button("⟲  Load debasement commentary", key="load_debase"):
-    with st.spinner("◆ connecting debasement to the MP3 thesis…"):
-        st.session_state.debase_comment = ai.load_debasement_commentary(api_key, debase)
-    st.rerun()
-if st.session_state.debase_comment:
-    with st.container(border=True):
-        st.markdown(f'<div class="memo-body">{st.session_state.debase_comment}</div>',
+    if st.session_state.val_signals and st.session_state.val_signals.get("commentary"):
+        with st.container(border=True):
+            st.markdown(f'<div class="memo-body">{st.session_state.val_signals["commentary"]}</div>',
+                        unsafe_allow_html=True)
+
+    # ── Credit Stress Monitor ────────────────────────────────────────────────
+    theme.subheader("Credit Stress Monitor · Sovereign CDS")
+    theme.caption("5-year sovereign CDS spreads (bps) — the market's price of default risk. "
+                  "CDS is not free real-time; figures are best-available estimates from public data.")
+
+    if st.button("⟲  Load sovereign CDS spreads", key="load_cds"):
+        with st.spinner("◆ pulling sovereign credit-default-swap spreads…"):
+            st.session_state.cds_data = safe_ai(
+                "Sovereign CDS", cached_cds, api_key, fallback={"asof": "", "rows": []})
+        st.rerun()
+
+    def _cds_stress(bps):
+        if bps is None:
+            return ("—", "#8a8470")
+        if bps < 100:
+            return ("LOW", "#4ade80")
+        if bps < 300:
+            return ("ELEVATED", "#d6c645")
+        if bps < 600:
+            return ("HIGH", "#e0954c")
+        return ("SEVERE", "#e05c5c")
+
+    cds = st.session_state.cds_data
+    if cds and cds.get("rows"):
+        crows = sorted(cds["rows"], key=lambda x: -(x.get("cds") or 0))
+        thead = ("<tr><th class='l'>Country</th><th>CDS 5Y</th><th>1W</th><th>1M</th>"
+                 "<th>Trend</th><th>Stress</th><th class='l'>Driver</th></tr>")
+        body = []
+        for r in crows[:25]:
+            lvl, col = _cds_stress(r.get("cds"))
+            body.append(
+                "<tr>"
+                f"<td class='l tk'>{theme.esc(r.get('country',''))}</td>"
+                f"<td>{fmt_num(r.get('cds'),0,' bps')}</td>"
+                f"<td>{fmt_pct(r.get('w_chg'),0) if r.get('w_chg') is not None else '<span class=mut>—</span>'}</td>"
+                f"<td>{fmt_pct(r.get('m_chg'),0) if r.get('m_chg') is not None else '<span class=mut>—</span>'}</td>"
+                f"<td class='mut'>{theme.esc(r.get('trend',''))}</td>"
+                f"<td><span class='pill' style='background:{col}22;color:{col};'>{lvl}</span></td>"
+                f"<td class='l mut'>{theme.esc(r.get('note',''))}</td>"
+                "</tr>"
+            )
+        st.markdown(f'<div class="table-scroll"><table class="sig-table">{thead}{"".join(body)}</table></div>',
+                    unsafe_allow_html=True)
+        st.markdown(f'<div class="sig-caption">As of: {theme.esc(cds.get("asof","recent estimate"))}</div>',
+                    unsafe_allow_html=True)
+    else:
+        st.info("Tap **Load sovereign CDS spreads** to pull the latest credit-stress read.")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# DEBT CYCLE TRACKER
+# ═════════════════════════════════════════════════════════════════════════════
+def render_debtcycle():
+    theme.section_header("V", "DEBT CYCLE TRACKER")
+    theme.caption(f"Ray Dalio MP0–MP3 framework. Structural indicators are a framework baseline "
+                  f"({dc.DEBT_ASOF}); the generated memo verifies current figures via web search.")
+
+    sel = st.selectbox("Country", dc.COUNTRY_ORDER, key="dc_country")
+    b = dc.COUNTRY_BASELINES[sel]
+    pcol = dc.phase_color(b["phase"])
+
+    # Header: country name + phase badge
+    st.markdown(
+        f'<div class="dc-badge-row">'
+        f'<span style="font-size:1.4rem;color:var(--gold);font-weight:600;letter-spacing:0.06em;">{theme.esc(sel)}</span>'
+        f'<span class="dc-phase" style="background:{pcol}33;color:{pcol};">'
+        f'{dc.phase_label(b["phase"])} · {theme.esc(b["sub"])}</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Each indicator as its own clean metric card
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Debt / GDP", f'{b["debt_gdp"]}%')
+    m2.metric("Real policy rate", f'{b["real_rate"]:+.1f}%')
+    m3.metric("CB balance sheet", f'{b["cb_bs"]}% GDP')
+    m4.metric("Fiscal balance", f'{b["deficit"]:+.1f}% GDP')
+
+    theme.caption(f'Cycle marker — {theme.esc(b["start"])}')
+    theme.caption(f'Parallel — {theme.esc(b["parallel"])}')
+
+    if st.button(f"◆  Generate {sel} debt-cycle memo", key="gen_debt_memo"):
+        st.session_state.debt_memo.pop(sel, None)
+        theme.subheader(f"Debt Cycle Memo · {sel}")
+        text = run_stream(ai.prompt_debt_memo(today_str(), sel, b), err_prefix="Error")
+        st.session_state.debt_memo[sel] = text
+    elif st.session_state.debt_memo.get(sel):
+        theme.subheader(f"Debt Cycle Memo · {sel}")
+        with st.container(border=True):
+            st.markdown(f'<div class="memo-body">{st.session_state.debt_memo[sel]}</div>',
+                        unsafe_allow_html=True)
+
+    if st.session_state.debt_memo.get(sel):
+        pdf_button("⬇  Download Debt-Cycle Memo (PDF)", "DebtCycle", f"DEBT CYCLE — {sel}",
+                   today_str(), f"## {sel}\n\n{st.session_state.debt_memo[sel]}", sel, key="dl_debt")
+
+    # ── Central Bank Policy Tracker ──────────────────────────────────────────
+    theme.subheader("Central Bank Policy Tracker")
+    if st.button("⟲  Load central-bank policy tracker", key="load_cb"):
+        with st.spinner("◆ pulling current policy rates…"):
+            st.session_state.cb_data = safe_ai(
+                "Central banks", cached_central_banks, api_key,
+                fallback={"rows": [], "commentary": ""})
+        st.rerun()
+
+    cb = st.session_state.cb_data
+    if cb and cb.get("rows"):
+        thead = ("<tr><th class='l'>Central Bank</th><th class='l'>Country</th><th>Rate</th>"
+                 "<th>Dir</th><th>CPI</th><th>Real</th><th>MP</th><th class='l'>Next</th></tr>")
+        body = []
+        DIRC = {"HIKING": ("▲ HIKING", "#e05c5c"), "CUTTING": ("▼ CUTTING", "#4ade80"),
+                "PAUSED": ("— PAUSED", "#8a8470")}
+        for r in cb["rows"]:
+            dlabel, dcol = DIRC.get((r.get("direction") or "").upper(), ("—", "#8a8470"))
+            rate = r.get("rate"); cpi = r.get("cpi")
+            real = (rate - cpi) if (isinstance(rate, (int, float)) and isinstance(cpi, (int, float))) else None
+            real_html = (f'<span class="{"neg" if real < 0 else "pos"}">{real:+.1f}%</span>'
+                         if real is not None else '<span class="mut">—</span>')
+            mp = (r.get("mp_phase") or "").upper()
+            mpcol = dc.phase_color(mp) if mp in ("MP1", "MP2", "MP3", "TRANSITIONING") else "#8a8470"
+            body.append(
+                "<tr>"
+                f"<td class='l tk'>{theme.esc(r.get('bank',''))}</td>"
+                f"<td class='l mut'>{theme.esc(r.get('country',''))}</td>"
+                f"<td>{fmt_num(rate,2,'%')}</td>"
+                f"<td style='color:{dcol};'>{dlabel}</td>"
+                f"<td>{fmt_num(cpi,1,'%')}</td>"
+                f"<td>{real_html}</td>"
+                f"<td><span class='pill' style='background:{mpcol}22;color:{mpcol};'>{mp or '—'}</span></td>"
+                f"<td class='l mut'>{theme.esc(r.get('next_meeting','TBD'))}</td>"
+                "</tr>"
+            )
+        st.markdown(f'<div class="table-scroll"><table class="sig-table">{thead}{"".join(body)}</table></div>',
+                    unsafe_allow_html=True)
+        if cb.get("commentary"):
+            with st.container(border=True):
+                st.markdown(f'<div class="memo-body">{cb["commentary"]}</div>', unsafe_allow_html=True)
+    else:
+        st.info("Tap **Load central-bank policy tracker** for current global policy rates.")
+
+    # ── Currency Debasement Dashboard ────────────────────────────────────────
+    theme.subheader("Currency Debasement vs Gold")
+    theme.caption("5-year change of each currency measured against gold (negative = debased). "
+                  "Live from yfinance gold + FX histories.")
+
+    with st.spinner("◆ computing currency debasement vs gold…"):
+        debase = mkt.fetch_currency_debasement()
+
+    valid = [d for d in debase if d.get("chg5y") is not None]
+    if valid:
+        bars = []
+        for d in sorted(valid, key=lambda x: x["chg5y"]):
+            v = d["chg5y"]
+            clipped = max(-100.0, min(100.0, v))
+            width = abs(clipped) / 100.0 * 50.0  # half-track max 50%
+            color = "#4ade80" if v >= 0 else ("#e05c5c" if v > -90 else "#8b0000")
+            side = "left:50%;" if v >= 0 else f"left:{50 - width}%;"
+            tag = f"{v:+.0f}%" + (" (clipped)" if abs(v) > 100 else "")
+            bars.append(
+                f'<div style="display:flex;align-items:center;gap:8px;margin:3px 0;font-size:11px;">'
+                f'<span style="width:120px;color:#c9a84c;">{theme.esc(d["label"])}</span>'
+                f'<div style="position:relative;flex:1;height:14px;background:#141414;border:1px solid #1e1e1e;">'
+                f'<div style="position:absolute;top:0;height:100%;width:1px;left:50%;background:#3a3a3a;"></div>'
+                f'<div style="position:absolute;top:0;height:100%;{side}width:{width}%;background:{color};"></div>'
+                f'</div>'
+                f'<span style="width:90px;text-align:right;color:{color};">{tag}</span>'
+                f'</div>'
+            )
+        st.markdown('<div class="table-scroll" style="padding:10px;">' + "".join(bars) + "</div>",
                     unsafe_allow_html=True)
 
+        srt = sorted(valid, key=lambda x: x["chg5y"])
+        dcol1, dcol2 = st.columns(2)
+        with dcol1:
+            theme.subheader("Most Debased (5y)")
+            for d in srt[:5]:
+                st.markdown(f'<div class="sig-caption" style="font-size:12px;">'
+                            f'<span style="color:#e05c5c;">▼</span> {theme.esc(d["label"])} '
+                            f'{d["chg5y"]:+.0f}%</div>', unsafe_allow_html=True)
+        with dcol2:
+            theme.subheader("Most Stable (5y)")
+            for d in reversed(srt[-5:]):
+                st.markdown(f'<div class="sig-caption" style="font-size:12px;">'
+                            f'<span style="color:#4ade80;">▲</span> {theme.esc(d["label"])} '
+                            f'{d["chg5y"]:+.0f}%</div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="sig-caption">Debasement data unavailable (FX feed unreachable).</div>',
+                    unsafe_allow_html=True)
+
+    if st.button("⟲  Load debasement commentary", key="load_debase"):
+        with st.spinner("◆ connecting debasement to the MP3 thesis…"):
+            st.session_state.debase_comment = safe_ai(
+                "Debasement commentary", ai.load_debasement_commentary, api_key, debase, fallback="")
+        st.rerun()
+    if st.session_state.debase_comment:
+        with st.container(border=True):
+            st.markdown(f'<div class="memo-body">{st.session_state.debase_comment}</div>',
+                        unsafe_allow_html=True)
+
 
 # ═════════════════════════════════════════════════════════════════════════════
-# VI — THESIS WAR ROOM
+# THESIS WAR ROOM
 # ═════════════════════════════════════════════════════════════════════════════
-theme.section_header("VI", "THESIS WAR ROOM", "portfolio")
-theme.caption("Live agent check on every position (auto-fires once per session). "
-              "Run a stress test on demand; track the standing macro theses.")
-
-if st.button("↻  Refresh Pulse", key="pulse_refresh"):
-    st.session_state.pulse_results = {}
-    st.rerun()
-
-
 def _alert_html(ticker):
     rows = position_alerts.get(ticker, [])
     if not rows:
@@ -935,123 +962,135 @@ def stress_card_html(res):
             f'</div>')
 
 
-pulse_status = st.empty()
-slots, stress_slots = {}, {}
-for row_positions in (POSITIONS[:2], POSITIONS[2:]):
-    cols = st.columns(2, gap="small")
-    for col, pos in zip(cols, row_positions):
-        with col:
-            slots[pos["ticker"]] = st.empty()
-            if st.button(f"⚡ Stress Test · {pos['ticker']}", key=f"stress_{pos['ticker']}"):
-                st.session_state.run_stress = pos["ticker"]
-            stress_slots[pos["ticker"]] = st.empty()
+def render_portfolio():
+    theme.section_header("VI", "THESIS WAR ROOM")
+    theme.caption("Live agent check on every position. Run the pulse on demand; stress-test any "
+                  "position; track the standing macro theses. Results persist while you switch tabs.")
 
-# initial render (cached or skeleton)
-for pos in POSITIONS:
-    slots[pos["ticker"]].markdown(
-        card_html(pos, st.session_state.pulse_results.get(pos["ticker"])),
-        unsafe_allow_html=True)
-
-# fire missing pulse calls sequentially (15s gaps, with countdown)
-missing = [p for p in POSITIONS if p["ticker"] not in st.session_state.pulse_results]
-if missing:
-    today = today_str()
-    for j, pos in enumerate(missing):
-        if j > 0:
-            for rem in range(15, 0, -1):
-                pulse_status.markdown(
-                    f'<div class="sig-caption">⏳ rate-limit pause · next position ({pos["ticker"]}) in {rem}s…</div>',
-                    unsafe_allow_html=True)
-                time.sleep(1)
-        pulse_status.markdown(
-            f'<div class="sig-caption"><span class="dot" style="background:#c9a84c;"></span>'
-            f'researching {pos["ticker"]}…</div>', unsafe_allow_html=True)
-        try:
-            text = call_research(prompt_pulse(today, pos), api_key, max_tokens=1500) or "_No response._"
-        except anthropic.APIStatusError as e:
-            text = f"_API error: {getattr(e, 'message', str(e))}_"
-        except Exception as e:  # noqa: BLE001
-            text = f"_Error: {e}_"
-        st.session_state.pulse_results[pos["ticker"]] = text
-        slots[pos["ticker"]].markdown(card_html(pos, text), unsafe_allow_html=True)
-    pulse_status.empty()
-
-# render any existing stress results
-for pos in POSITIONS:
-    res = st.session_state.stress_results.get(pos["ticker"])
-    if res:
-        stress_slots[pos["ticker"]].markdown(stress_card_html(res), unsafe_allow_html=True)
-
-# handle a freshly requested stress test
-if st.session_state.run_stress:
-    tkr = st.session_state.run_stress
-    st.session_state.run_stress = None
-    pos = next((p for p in POSITIONS if p["ticker"] == tkr), None)
-    if pos:
-        with st.spinner(f"◆ stress-testing {tkr}…"):
-            res = ai.load_stress_test(api_key, tkr, pos["name"], pos["thesis"])
-        if res:
-            st.session_state.stress_results[tkr] = res
-            stress_slots[tkr].markdown(stress_card_html(res), unsafe_allow_html=True)
-
-# Portfolio Pulse PDF
-if len(st.session_state.pulse_results) >= len(POSITIONS):
-    lines = [f"# THESIS WAR ROOM · PORTFOLIO PULSE\n*{today_str()}*\n"]
-    for pos in POSITIONS:
-        text = st.session_state.pulse_results.get(pos["ticker"], "")
-        label, _ = parse_status(text)
-        lines.append(f"\n## {pos['ticker']} · {pos['name']} ({pos['weight']}) — {label}\n\n{text}\n")
-        res = st.session_state.stress_results.get(pos["ticker"])
-        if res:
-            lines.append(f"\n*Stress test — momentum {res.get('momentum')}, action {res.get('action')}: "
-                         f"{res.get('summary','')}*\n")
-    pdf_button("⬇  Download Portfolio Pulse (PDF)", "PortfolioPulse", "PORTFOLIO PULSE",
-               today_str(), "\n".join(lines), key="dl_pulse")
-
-# ── Macro Thesis Tracker ─────────────────────────────────────────────────────
-theme.subheader("Macro Thesis Tracker")
-mcols = st.columns(3, gap="small")
-for col, mt in zip(mcols, MACRO_THESES):
-    with col:
-        res = st.session_state.macro_results.get(mt["name"])
-        if res:
-            conf = res.get("confirmation", "?")
-            status = (res.get("status") or "ACTIVE").upper()
-            scol = {"ACTIVE": "#4ade80", "WATCH": "#d6c645", "PAUSED": "#8a8470"}.get(status, "#c9a84c")
-            ev = "".join(f"<div class='row' style='font-size:12px;color:#e8e3d6;'>• {theme.esc(e)}</div>"
-                         for e in (res.get("evidence") or [])[:3])
-            inner = (f'<span class="pill" style="background:{scol}22;color:{scol};">{status}</span> '
-                     f'<span class="pill" style="background:#c9a84c22;color:#c9a84c;">CONF {conf}/10</span>'
-                     f'<div class="row" style="margin-top:8px;color:#e8e3d6;font-size:13px;">{theme.esc(res.get("summary",""))}</div>'
-                     f'{ev}')
-        else:
-            inner = '<div class="sig-caption">Not yet updated.</div>'
-        st.markdown(
-            f'<div class="pulse-card" style="min-height:auto;">'
-            f'<div class="ticker" style="font-size:1rem;">{theme.esc(mt["name"])}</div>'
-            f'<div class="weight">est. {mt["established"]}</div>'
-            f'<div class="body">{inner}</div></div>',
-            unsafe_allow_html=True,
-        )
-        if st.button("⟲ Update", key=f"macro_{mt['name'][:12]}"):
-            st.session_state.run_macro = mt["name"]
-
-if st.session_state.run_macro:
-    name = st.session_state.run_macro
-    st.session_state.run_macro = None
-    mt = next((m for m in MACRO_THESES if m["name"] == name), None)
-    if mt:
-        with st.spinner(f"◆ updating thesis: {name}…"):
-            st.session_state.macro_results[name] = ai.load_macro_thesis(api_key, name, mt["desc"])
+    if st.button("◆  Run / Refresh Position Pulse", key="pulse_refresh"):
+        st.session_state.pulse_results = {}
+        st.session_state.pulse_fire = True
         st.rerun()
 
+    pulse_status = st.empty()
+    slots, stress_slots = {}, {}
+    for row_positions in (POSITIONS[:2], POSITIONS[2:]):
+        cols = st.columns(2, gap="small")
+        for col, pos in zip(cols, row_positions):
+            with col:
+                slots[pos["ticker"]] = st.empty()
+                if st.button(f"⚡ Stress Test · {pos['ticker']}", key=f"stress_{pos['ticker']}"):
+                    st.session_state.run_stress = pos["ticker"]
+                stress_slots[pos["ticker"]] = st.empty()
+
+    # initial render (cached result, or a clear "press Run" prompt — not a perpetual skeleton)
+    firing = st.session_state.pulse_fire
+    placeholder = None if firing else "Press “Run / Refresh Position Pulse” above to load live thesis checks."
+    for pos in POSITIONS:
+        slots[pos["ticker"]].markdown(
+            card_html(pos, st.session_state.pulse_results.get(pos["ticker"], placeholder)),
+            unsafe_allow_html=True)
+
+    # fire missing pulse calls sequentially (15s gaps, with countdown) — only on demand
+    missing = [p for p in POSITIONS if p["ticker"] not in st.session_state.pulse_results]
+    if firing and missing:
+        today = today_str()
+        for j, pos in enumerate(missing):
+            if j > 0:
+                for rem in range(15, 0, -1):
+                    pulse_status.markdown(
+                        f'<div class="sig-caption">⏳ rate-limit pause · next position ({pos["ticker"]}) in {rem}s…</div>',
+                        unsafe_allow_html=True)
+                    time.sleep(1)
+            pulse_status.markdown(
+                f'<div class="sig-caption"><span class="dot" style="background:#c9a84c;"></span>'
+                f'researching {pos["ticker"]}…</div>', unsafe_allow_html=True)
+            try:
+                text = call_research(prompt_pulse(today, pos), api_key, max_tokens=1500) or "_No response._"
+            except anthropic.APIStatusError as e:
+                text = f"_API error: {getattr(e, 'message', str(e))}_"
+            except Exception as e:  # noqa: BLE001
+                text = f"_Error: {e}_"
+            st.session_state.pulse_results[pos["ticker"]] = text
+            slots[pos["ticker"]].markdown(card_html(pos, text), unsafe_allow_html=True)
+        pulse_status.empty()
+        st.session_state.pulse_fire = False
+
+    # render any existing stress results
+    for pos in POSITIONS:
+        res = st.session_state.stress_results.get(pos["ticker"])
+        if res:
+            stress_slots[pos["ticker"]].markdown(stress_card_html(res), unsafe_allow_html=True)
+
+    # handle a freshly requested stress test
+    if st.session_state.run_stress:
+        tkr = st.session_state.run_stress
+        st.session_state.run_stress = None
+        pos = next((p for p in POSITIONS if p["ticker"] == tkr), None)
+        if pos:
+            with st.spinner(f"◆ stress-testing {tkr}…"):
+                res = safe_ai(f"Stress test {tkr}", ai.load_stress_test,
+                              api_key, tkr, pos["name"], pos["thesis"], fallback={})
+            if res:
+                st.session_state.stress_results[tkr] = res
+                stress_slots[tkr].markdown(stress_card_html(res), unsafe_allow_html=True)
+
+    # Portfolio Pulse PDF
+    if len(st.session_state.pulse_results) >= len(POSITIONS):
+        lines = [f"# THESIS WAR ROOM · PORTFOLIO PULSE\n*{today_str()}*\n"]
+        for pos in POSITIONS:
+            text = st.session_state.pulse_results.get(pos["ticker"], "")
+            label, _ = parse_status(text)
+            lines.append(f"\n## {pos['ticker']} · {pos['name']} ({pos['weight']}) — {label}\n\n{text}\n")
+            res = st.session_state.stress_results.get(pos["ticker"])
+            if res:
+                lines.append(f"\n*Stress test — momentum {res.get('momentum')}, action {res.get('action')}: "
+                             f"{res.get('summary','')}*\n")
+        pdf_button("⬇  Download Portfolio Pulse (PDF)", "PortfolioPulse", "PORTFOLIO PULSE",
+                   today_str(), "\n".join(lines), key="dl_pulse")
+
+    # ── Macro Thesis Tracker ─────────────────────────────────────────────────
+    theme.subheader("Macro Thesis Tracker")
+    mcols = st.columns(3, gap="small")
+    for col, mt in zip(mcols, MACRO_THESES):
+        with col:
+            res = st.session_state.macro_results.get(mt["name"])
+            if res:
+                conf = res.get("confirmation", "?")
+                status = (res.get("status") or "ACTIVE").upper()
+                scol = {"ACTIVE": "#4ade80", "WATCH": "#d6c645", "PAUSED": "#8a8470"}.get(status, "#c9a84c")
+                ev = "".join(f"<div class='row' style='font-size:12px;color:#e8e3d6;'>• {theme.esc(e)}</div>"
+                             for e in (res.get("evidence") or [])[:3])
+                inner = (f'<span class="pill" style="background:{scol}22;color:{scol};">{status}</span> '
+                         f'<span class="pill" style="background:#c9a84c22;color:#c9a84c;">CONF {conf}/10</span>'
+                         f'<div class="row" style="margin-top:8px;color:#e8e3d6;font-size:13px;">{theme.esc(res.get("summary",""))}</div>'
+                         f'{ev}')
+            else:
+                inner = '<div class="sig-caption">Not yet updated.</div>'
+            st.markdown(
+                f'<div class="pulse-card" style="min-height:auto;">'
+                f'<div class="ticker" style="font-size:1rem;">{theme.esc(mt["name"])}</div>'
+                f'<div class="weight">est. {mt["established"]}</div>'
+                f'<div class="body">{inner}</div></div>',
+                unsafe_allow_html=True,
+            )
+            if st.button("⟲ Update", key=f"macro_{mt['name'][:12]}"):
+                st.session_state.run_macro = mt["name"]
+
+    if st.session_state.run_macro:
+        name = st.session_state.run_macro
+        st.session_state.run_macro = None
+        mt = next((m for m in MACRO_THESES if m["name"] == name), None)
+        if mt:
+            with st.spinner(f"◆ updating thesis: {name}…"):
+                st.session_state.macro_results[name] = safe_ai(
+                    f"Macro thesis {name}", ai.load_macro_thesis, api_key, name, mt["desc"], fallback={})
+            st.rerun()
+
 
 # ═════════════════════════════════════════════════════════════════════════════
-# VII — EARNINGS CALENDAR
+# EARNINGS CALENDAR
 # ═════════════════════════════════════════════════════════════════════════════
-theme.section_header("VII", "EARNINGS CALENDAR", "earnings")
-theme.caption("Next earnings dates for holdings + sector-watch names. Generate a pre-earnings brief per position.")
-
 PORTFOLIO_TICKERS = {"QCOM", "KMI", "CRM", "1810.HK"}
 TICKER_TO_NAME = {
     "QCOM": "Qualcomm", "KMI": "Kinder Morgan", "CRM": "Salesforce", "1810.HK": "Xiaomi",
@@ -1086,75 +1125,114 @@ def _days_until(date_str):
         return "—"
 
 
-if st.button("⟲  Load / refresh calendar", key="load_cal"):
-    st.session_state.earnings_calendar = None
-    st.session_state.pre_earnings_briefs = {}
+def render_earnings():
+    theme.section_header("VII", "EARNINGS CALENDAR")
+    theme.caption("Next earnings dates for holdings + sector-watch names. Generate a pre-earnings brief per position.")
 
-if st.session_state.earnings_calendar is None:
-    with st.spinner("◆ fetching earnings calendar…"):
-        try:
-            raw = call_research(prompt_earnings_calendar(today_str()), api_key, max_tokens=1500)
-            st.session_state.earnings_calendar = _parse_calendar(raw)
-        except Exception as e:  # noqa: BLE001
-            st.error(f"Calendar fetch failed: {e}")
-            st.session_state.earnings_calendar = []
+    if st.button("⟲  Load / refresh calendar", key="load_cal"):
+        st.session_state.earnings_calendar = None
+        st.session_state.pre_earnings_briefs = {}
 
-cal_rows = st.session_state.earnings_calendar or []
-pf_rows = [r for r in cal_rows if r["ticker"].upper() in PORTFOLIO_TICKERS]
-sw_rows = [r for r in cal_rows if r["ticker"].upper() not in PORTFOLIO_TICKERS]
+    if st.session_state.earnings_calendar is None:
+        with st.spinner("◆ fetching earnings calendar…"):
+            try:
+                raw = call_research(prompt_earnings_calendar(today_str()), api_key, max_tokens=1500)
+                st.session_state.earnings_calendar = _parse_calendar(raw)
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Calendar fetch failed: {e}")
+                st.session_state.earnings_calendar = []
 
-if pf_rows:
-    st.markdown('<div class="cal-row head"><span>Ticker</span><span class="nm">Name</span>'
-                '<span>Date</span><span>EPS</span><span class="du">In</span></div>',
+    cal_rows = st.session_state.earnings_calendar or []
+    pf_rows = [r for r in cal_rows if r["ticker"].upper() in PORTFOLIO_TICKERS]
+    sw_rows = [r for r in cal_rows if r["ticker"].upper() not in PORTFOLIO_TICKERS]
+
+    if pf_rows:
+        st.markdown('<div class="cal-row head"><span>Ticker</span><span class="nm">Name</span>'
+                    '<span>Date</span><span>EPS</span><span class="du">In</span></div>',
+                    unsafe_allow_html=True)
+        for r in pf_rows:
+            nm = TICKER_TO_NAME.get(r["ticker"].upper(), r["ticker"])
+            date_disp = r["date"] if r["date"].upper() != "TBD" else "TBD — verify on IR page"
+            st.markdown(
+                f'<div class="cal-row"><span class="tk">{r["ticker"]}</span>'
+                f'<span class="nm">{nm}</span><span class="dt">{date_disp}</span>'
+                f'<span class="ep">{r["eps"]}</span><span class="du">{_days_until(r["date"])}</span></div>',
                 unsafe_allow_html=True)
-    for r in pf_rows:
-        nm = TICKER_TO_NAME.get(r["ticker"].upper(), r["ticker"])
-        date_disp = r["date"] if r["date"].upper() != "TBD" else "TBD — verify on IR page"
-        st.markdown(
-            f'<div class="cal-row"><span class="tk">{r["ticker"]}</span>'
-            f'<span class="nm">{nm}</span><span class="dt">{date_disp}</span>'
-            f'<span class="ep">{r["eps"]}</span><span class="du">{_days_until(r["date"])}</span></div>',
-            unsafe_allow_html=True)
-        bc, _ = st.columns([2, 3])
-        with bc:
-            if st.button(f"◆ Pre-Earnings Brief · {r['ticker']}", key=f"brief_{r['ticker']}"):
-                st.session_state.active_brief_ticker = r["ticker"]
-                st.session_state.pre_earnings_briefs.pop(r["ticker"], None)
+            bc, _ = st.columns([2, 3])
+            with bc:
+                if st.button(f"◆ Pre-Earnings Brief · {r['ticker']}", key=f"brief_{r['ticker']}"):
+                    st.session_state.active_brief_ticker = r["ticker"]
+                    st.session_state.pre_earnings_briefs.pop(r["ticker"], None)
 
-if sw_rows:
-    theme.subheader("Sector Watch")
-    st.markdown('<div class="cal-row head"><span>Ticker</span><span class="nm">Name</span>'
-                '<span>Date</span><span>EPS</span><span class="du">Conf</span></div>',
-                unsafe_allow_html=True)
-    for r in sw_rows:
-        nm = TICKER_TO_NAME.get(r["ticker"].upper(), r["ticker"])
-        date_disp = r["date"] if r["date"].upper() != "TBD" else "TBD"
-        st.markdown(
-            f'<div class="cal-row"><span class="tk">{r["ticker"]}</span>'
-            f'<span class="nm">{nm}</span><span class="dt">{date_disp}</span>'
-            f'<span class="ep">{r["eps"]}</span><span class="du">{r["confidence"]}</span></div>',
-            unsafe_allow_html=True)
-
-if not cal_rows:
-    st.markdown('<div class="sig-caption" style="text-align:center;">NO CALENDAR DATA YET</div>',
+    if sw_rows:
+        theme.subheader("Sector Watch")
+        st.markdown('<div class="cal-row head"><span>Ticker</span><span class="nm">Name</span>'
+                    '<span>Date</span><span>EPS</span><span class="du">Conf</span></div>',
+                    unsafe_allow_html=True)
+        for r in sw_rows:
+            nm = TICKER_TO_NAME.get(r["ticker"].upper(), r["ticker"])
+            date_disp = r["date"] if r["date"].upper() != "TBD" else "TBD"
+            st.markdown(
+                f'<div class="cal-row"><span class="tk">{r["ticker"]}</span>'
+                f'<span class="nm">{nm}</span><span class="dt">{date_disp}</span>'
+                f'<span class="ep">{r["eps"]}</span><span class="du">{r["confidence"]}</span></div>',
                 unsafe_allow_html=True)
 
-if st.session_state.active_brief_ticker:
-    tkr = st.session_state.active_brief_ticker
-    edate = next((r["date"] for r in cal_rows if r["ticker"].upper() == tkr.upper()), "TBD")
-    theme.subheader(f"Pre-Earnings Brief · {tkr} · {edate}")
-    if tkr not in st.session_state.pre_earnings_briefs:
-        text = run_stream(prompt_pre_earnings(today_str(), tkr, edate), err_prefix="Error")
-        st.session_state.pre_earnings_briefs[tkr] = text
-    else:
-        with st.container(border=True):
-            st.markdown(f'<div class="memo-body">{st.session_state.pre_earnings_briefs[tkr]}</div>',
-                        unsafe_allow_html=True)
-    bt = st.session_state.pre_earnings_briefs.get(tkr, "")
-    if bt:
-        pdf_button("⬇  Download Pre-Earnings Brief (PDF)", "PreEarnings",
-                   f"PRE-EARNINGS BRIEF — {tkr}", f"{edate} · {today_str()}",
-                   f"## {tkr}\n\n{bt}", tkr, key=f"dl_brief_{tkr}")
+    if not cal_rows:
+        st.markdown('<div class="sig-caption" style="text-align:center;">NO CALENDAR DATA YET</div>',
+                    unsafe_allow_html=True)
+
+    if st.session_state.active_brief_ticker:
+        tkr = st.session_state.active_brief_ticker
+        edate = next((r["date"] for r in cal_rows if r["ticker"].upper() == tkr.upper()), "TBD")
+        theme.subheader(f"Pre-Earnings Brief · {tkr} · {edate}")
+        if tkr not in st.session_state.pre_earnings_briefs:
+            text = run_stream(prompt_pre_earnings(today_str(), tkr, edate), err_prefix="Error")
+            st.session_state.pre_earnings_briefs[tkr] = text
+        else:
+            with st.container(border=True):
+                st.markdown(f'<div class="memo-body">{st.session_state.pre_earnings_briefs[tkr]}</div>',
+                            unsafe_allow_html=True)
+        bt = st.session_state.pre_earnings_briefs.get(tkr, "")
+        if bt:
+            pdf_button("⬇  Download Pre-Earnings Brief (PDF)", "PreEarnings",
+                       f"PRE-EARNINGS BRIEF — {tkr}", f"{edate} · {today_str()}",
+                       f"## {tkr}\n\n{bt}", tkr, key=f"dl_brief_{tkr}")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SHARED LIVE DATA  (cheap + cached — needed by Globe / Markets / Portfolio)
+# ═════════════════════════════════════════════════════════════════════════════
+with st.spinner("◆ loading live market valuations…"):
+    market_dict = mkt.fetch_market_data()
+
+if st.session_state.valuation_alerts is None:
+    st.session_state.valuation_alerts = val.update_history_and_alerts(
+        mkt.country_label_map(market_dict)
+    )
+valuation_alerts = st.session_state.valuation_alerts
+position_alerts = val.alerts_for_position(valuation_alerts)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# TABS  (one section per tab; SIGNAL header stays above)
+# ═════════════════════════════════════════════════════════════════════════════
+tab_research, tab_globe, tab_markets, tab_debt, tab_portfolio, tab_earnings = st.tabs(
+    ["Research", "Globe", "Markets", "Debt Cycle", "Portfolio", "Earnings"]
+)
+
+with tab_research:
+    render_research()
+with tab_globe:
+    render_globe()
+with tab_markets:
+    render_markets()
+with tab_debt:
+    render_debtcycle()
+with tab_portfolio:
+    render_portfolio()
+with tab_earnings:
+    render_earnings()
 
 
 # ── Footer ───────────────────────────────────────────────────────────────────
