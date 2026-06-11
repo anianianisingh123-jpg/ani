@@ -3,6 +3,14 @@
 A private research agent for Anirudh Singh, built in Streamlit on top of the
 Anthropic API with web search enabled.
 
+> **Also in this repo: ANI Terminal** — a Bloomberg-style macro research
+> terminal in a single self-contained file, `index.html`. No build step, no
+> API keys: open the file in a browser (or `python -m http.server` and visit
+> http://localhost:8000). Live data via Yahoo Finance (allorigins proxy),
+> FRED public CSV, and Atlanta Fed GDPNow; everything else is manually
+> editable and persisted in localStorage. Keyboard: `1–6` switch modules,
+> `/` focuses search.
+
 Two modes:
 
 1. **Full Research Cycle** — a six-section daily intelligence memo

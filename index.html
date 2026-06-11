@@ -1,0 +1,1504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>ANI TERMINAL — Macro Research</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet"/>
+<style>
+:root{
+  --bg:#0A0E1A; --panel:#0D1424; --panel2:#101A2E; --border:#1B2436; --line:#131B2C;
+  --txt:#D6DEEB; --dim:#647089; --teal:#00D4C8; --up:#00D47E; --dn:#FF4D6D; --amb:#FFB020; --pur:#8B7CF6;
+  --mono:'IBM Plex Mono',ui-monospace,monospace; --sans:'Inter',sans-serif;
+}
+*{box-sizing:border-box; border-radius:0 !important; margin:0; padding:0;}
+html,body{height:100%;}
+body{background:var(--bg); color:var(--txt); font-family:var(--sans); font-size:12px; overflow:hidden;}
+::-webkit-scrollbar{width:8px;height:8px;} ::-webkit-scrollbar-track{background:var(--bg);}
+::-webkit-scrollbar-thumb{background:var(--border);} ::-webkit-scrollbar-thumb:hover{background:#2A3650;}
+input,textarea,select,button{font-family:var(--mono); color:var(--txt); background:#0A1020; border:1px solid var(--border); outline:none;}
+input:focus,textarea:focus{border-color:var(--teal);}
+input[type=range]{accent-color:var(--teal); background:transparent; border:none; width:100%;}
+button{cursor:pointer;}
+.mono{font-family:var(--mono);} .up{color:var(--up);} .dn{color:var(--dn);} .dim{color:var(--dim);} .amb{color:var(--amb);} .teal{color:var(--teal);}
+.app{display:flex; flex-direction:column; height:100vh;}
+/* ── TICKER ── */
+.ticker{height:30px; min-height:30px; border-bottom:1px solid var(--border); overflow:hidden; background:#070B14; position:relative;}
+.tickwrap{display:flex; width:max-content; height:100%; align-items:center; animation:tickmove 55s linear infinite;}
+.ticker:hover .tickwrap{animation-play-state:paused;}
+@keyframes tickmove{from{transform:translateX(0);} to{transform:translateX(-50%);}}
+.titem{display:flex; align-items:baseline; gap:6px; padding:0 18px; border-right:1px solid var(--line); font-family:var(--mono); font-size:11px; white-space:nowrap;}
+.titem .tlb{color:var(--dim); font-family:var(--sans); font-weight:700; font-size:10px; letter-spacing:1px;}
+.tickstat{position:absolute; right:0; top:0; height:100%; display:flex; align-items:center; gap:6px; padding:0 10px; background:#070B14; border-left:1px solid var(--border); font-family:var(--mono); font-size:9px; color:var(--dim); z-index:2;}
+.dot{width:6px;height:6px;display:inline-block;} .dot.ok{background:var(--up);} .dot.err{background:var(--dn);} .dot.ld{background:var(--amb);}
+/* ── TOP BAR ── */
+.topbar{height:44px; min-height:44px; display:flex; align-items:center; gap:10px; padding:0 12px; border-bottom:1px solid var(--border); background:var(--panel);}
+.logo{font-weight:800; font-size:14px; letter-spacing:2px; color:var(--teal); white-space:nowrap;}
+.logo span{color:var(--txt); font-weight:600;}
+.searchwrap{position:relative; flex:1; max-width:420px;}
+.searchwrap input{width:100%; height:26px; padding:0 8px; font-size:11px; background:#0A1020;}
+.sresults{position:absolute; top:27px; left:0; right:0; background:var(--panel2); border:1px solid var(--teal); z-index:60; max-height:300px; overflow-y:auto;}
+.sresult{display:flex; gap:8px; align-items:baseline; padding:6px 8px; cursor:pointer; border-bottom:1px solid var(--line);}
+.sresult:hover{background:#16233C;}
+.stype{font-size:8px; font-weight:700; letter-spacing:1px; color:var(--teal); min-width:46px;}
+.ssub{color:var(--dim); font-size:10px; margin-left:auto;}
+.tbtn{height:26px; padding:0 10px; font-family:var(--sans); font-weight:700; font-size:10px; letter-spacing:1px; background:var(--panel2); border:1px solid var(--border); color:var(--txt);}
+.tbtn:hover{border-color:var(--teal); color:var(--teal);}
+.tbtn.on{background:var(--teal); color:#06251F; border-color:var(--teal);}
+.clock{font-family:var(--mono); font-size:12px; color:var(--teal); margin-left:auto; white-space:nowrap;}
+/* ── LAYOUT ── */
+.layout{display:flex; flex:1; min-height:0;}
+.sidebar{width:190px; min-width:190px; border-right:1px solid var(--border); background:var(--panel); display:flex; flex-direction:column; padding-top:8px;}
+.navitem{display:flex; align-items:center; gap:8px; padding:10px 12px; cursor:pointer; border-left:2px solid transparent;}
+.navitem:hover{background:var(--panel2);}
+.navitem.active{border-left-color:var(--teal); background:var(--panel2);}
+.navitem.active .nname{color:var(--teal);}
+.navkey{font-family:var(--mono); font-size:10px; color:var(--dim); border:1px solid var(--border); width:16px; height:16px; display:flex; align-items:center; justify-content:center;}
+.nname{font-weight:700; font-size:10px; letter-spacing:1px;}
+.ndesc{font-size:9px; color:var(--dim); margin-top:1px;}
+.sfoot{margin-top:auto; padding:10px 12px; font-size:9px; color:var(--dim); border-top:1px solid var(--border); font-family:var(--mono);}
+.content{flex:1; overflow-y:auto; padding:10px;}
+.mhead{display:flex; align-items:baseline; gap:10px; margin-bottom:10px;}
+.mtitle{font-size:15px; font-weight:800; letter-spacing:2px;}
+.mdesc{font-size:10px; color:var(--dim); letter-spacing:1px;}
+.grid{display:grid; grid-template-columns:repeat(12,1fr); gap:8px;}
+.g3{grid-column:span 3;} .g4{grid-column:span 4;} .g5{grid-column:span 5;}
+.g6{grid-column:span 6;} .g7{grid-column:span 7;} .g8{grid-column:span 8;} .g12{grid-column:span 12;}
+/* ── PANEL ── */
+.panel{background:var(--panel); border:1px solid var(--border); display:flex; flex-direction:column; min-width:0;}
+.phead{display:flex; align-items:center; padding:6px 8px; border-bottom:1px solid var(--border); background:#0B1120;}
+.ptitle{font-weight:700; font-size:10px; letter-spacing:1.5px; color:var(--txt);}
+.pright{margin-left:auto; display:flex; align-items:center; gap:6px;}
+.pbody{padding:8px; flex:1; min-width:0;}
+.pfoot{padding:4px 8px; border-top:1px solid var(--line); font-size:9px; color:var(--dim); font-family:var(--mono);}
+.badge{font-size:8px; font-weight:800; letter-spacing:1px; padding:2px 5px; font-family:var(--sans);}
+.b-live{background:rgba(0,212,200,.15); color:var(--teal); border:1px solid var(--teal);}
+.b-manual{background:rgba(255,176,32,.12); color:var(--amb); border:1px solid var(--amb);}
+.b-est{background:rgba(139,124,246,.12); color:var(--pur); border:1px solid var(--pur);}
+.b-user{background:rgba(214,222,235,.08); color:var(--dim); border:1px solid var(--dim);}
+.b-err{background:rgba(255,77,109,.15); color:var(--dn); border-color:var(--dn);}
+/* ── TABLES / TILES / STATS ── */
+.tbl{width:100%; border-collapse:collapse;}
+.tbl th{font-family:var(--sans); font-weight:700; font-size:8px; letter-spacing:1px; color:var(--dim); text-align:left; padding:3px 6px; border-bottom:1px solid var(--border); text-transform:uppercase;}
+.tbl td{font-family:var(--mono); font-size:11px; padding:4px 6px; border-bottom:1px solid var(--line); white-space:nowrap;}
+.tbl td.r,.tbl th.r{text-align:right;}
+.tiles{display:grid; grid-template-columns:repeat(auto-fill,minmax(108px,1fr)); gap:6px;}
+.tile{background:var(--panel2); border:1px solid var(--border); padding:6px 8px; min-width:0;}
+.tile .tl{font-size:8px; font-weight:700; letter-spacing:1px; color:var(--dim);}
+.tile .tv{font-family:var(--mono); font-size:14px; margin:2px 0;}
+.tile .tc{font-family:var(--mono); font-size:10px;}
+.stats{display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:8px;}
+.stat{background:var(--panel2); border:1px solid var(--border); padding:6px 8px;}
+.stl{font-size:8px; font-weight:700; letter-spacing:1px; color:var(--dim); text-transform:uppercase;}
+.stv{font-family:var(--mono); font-size:16px; margin:2px 0;}
+.sts{font-family:var(--mono); font-size:9px; color:var(--dim);}
+.chips{display:flex; gap:6px; flex-wrap:wrap;}
+.chip{display:flex; gap:6px; align-items:baseline; background:var(--panel2); border:1px solid var(--border); padding:4px 8px; font-size:11px;}
+.chl{font-size:8px; font-weight:700; letter-spacing:1px; color:var(--dim);}
+/* ── EDITABLE ── */
+.ef{display:flex; align-items:baseline; gap:6px; padding:3px 0; min-width:0;}
+.efl{font-size:9px; font-weight:700; letter-spacing:.5px; color:var(--dim); text-transform:uppercase; min-width:90px;}
+.efv{font-family:var(--mono); font-size:12px; cursor:pointer; border-bottom:1px dotted var(--border);}
+.efv:hover{color:var(--teal);}
+.efv .pencil{font-size:9px; color:var(--dim); margin-left:5px;}
+.efv:hover .pencil{color:var(--teal);}
+.efin{font-size:11px; padding:1px 4px; width:110px;}
+.efin.wide{width:100%;}
+.eft{font-family:var(--mono); font-size:8px; color:var(--dim); margin-left:auto; white-space:nowrap;}
+.ecell{cursor:pointer; border-bottom:1px dotted transparent;}
+.ecell:hover{color:var(--teal); border-bottom-color:var(--teal);}
+.ecin{width:64px; font-size:11px; padding:0 3px;}
+/* ── GAUGE / SLIDERS ── */
+.gauge{padding:4px 0;}
+.gtrack{position:relative; height:14px; background:linear-gradient(90deg,#00D47E,#FFB020 55%,#FF4D6D); border:1px solid var(--border);}
+.gdim{position:absolute; top:0; bottom:0; right:0; background:rgba(7,11,20,.82);}
+.gmark{position:absolute; top:-3px; bottom:-3px; width:2px; background:#FFF;}
+.grow{display:flex; align-items:baseline; gap:10px; margin-top:6px;}
+.gv{font-size:20px;} .gl{font-size:10px; font-weight:800; letter-spacing:1px;}
+.slrow{display:flex; align-items:center; gap:8px; padding:3px 0;}
+.slrow .efl{min-width:150px;}
+.slv{font-family:var(--mono); font-size:11px; width:26px; text-align:right;}
+/* ── HEAT ── */
+.heatcell{text-align:right; font-family:var(--mono); font-size:11px; padding:4px 8px; border-bottom:1px solid var(--line);}
+/* ── MODAL ── */
+.overlay{position:fixed; inset:0; background:rgba(5,8,16,.8); z-index:100; display:flex; align-items:flex-start; justify-content:center; padding:30px 12px; overflow-y:auto;}
+.mbox{background:var(--panel); border:1px solid var(--teal); width:680px; max-width:100%;}
+.mhd{display:flex; align-items:center; padding:8px 12px; border-bottom:1px solid var(--border); background:#0B1120;}
+.mhd .ptitle{font-size:12px;}
+.mbody{padding:12px; display:flex; flex-direction:column; gap:8px;}
+.flabel{font-size:9px; font-weight:700; letter-spacing:1px; color:var(--teal);}
+textarea{width:100%; font-size:11px; padding:6px; resize:vertical; line-height:1.5;}
+/* ── CALENDAR ── */
+.calbar{width:240px; min-width:240px; border-left:1px solid var(--border); background:var(--panel); display:flex; flex-direction:column; overflow-y:auto;}
+.calrow{display:flex; gap:6px; align-items:baseline; padding:5px 8px; border-bottom:1px solid var(--line); cursor:pointer; font-family:var(--mono); font-size:10px;}
+.calrow:hover{background:var(--panel2);}
+.caldate{color:var(--teal); white-space:nowrap;}
+.calx{margin-left:auto; color:var(--dim); cursor:pointer; font-size:10px;} .calx:hover{color:var(--dn);}
+/* ── NOTES / CARDS ── */
+.notes{display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:8px;}
+.note{border:1px solid var(--border); border-top:2px solid var(--dim); background:var(--panel2); padding:8px;}
+.note.WATCH{border-top-color:var(--amb);} .note.RISK{border-top-color:var(--dn);} .note.INFO{border-top-color:var(--teal);}
+.ntitle{font-weight:700; font-size:11px; letter-spacing:.5px;}
+.nbody{font-size:11px; color:var(--txt); margin-top:4px; white-space:pre-wrap; font-family:var(--mono); line-height:1.45;}
+.nbar{display:flex; gap:6px; margin-top:6px; align-items:center;}
+.xbtn{font-size:9px; padding:2px 6px; background:transparent; border:1px solid var(--border); color:var(--dim);}
+.xbtn:hover{border-color:var(--teal); color:var(--teal);}
+.case{border:1px solid var(--border); background:var(--panel2); padding:10px; display:flex; flex-direction:column; gap:6px;}
+.case h3{font-size:12px; letter-spacing:1px; color:var(--teal);}
+.case .cper{font-family:var(--mono); font-size:9px; color:var(--dim);}
+.case dt{font-size:8px; font-weight:800; letter-spacing:1px; color:var(--dim); margin-top:4px;}
+.case dd{font-size:11px; line-height:1.5; font-family:var(--mono); color:var(--txt);}
+.case ul{margin-left:14px;} .case li{font-size:10.5px; font-family:var(--mono); line-height:1.55;}
+/* ── TABS / JOURNAL ── */
+.jtabs{display:flex; border-bottom:1px solid var(--border);}
+.jtab{padding:8px 16px; font-weight:700; font-size:10px; letter-spacing:1.5px; color:var(--dim); cursor:pointer; border-bottom:2px solid transparent;}
+.jtab.on{color:var(--teal); border-bottom-color:var(--teal);}
+.thesis{border:1px solid var(--border); background:var(--panel2); padding:8px; margin-bottom:8px;}
+.status{font-size:8px; font-weight:800; letter-spacing:1px; padding:2px 6px; cursor:pointer; border:1px solid;}
+.st-active{color:var(--teal); border-color:var(--teal);} .st-confirmed{color:var(--up); border-color:var(--up);} .st-invalidated{color:var(--dn); border-color:var(--dn);}
+/* ── MOBILE ── */
+.tabbar{display:none;}
+@media (max-width:1200px){ .g3,.g4,.g5{grid-column:span 6;} .g7,.g8{grid-column:span 12;} }
+@media (max-width:860px){
+  .sidebar{display:none;} .calbar{display:none;}
+  .g3,.g4,.g5,.g6,.g7,.g8{grid-column:span 12;}
+  .content{padding-bottom:64px;}
+  .tabbar{display:flex; position:fixed; bottom:0; left:0; right:0; height:50px; background:var(--panel); border-top:1px solid var(--border); z-index:50;}
+  .tabbar .ti{flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; cursor:pointer; color:var(--dim);}
+  .tabbar .ti.on{color:var(--teal); border-top:2px solid var(--teal);}
+  .tabbar .ti .tk{font-family:var(--mono); font-size:12px; font-weight:600;}
+  .tabbar .ti .tn{font-size:7px; font-weight:800; letter-spacing:.5px;}
+  .clock{display:none;}
+}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/recharts@2.15.0/umd/Recharts.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.26.4/babel.min.js"></script>
+<script type="text/babel" data-presets="react">
+'use strict';
+const {useState, useEffect, useRef, useMemo, useCallback, useContext, createContext} = React;
+const RC = window.Recharts || {};
+
+/* ───────────────────────── utils ───────────────────────── */
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const fmt = (v, d=2) => (v==null || isNaN(v)) ? '—' : Number(v).toLocaleString('en-US',{minimumFractionDigits:d, maximumFractionDigits:d});
+const sgn = (v, d=2, suf='') => (v==null || isNaN(v)) ? '—' : (v>0?'+':'') + fmt(v,d) + suf;
+const cls = v => (v==null || isNaN(v)) ? 'dim' : v>0 ? 'up' : v<0 ? 'dn' : 'dim';
+const bp = v => (v==null || isNaN(v)) ? '—' : (v>0?'+':'') + Math.round(v*100) + 'bp';
+const tsFmt = t => { if(!t) return ''; const d=new Date(t); const p=n=>String(n).padStart(2,'0'); return p(d.getMonth()+1)+'/'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes()); };
+const todayISO = () => new Date().toISOString().slice(0,10);
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
+const num = s => { const v = parseFloat(String(s).replace(/[,%$]/g,'')); return isNaN(v) ? null : v; };
+
+async function copyText(t){
+  try { await navigator.clipboard.writeText(t); return true; }
+  catch(e){
+    const ta=document.createElement('textarea'); ta.value=t; document.body.appendChild(ta);
+    ta.select(); try{document.execCommand('copy');}catch(_e){} document.body.removeChild(ta); return true;
+  }
+}
+function download(name, text){
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([text],{type:'text/plain'}));
+  a.download=name; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href), 5000);
+}
+
+/* ───────────────────────── fetch layer ───────────────────────── */
+const PROXIES = [
+  u => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u),
+  u => 'https://corsproxy.io/?url=' + encodeURIComponent(u),
+];
+async function proxyFetch(url, {json=true, tries=3} = {}){
+  let lastErr;
+  for (let i=0; i<tries; i++){
+    try{
+      const r = await fetch(PROXIES[i % PROXIES.length](url));
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return json ? await r.json() : await r.text();
+    }catch(e){ lastErr = e; await sleep(700 * (i+1)); }
+  }
+  throw lastErr;
+}
+async function pAll(items, fn, limit=5){
+  const out = new Array(items.length); let i = 0;
+  await Promise.all(Array.from({length: Math.min(limit, items.length)}, async () => {
+    while (i < items.length){
+      const idx = i++;
+      try { out[idx] = {ok:true, v: await fn(items[idx], idx)}; }
+      catch(e){ out[idx] = {ok:false, e}; }
+    }
+  }));
+  return out;
+}
+
+/* Yahoo Finance v8 chart endpoint via proxy */
+async function fetchChart(symbol, range='5d', interval='1d'){
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=${interval}`;
+  const j = await proxyFetch(url);
+  const res = j && j.chart && j.chart.result && j.chart.result[0];
+  if (!res) throw new Error('no chart data: ' + symbol);
+  const meta = res.meta || {};
+  const raw = ((res.indicators||{}).quote||[{}])[0].close || [];
+  const closes = raw.filter(v => v != null);
+  const n = closes.length;
+  const price = meta.regularMarketPrice != null ? meta.regularMarketPrice : closes[n-1];
+  if (price == null) throw new Error('no price: ' + symbol);
+  const prev = n > 1 ? closes[n-2] : meta.chartPreviousClose;
+  return {
+    symbol, price, prev,
+    chg:   prev != null ? price - prev : null,
+    pct:   prev ? (price/prev - 1)*100 : null,
+    pct1w: n > 5 ? (price/closes[n-6] - 1)*100 : null,
+    pct1m: n > 2 ? (price/closes[0]   - 1)*100 : null,
+    closes,
+  };
+}
+async function fetchQuotes(symbols, range='5d'){
+  const res = await pAll(symbols, s => fetchChart(s, range), 5);
+  const map = {}; let ok = 0;
+  res.forEach((r, i) => { if (r.ok){ map[symbols[i]] = r.v; ok++; } });
+  if (!ok) throw new Error('all quote fetches failed');
+  return map;
+}
+
+/* FRED public CSV (no API key) via proxy */
+const FRED_COSD = new Date(Date.now() - 3*365*86400e3).toISOString().slice(0,10);
+async function fetchFredSeries(id){
+  const url = `https://fred.stlouisfed.org/graph/fredgraph.csv?id=${id}&cosd=${FRED_COSD}`;
+  const text = await proxyFetch(url, {json:false});
+  const lines = String(text).trim().split('\n').slice(1);
+  const obs = [];
+  for (const line of lines){
+    const parts = line.replace('\r','').split(',');
+    const v = parseFloat(parts[1]);
+    if (parts[1] && parts[1] !== '.' && !isNaN(v)) obs.push({date: parts[0], value: v});
+  }
+  if (!obs.length) throw new Error('no observations: ' + id);
+  return obs;
+}
+async function fetchFredMap(ids){
+  const res = await pAll(ids, fetchFredSeries, 5);
+  const map = {}; let ok = 0;
+  res.forEach((r, i) => { map[ids[i]] = r.ok ? r.v : null; if (r.ok) ok++; });
+  if (!ok) throw new Error('all FRED fetches failed');
+  return map;
+}
+const last  = obs => (obs && obs.length) ? obs[obs.length-1] : null;
+const lastV = obs => { const l = last(obs); return l ? l.value : null; };
+const lastD = obs => { const l = last(obs); return l ? l.date  : null; };
+const delta = (obs, n) => (obs && obs.length > n) ? obs[obs.length-1].value - obs[obs.length-1-n].value : null;
+const yoy   = (obs, back=0) => { if(!obs) return null; const i = obs.length-1-back; return i >= 12 ? (obs[i].value/obs[i-12].value - 1)*100 : null; };
+
+/* Atlanta Fed GDPNow — scrape latest estimate off the public page */
+async function fetchGdpNow(){
+  const html = await proxyFetch('https://www.atlantafed.org/cqer/research/gdpnow', {json:false});
+  const text = String(html).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  const m = text.match(/Latest estimate:\s*([\-−–]?\d+(?:\.\d+)?)\s*percent\s*[—–-]*\s*([A-Z][a-z]+ \d{1,2},? \d{4})?/);
+  if (!m) throw new Error('GDPNow parse failed');
+  return { value: parseFloat(m[1].replace(/[−–]/,'-')), asof: m[2] || '' };
+}
+
+/* ───────────────────────── hooks ───────────────────────── */
+function useLocalStorage(key, initial){
+  const [v, setV] = useState(() => {
+    try { const s = localStorage.getItem(key); return s != null ? JSON.parse(s) : initial; }
+    catch(e){ return initial; }
+  });
+  const set = useCallback(val => {
+    setV(prev => {
+      const next = typeof val === 'function' ? val(prev) : val;
+      try { localStorage.setItem(key, JSON.stringify(next)); } catch(e){}
+      return next;
+    });
+  }, [key]);
+  return [v, set];
+}
+const _cache = {};
+function useAsyncData(key, fetcher, {refreshMs=0, ttlMs=55000} = {}){
+  const [state, setState] = useState(() => _cache[key]
+    ? {data:_cache[key].v, status:'ok', t:_cache[key].t}
+    : {data:null, status:'loading', t:0});
+  const fRef = useRef(fetcher); fRef.current = fetcher;
+  useEffect(() => {
+    let dead = false;
+    async function load(force){
+      const c = _cache[key];
+      if (!force && c && Date.now() - c.t < ttlMs){
+        setState({data:c.v, status:'ok', t:c.t}); return;
+      }
+      try{
+        const v = await fRef.current();
+        _cache[key] = {v, t: Date.now()};
+        if (!dead) setState({data:v, status:'ok', t: Date.now()});
+      }catch(e){
+        if (!dead) setState(s => ({data:s.data, status:'error', t:s.t}));
+      }
+    }
+    load(false);
+    let iv; if (refreshMs) iv = setInterval(() => load(true), refreshMs);
+    return () => { dead = true; if (iv) clearInterval(iv); };
+  }, [key, refreshMs, ttlMs]);
+  return state;
+}
+function useClock(){
+  const [t, setT] = useState(() => new Date());
+  useEffect(() => { const iv = setInterval(() => setT(new Date()), 1000); return () => clearInterval(iv); }, []);
+  return t;
+}
+function useFlash(){
+  const [on, setOn] = useState(false);
+  const flash = useCallback(() => { setOn(true); setTimeout(() => setOn(false), 1200); }, []);
+  return [on, flash];
+}
+
+/* manual-field store (localStorage-backed, set at App root) */
+const ManualCtx = createContext({manual:{}, setField:()=>{}});
+const mval = (manual, k) => manual[k] ? manual[k].v : null;
+const mnum = (manual, k) => manual[k] ? num(manual[k].v) : null;
+function lastUpd(manual, prefix){
+  let t = 0;
+  for (const k in manual) if (k.indexOf(prefix) === 0 && manual[k].t > t) t = manual[k].t;
+  return t || null;
+}
+
+/* ───────────────────────── UI primitives ───────────────────────── */
+function Badge({type, err}){
+  return <span className={'badge b-' + type.toLowerCase().replace(/[^a-z]/g,'') + (err ? ' b-err' : '')}>{err ? type + '·ERR' : type}</span>;
+}
+function Panel({title, badge, err, right, span, children, foot}){
+  return (
+    <div className={'panel g' + (span || 6)}>
+      <div className="phead">
+        <span className="ptitle">{title}</span>
+        <span className="pright">{right}{badge ? <Badge type={badge} err={err}/> : null}</span>
+      </div>
+      <div className="pbody">{children}</div>
+      {foot ? <div className="pfoot">{foot}</div> : null}
+    </div>
+  );
+}
+function Stat({label, value, sub, subCls}){
+  return (
+    <div className="stat">
+      <div className="stl">{label}</div>
+      <div className="stv">{value}</div>
+      {sub != null ? <div className={'sts ' + (subCls || '')}>{sub}</div> : null}
+    </div>
+  );
+}
+function Tile({label, value, pct, extra}){
+  return (
+    <div className="tile">
+      <div className="tl">{label}</div>
+      <div className="tv">{value}</div>
+      <div className={'tc ' + cls(pct)}>{sgn(pct, 2)}%{extra ? <span className="dim"> {extra}</span> : null}</div>
+    </div>
+  );
+}
+
+/* inline editable field with pencil + saved timestamp */
+function EditableField({k, label, unit, wide}){
+  const {manual, setField} = useContext(ManualCtx);
+  const cur = manual[k];
+  const [ed, setEd] = useState(false);
+  const [tmp, setTmp] = useState('');
+  const start = () => { setTmp(cur != null ? String(cur.v) : ''); setEd(true); };
+  const commit = () => { setEd(false); if (tmp !== (cur != null ? String(cur.v) : '')) setField(k, tmp); };
+  return (
+    <div className="ef">
+      {label ? <span className="efl">{label}</span> : null}
+      {ed
+        ? <input className={'efin' + (wide ? ' wide' : '')} autoFocus value={tmp}
+            onChange={e => setTmp(e.target.value)} onBlur={commit}
+            onKeyDown={e => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') setEd(false); }}/>
+        : <span className="efv" onClick={start}>
+            {cur != null && cur.v !== '' ? cur.v : '—'}
+            {unit && cur != null && cur.v !== '' ? <span className="dim"> {unit}</span> : null}
+            <span className="pencil">✎</span>
+          </span>}
+      {cur ? <span className="eft">{tsFmt(cur.t)}</span> : null}
+    </div>
+  );
+}
+/* compact editable table cell */
+function Ecell({k, unit}){
+  const {manual, setField} = useContext(ManualCtx);
+  const cur = manual[k];
+  const [ed, setEd] = useState(false);
+  const [tmp, setTmp] = useState('');
+  const commit = () => { setEd(false); if (tmp !== (cur != null ? String(cur.v) : '')) setField(k, tmp); };
+  if (ed) return <input className="ecin" autoFocus value={tmp}
+    onChange={e => setTmp(e.target.value)} onBlur={commit}
+    onKeyDown={e => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') setEd(false); }}/>;
+  return <span className="ecell" title={cur ? 'upd ' + tsFmt(cur.t) : 'click to edit'}
+    onClick={() => { setTmp(cur != null ? String(cur.v) : ''); setEd(true); }}>
+    {cur != null && cur.v !== '' ? cur.v : '—'}{unit && cur != null && cur.v !== '' ? <span className="dim"> {unit}</span> : null}
+  </span>;
+}
+function SliderRow({k, label, def}){
+  const {manual, setField} = useContext(ManualCtx);
+  const v = manual[k] != null ? Number(manual[k].v) : def;
+  return (
+    <div className="slrow">
+      <span className="efl">{label}</span>
+      <input type="range" min="0" max="100" value={isNaN(v) ? def : v} onChange={e => setField(k, e.target.value)}/>
+      <span className="slv">{isNaN(v) ? def : v}</span>
+    </div>
+  );
+}
+function Gauge({value, zones}){
+  const v = Math.max(0, Math.min(100, value));
+  const z = zones.find(z => v < z[0]) || zones[zones.length-1];
+  return (
+    <div className="gauge">
+      <div className="gtrack">
+        <div className="gdim" style={{width: (100-v) + '%'}}/>
+        <div className="gmark" style={{left: 'calc(' + v + '% - 1px)'}}/>
+      </div>
+      <div className="grow">
+        <span className="gv mono">{Math.round(v)}</span>
+        <span className="gl" style={{color: z[2]}}>{z[1]}</span>
+      </div>
+    </div>
+  );
+}
+function ChartUnavailable(){ return <div className="dim mono" style={{padding:20, fontSize:11}}>chart library unavailable</div>; }
+
+class ErrorBoundary extends React.Component {
+  constructor(p){ super(p); this.state = {err:null}; }
+  static getDerivedStateFromError(err){ return {err}; }
+  render(){
+    if (this.state.err) return <div style={{padding:30, fontFamily:'IBM Plex Mono'}} className="dn">
+      TERMINAL FAULT — {String(this.state.err)}<br/>
+      <button className="tbtn" style={{marginTop:10}} onClick={() => this.setState({err:null})}>RETRY RENDER</button>
+    </div>;
+    return this.props.children;
+  }
+}
+
+const darkTooltip = {
+  contentStyle: {background:'#0D1424', border:'1px solid #1B2436', fontFamily:'IBM Plex Mono', fontSize:11},
+  labelStyle: {color:'#647089'},
+  itemStyle: {padding:0},
+};
+const axisTick = {fill:'#647089', fontSize:10, fontFamily:'IBM Plex Mono'};
+
+/* ───────────────────────── ticker tape ───────────────────────── */
+const TICKS = [
+  ['SPX','^GSPC',2,false], ['NDX','^NDX',2,false], ['RTY','^RUT',2,false],
+  ['DXY','DX-Y.NYB',2,false], ['GOLD','GC=F',1,false], ['WTI','CL=F',2,false],
+  ['BTC','BTC-USD',0,false], ['US10Y','^TNX',3,true], ['US2Y','2YY=F',3,true], ['VIX','^VIX',2,false],
+];
+function Ticker(){
+  const {data, status, t} = useAsyncData('ticker', () => fetchQuotes(TICKS.map(x => x[1]), '5d'), {refreshMs:60000, ttlMs:55000});
+  const items = TICKS.map(([lb, sym, dp, isYield]) => {
+    const q = data && data[sym];
+    if (!q) return <span className="titem" key={lb}><span className="tlb">{lb}</span><span className="dim">—</span></span>;
+    const chgEl = isYield
+      ? <span className={cls(q.chg)}>{bp(q.chg)}</span>
+      : <span className={cls(q.pct)}>{sgn(q.pct, 2)}%</span>;
+    return <span className="titem" key={lb}>
+      <span className="tlb">{lb}</span>
+      <span>{isYield ? fmt(q.price, 2) + '%' : fmt(q.price, dp)}</span>
+      {chgEl}
+    </span>;
+  });
+  return (
+    <div className="ticker">
+      <div className="tickwrap">{items}{items.map((el, i) => React.cloneElement(el, {key: 'b' + i}))}</div>
+      <div className="tickstat">
+        <span className={'dot ' + (status === 'ok' ? 'ok' : status === 'loading' ? 'ld' : 'err')}/>
+        {status === 'ok' ? 'LIVE ' + tsFmt(t) : status === 'loading' ? 'LOADING' : 'STALE — RETRYING'}
+      </div>
+    </div>
+  );
+}
+
+/* ───────────────────────── top bar / search / brief ───────────────────────── */
+const MODULES = [
+  {name:'MACRO PULSE',  desc:'Rates · Inflation · FX · Commodities'},
+  {name:'POLICY',       desc:'Monetary & Fiscal'},
+  {name:'CREDIT & DEBT',desc:'Spreads · Maturity Wall · Delinquencies'},
+  {name:'EQUITIES',     desc:'Structure & Sentiment'},
+  {name:'GLOBAL MACRO', desc:'Growth · Labor · Geopolitics'},
+  {name:'JOURNAL',      desc:'Notes · Memo · Theses · Library'},
+];
+function GlobalSearch({searchIndex}){
+  const [q, setQ] = useState('');
+  const [open, setOpen] = useState(false);
+  const results = useMemo(() => {
+    const s = q.trim().toLowerCase();
+    if (!s) return [];
+    return searchIndex.filter(it => (it.label + ' ' + (it.sub || '')).toLowerCase().includes(s)).slice(0, 8);
+  }, [q, searchIndex]);
+  return (
+    <div className="searchwrap">
+      <input id="gsearch" placeholder="SEARCH  modules · case studies · theses   [/]"
+        value={q} onChange={e => { setQ(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)} onBlur={() => setTimeout(() => setOpen(false), 150)}
+        onKeyDown={e => { if (e.key === 'Escape'){ setQ(''); setOpen(false); e.target.blur(); }
+                          if (e.key === 'Enter' && results[0]){ results[0].go(); setQ(''); setOpen(false); e.target.blur(); } }}/>
+      {open && results.length > 0 ? (
+        <div className="sresults">
+          {results.map((r, i) => (
+            <div className="sresult" key={i} onMouseDown={() => { r.go(); setQ(''); setOpen(false); }}>
+              <span className="stype">{r.type}</span><span>{r.label}</span><span className="ssub">{r.sub}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+const BRIEF_FIELDS = [
+  ['overnight','OVERNIGHT SESSION (Asia / Europe moves, gaps)'],
+  ['levels','KEY LEVELS (SPX, 10Y, DXY, crude, BTC)'],
+  ['catalysts',"TODAY'S CATALYSTS (data, speakers, auctions, earnings)"],
+  ['theme','MACRO THEME OF THE DAY'],
+  ['risks','TOP RISKS / WHAT WOULD SURPRISE'],
+  ['plan','GAME PLAN'],
+];
+function MorningBrief({onClose}){
+  const [brief, setBrief] = useLocalStorage('ani.brief.v1', {});
+  const [copied, flash] = useFlash();
+  const set = (k, v) => setBrief(b => ({...b, [k]: v}));
+  const date = brief.date || todayISO();
+  const build = () => {
+    let out = '═══ MORNING BRIEF — ' + date + ' ═══\n\n';
+    for (const [k, lb] of BRIEF_FIELDS) out += '■ ' + lb + '\n' + (brief[k] || '—') + '\n\n';
+    return out + '— ANI TERMINAL';
+  };
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="mbox" onClick={e => e.stopPropagation()}>
+        <div className="mhd">
+          <span className="ptitle teal">MORNING BRIEF</span>
+          <span className="pright">
+            <input style={{width:110, height:22, fontSize:10, padding:'0 4px'}} value={date} onChange={e => set('date', e.target.value)}/>
+            <button className="tbtn" onClick={async () => { await copyText(build()); flash(); }}>{copied ? 'COPIED ✓' : 'COPY'}</button>
+            <button className="tbtn" onClick={() => download('morning-brief-' + date + '.txt', build())}>EXPORT</button>
+            <button className="tbtn" onClick={onClose}>✕</button>
+          </span>
+        </div>
+        <div className="mbody">
+          {BRIEF_FIELDS.map(([k, lb]) => (
+            <div key={k}>
+              <div className="flabel">{lb}</div>
+              <textarea rows={2} value={brief[k] || ''} onChange={e => set(k, e.target.value)}/>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ───────────────────────── economic calendar sidebar ───────────────────────── */
+function CalendarBar(){
+  const [events, setEvents] = useLocalStorage('ani.cal.v1', []);
+  const [draft, setDraft] = useState(null);
+  const sorted = useMemo(() => [...events].sort((a, b) => (a.date + (a.time||'')).localeCompare(b.date + (b.time||''))), [events]);
+  const impCls = i => i === 'H' ? 'dn' : i === 'M' ? 'amb' : 'dim';
+  const save = () => {
+    if (!draft || !draft.name) { setDraft(null); return; }
+    setEvents(ev => draft.id && ev.some(e => e.id === draft.id)
+      ? ev.map(e => e.id === draft.id ? draft : e)
+      : [...ev, {...draft, id: uid()}]);
+    setDraft(null);
+  };
+  return (
+    <div className="calbar">
+      <div className="phead">
+        <span className="ptitle">ECON CALENDAR</span>
+        <span className="pright">
+          <Badge type="MANUAL"/>
+          <button className="xbtn" onClick={() => setDraft({date: todayISO(), time:'', name:'', imp:'M'})}>+ ADD</button>
+        </span>
+      </div>
+      {draft ? (
+        <div style={{padding:8, borderBottom:'1px solid var(--border)', display:'flex', flexDirection:'column', gap:4}}>
+          <input style={{height:22, fontSize:10, padding:'0 4px'}} placeholder="YYYY-MM-DD" value={draft.date} onChange={e => setDraft({...draft, date: e.target.value})}/>
+          <input style={{height:22, fontSize:10, padding:'0 4px'}} placeholder="time ET (opt)" value={draft.time} onChange={e => setDraft({...draft, time: e.target.value})}/>
+          <input style={{height:22, fontSize:10, padding:'0 4px'}} placeholder="event" autoFocus={!draft.id} value={draft.name}
+            onChange={e => setDraft({...draft, name: e.target.value})} onKeyDown={e => { if (e.key === 'Enter') save(); }}/>
+          <div style={{display:'flex', gap:4}}>
+            <button className="xbtn" onClick={() => setDraft({...draft, imp: draft.imp === 'H' ? 'M' : draft.imp === 'M' ? 'L' : 'H'})}>
+              IMP: <span className={impCls(draft.imp)}>{draft.imp}</span>
+            </button>
+            <button className="xbtn teal" onClick={save}>SAVE</button>
+            <button className="xbtn" onClick={() => setDraft(null)}>CANCEL</button>
+          </div>
+        </div>
+      ) : null}
+      {sorted.length === 0 && !draft ? <div className="dim mono" style={{padding:10, fontSize:10}}>No events. + ADD to populate.<br/>Persisted in this browser.</div> : null}
+      {sorted.map(ev => (
+        <div className="calrow" key={ev.id} onClick={() => setDraft({...ev})}>
+          <span className="caldate">{ev.date.slice(5)}{ev.time ? ' ' + ev.time : ''}</span>
+          <span style={{whiteSpace:'normal'}}>{ev.name}</span>
+          <span className={impCls(ev.imp)} style={{fontWeight:700}}>{ev.imp}</span>
+          <span className="calx" onClick={e => { e.stopPropagation(); setEvents(list => list.filter(x => x.id !== ev.id)); }}>✕</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ───────────────────────── nav ───────────────────────── */
+function Sidebar({active, setActive}){
+  return (
+    <div className="sidebar">
+      {MODULES.map((m, i) => (
+        <div key={i} className={'navitem' + (i === active ? ' active' : '')} onClick={() => setActive(i)}>
+          <span className="navkey">{i+1}</span>
+          <span><div className="nname">{m.name}</div><div className="ndesc">{m.desc}</div></span>
+        </div>
+      ))}
+      <div className="sfoot">ANI TERMINAL v1.0<br/>YF·FRED·ATL FED — no keys<br/>keys 1–6 switch · / search</div>
+    </div>
+  );
+}
+function TabBar({active, setActive}){
+  return (
+    <div className="tabbar">
+      {MODULES.map((m, i) => (
+        <div key={i} className={'ti' + (i === active ? ' on' : '')} onClick={() => setActive(i)}>
+          <span className="tk">{i+1}</span><span className="tn">{m.name.split(' ')[0]}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ═══════════════ MODULE 1 — DAILY MACRO PULSE ═══════════════ */
+const TENORS = [['1M','DGS1MO'],['3M','DGS3MO'],['6M','DGS6MO'],['1Y','DGS1'],['2Y','DGS2'],['3Y','DGS3'],['5Y','DGS5'],['7Y','DGS7'],['10Y','DGS10'],['20Y','DGS20'],['30Y','DGS30']];
+const TIPS_IDS = [['5Y','DFII5'],['7Y','DFII7'],['10Y','DFII10'],['20Y','DFII20'],['30Y','DFII30']];
+const M1_FRED = TENORS.map(t => t[1]).concat(TIPS_IDS.map(t => t[1]), ['T5YIE','T10YIE','CPIAUCSL','CPILFESL','PCEPI','PCEPILFE','PPIFIS']);
+const FX_PAIRS = [['EUR/USD','EURUSD=X',4],['USD/JPY','JPY=X',2],['GBP/USD','GBPUSD=X',4],['USD/CNY','CNY=X',4],['USD/CHF','CHF=X',4]];
+const CMD_LIST = [['WTI','CL=F',2],['BRENT','BZ=F',2],['NATGAS','NG=F',3],['GOLD','GC=F',1],['SILVER','SI=F',2],['COPPER','HG=F',3],['WHEAT','ZW=F',1],['CORN','ZC=F',1],['SOYBEANS','ZS=F',1]];
+const G10Y_ROWS = [['United States','live'],['Germany','g10y.de'],['United Kingdom','g10y.uk'],['Japan','g10y.jp'],['France','g10y.fr'],['Italy','g10y.it'],['Australia','g10y.au'],['Canada','g10y.ca']];
+const CB_ROWS = [['FED','cb.fed'],['ECB','cb.ecb'],['BOE','cb.boe'],['BOJ','cb.boj']];
+
+function curveShape(c){
+  const s210 = c['10Y'] != null && c['2Y'] != null ? c['10Y'] - c['2Y'] : null;
+  const s3m10 = c['10Y'] != null && c['3M'] != null ? c['10Y'] - c['3M'] : null;
+  if (s210 == null) return ['—', 'var(--dim)'];
+  if (s210 < -0.05 || (s3m10 != null && s3m10 < -0.15)) return ['INVERTED', 'var(--dn)'];
+  if (s210 < 0.20) return ['FLAT', 'var(--amb)'];
+  if (s210 > 0.90) return ['STEEP', 'var(--up)'];
+  return ['NORMAL', 'var(--up)'];
+}
+
+function ModulePulse(){
+  const fred = useAsyncData('m1.fred', () => fetchFredMap(M1_FRED), {ttlMs: 10*60e3});
+  const fx   = useAsyncData('fx.majors', () => fetchQuotes(FX_PAIRS.map(p => p[1]), '5d'), {refreshMs:60000});
+  const cmd  = useAsyncData('m1.cmd', () => fetchQuotes(CMD_LIST.map(c => c[1]), '5d'), {refreshMs:60000});
+  const {manual} = useContext(ManualCtx);
+  const f = fred.data || {};
+  const curve = useMemo(() => TENORS.map(([t, id]) => ({t, y: lastV(f[id])})).filter(d => d.y != null), [fred.data]);
+  const cm = useMemo(() => { const m = {}; TENORS.forEach(([t, id]) => m[t] = lastV(f[id])); return m; }, [fred.data]);
+  const [shape, shapeColor] = curveShape(cm);
+  const sp = (a, b) => cm[a] != null && cm[b] != null ? cm[a] - cm[b] : null;
+  const ferr = fred.status === 'error';
+  const {ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip} = RC;
+  const inflRows = [
+    ['CPI HEADLINE', yoy(f.CPIAUCSL), yoy(f.CPIAUCSL,1), lastD(f.CPIAUCSL)],
+    ['CPI CORE',     yoy(f.CPILFESL), yoy(f.CPILFESL,1), lastD(f.CPILFESL)],
+    ['PCE HEADLINE', yoy(f.PCEPI),    yoy(f.PCEPI,1),    lastD(f.PCEPI)],
+    ['PCE CORE',     yoy(f.PCEPILFE), yoy(f.PCEPILFE,1), lastD(f.PCEPILFE)],
+    ['PPI FINAL DEM',yoy(f.PPIFIS),   yoy(f.PPIFIS,1),   lastD(f.PPIFIS)],
+  ];
+  return (
+    <div className="grid">
+      <Panel span={8} title="US TREASURY CURVE" badge="LIVE" err={ferr}
+        right={<span className="gl mono" style={{color: shapeColor, fontSize:10}}>{shape}</span>}
+        foot={'FRED daily constant-maturity yields · as of ' + (lastD(f.DGS10) || '—')}>
+        <div style={{height:190}}>
+          {RC.LineChart && curve.length ? (
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={curve} margin={{top:8, right:12, bottom:0, left:-18}}>
+                <CartesianGrid stroke="#1B2436" strokeDasharray="3 3"/>
+                <XAxis dataKey="t" tick={axisTick} axisLine={{stroke:'#1B2436'}} tickLine={false}/>
+                <YAxis tick={axisTick} axisLine={{stroke:'#1B2436'}} tickLine={false} domain={['auto','auto']} tickFormatter={v => v.toFixed(1)}/>
+                <Tooltip {...darkTooltip} formatter={v => [v.toFixed(2) + '%', 'yield']}/>
+                <Line type="monotone" dataKey="y" stroke="#00D4C8" strokeWidth={2} dot={{r:3, fill:'#00D4C8'}} isAnimationActive={false}/>
+              </LineChart>
+            </ResponsiveContainer>
+          ) : fred.status === 'loading' ? <div className="dim mono" style={{padding:20}}>loading curve…</div> : <ChartUnavailable/>}
+        </div>
+        <div className="chips" style={{marginTop:6}}>
+          <div className="chip"><span className="chl">10Y–2Y</span><span className={'mono ' + cls(sp('10Y','2Y'))}>{bp(sp('10Y','2Y'))}</span></div>
+          <div className="chip"><span className="chl">10Y–3M</span><span className={'mono ' + cls(sp('10Y','3M'))}>{bp(sp('10Y','3M'))}</span></div>
+          <div className="chip"><span className="chl">30Y–5Y</span><span className={'mono ' + cls(sp('30Y','5Y'))}>{bp(sp('30Y','5Y'))}</span></div>
+          <div className="chip"><span className="chl">2Y</span><span className="mono">{fmt(cm['2Y'])}%</span></div>
+          <div className="chip"><span className="chl">10Y</span><span className="mono">{fmt(cm['10Y'])}%</span></div>
+          <div className="chip"><span className="chl">30Y</span><span className="mono">{fmt(cm['30Y'])}%</span></div>
+        </div>
+      </Panel>
+
+      <Panel span={4} title="TIPS REAL YIELDS" badge="LIVE" err={ferr} foot="FRED real constant-maturity (DFII)">
+        <table className="tbl"><thead><tr><th>TENOR</th><th className="r">REAL YLD</th><th className="r">Δ1M</th></tr></thead>
+          <tbody>
+            {TIPS_IDS.map(([t, id]) => (
+              <tr key={t}><td>{t}</td><td className="r">{fmt(lastV(f[id]))}%</td>
+                <td className={'r ' + cls(delta(f[id], 21))}>{bp(delta(f[id], 21))}</td></tr>
+            ))}
+          </tbody></table>
+        <div className="chips" style={{marginTop:8}}>
+          <div className="chip"><span className="chl">5Y BE</span><span className="mono">{fmt(lastV(f.T5YIE))}%</span></div>
+          <div className="chip"><span className="chl">10Y BE</span><span className="mono">{fmt(lastV(f.T10YIE))}%</span></div>
+        </div>
+      </Panel>
+
+      <Panel span={6} title="INFLATION DASHBOARD" badge="LIVE" err={ferr} foot="YoY computed client-side from FRED index levels">
+        <table className="tbl"><thead><tr><th>SERIES</th><th className="r">YOY</th><th className="r">PRIOR</th><th className="r">AS OF</th></tr></thead>
+          <tbody>
+            {inflRows.map(([lb, v, p, d]) => (
+              <tr key={lb}><td>{lb}</td>
+                <td className={'r ' + (v != null && v > 3 ? 'dn' : v != null && v < 2.5 ? 'up' : 'amb')}>{fmt(v, 1)}%</td>
+                <td className="r dim">{fmt(p, 1)}%</td><td className="r dim">{d ? d.slice(0, 7) : '—'}</td></tr>
+            ))}
+            <tr><td>5Y BREAKEVEN</td><td className="r">{fmt(lastV(f.T5YIE))}%</td>
+              <td className={'r ' + cls(delta(f.T5YIE, 21))}>{bp(delta(f.T5YIE, 21))}</td><td className="r dim">{lastD(f.T5YIE) || '—'}</td></tr>
+            <tr><td>10Y BREAKEVEN</td><td className="r">{fmt(lastV(f.T10YIE))}%</td>
+              <td className={'r ' + cls(delta(f.T10YIE, 21))}>{bp(delta(f.T10YIE, 21))}</td><td className="r dim">{lastD(f.T10YIE) || '—'}</td></tr>
+          </tbody></table>
+      </Panel>
+
+      <Panel span={6} title="GLOBAL 10Y GOVERNMENT YIELDS" badge="MANUAL"
+        right={<Badge type="LIVE" err={ferr}/>} foot="US live via FRED · others manual — click cell to edit">
+        <table className="tbl"><thead><tr><th>COUNTRY</th><th className="r">10Y YIELD</th><th className="r">VS UST</th></tr></thead>
+          <tbody>
+            {G10Y_ROWS.map(([name, k]) => {
+              const us = lastV(f.DGS10);
+              const v = k === 'live' ? us : mnum(manual, k);
+              const d = k === 'live' || v == null || us == null ? null : v - us;
+              return <tr key={name}><td>{name}{k === 'live' ? <span className="teal"> ●</span> : null}</td>
+                <td className="r">{k === 'live' ? fmt(us) + '%' : <Ecell k={k} unit="%"/>}</td>
+                <td className={'r ' + cls(d)}>{k === 'live' ? '—' : bp(d)}</td></tr>;
+            })}
+          </tbody></table>
+      </Panel>
+
+      <Panel span={6} title="CENTRAL BANK TRACKER" badge="MANUAL"
+        right={<span className="eft">{lastUpd(manual, 'cb.') ? 'upd ' + tsFmt(lastUpd(manual, 'cb.')) : ''}</span>}
+        foot="Market-implied meeting odds — update from CME FedWatch / OIS · click cells">
+        <table className="tbl"><thead><tr><th>BANK</th><th>NEXT MEETING</th><th className="r">CUT %</th><th className="r">HOLD %</th><th className="r">HIKE %</th></tr></thead>
+          <tbody>
+            {CB_ROWS.map(([lb, k]) => (
+              <tr key={lb}><td className="teal">{lb}</td><td><Ecell k={k + '.date'}/></td>
+                <td className="r up"><Ecell k={k + '.cut'} unit="%"/></td>
+                <td className="r"><Ecell k={k + '.hold'} unit="%"/></td>
+                <td className="r dn"><Ecell k={k + '.hike'} unit="%"/></td></tr>
+            ))}
+          </tbody></table>
+      </Panel>
+
+      <Panel span={6} title="FX MAJORS" badge="LIVE" err={fx.status === 'error'} foot="Yahoo Finance · 60s refresh">
+        <table className="tbl"><thead><tr><th>PAIR</th><th className="r">LAST</th><th className="r">1D</th><th className="r">1W</th></tr></thead>
+          <tbody>
+            {FX_PAIRS.map(([lb, sym, dp]) => {
+              const q = fx.data && fx.data[sym];
+              return <tr key={lb}><td>{lb}</td><td className="r">{q ? fmt(q.price, dp) : '—'}</td>
+                <td className={'r ' + cls(q && q.pct)}>{q ? sgn(q.pct, 2) + '%' : '—'}</td>
+                <td className={'r ' + cls(q && q.pct1w)}>{q && q.pct1w != null ? sgn(q.pct1w, 2) + '%' : '—'}</td></tr>;
+            })}
+          </tbody></table>
+      </Panel>
+
+      <Panel span={6} title="COMMODITIES" badge="LIVE" err={cmd.status === 'error'} foot="Front-month futures · Yahoo Finance · 60s refresh">
+        <div className="tiles">
+          {CMD_LIST.map(([lb, sym, dp]) => {
+            const q = cmd.data && cmd.data[sym];
+            return <Tile key={lb} label={lb} value={q ? fmt(q.price, dp) : '—'} pct={q ? q.pct : null}/>;
+          })}
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
+/* ═══════════════ MODULE 2 — MONETARY & FISCAL POLICY ═══════════════ */
+const M2_FRED = ['WALCL','RRPONTSYD','WRESBAL','GFDEBTN','FYFSGDA188S','A091RC1Q027SBEA'];
+const G10_RATES = [['FED','g10.fed'],['ECB','g10.ecb'],['BOE','g10.boe'],['BOJ','g10.boj'],['SNB','g10.snb'],['BOC','g10.boc'],['RBA','g10.rba'],['RBNZ','g10.rbnz'],['RIKSBANK','g10.riks'],['NORGES','g10.norges']];
+const FDM_INPUTS = [
+  ['fdm.debt',  'DEBT/GDP TRAJECTORY', 60],
+  ['fdm.int',   'INTEREST / TAX REVENUE', 55],
+  ['fdm.def',   'STRUCTURAL DEFICIT BREADTH', 60],
+  ['fdm.indep', 'CB INDEPENDENCE EROSION', 40],
+  ['fdm.term',  'AUCTION / TERM-PREMIUM STRESS', 35],
+];
+function ModulePolicy(){
+  const fred = useAsyncData('m2.fred', () => fetchFredMap(M2_FRED), {ttlMs: 10*60e3});
+  const jpy = useAsyncData('fx.majors', () => fetchQuotes(FX_PAIRS.map(p => p[1]), '5d'), {refreshMs:60000});
+  const {manual} = useContext(ManualCtx);
+  const f = fred.data || {};
+  const ferr = fred.status === 'error';
+  const fdm = FDM_INPUTS.reduce((acc, [k,, def]) => {
+    const v = manual[k] != null ? Number(manual[k].v) : def;
+    return acc + (isNaN(v) ? def : v);
+  }, 0) / FDM_INPUTS.length;
+  const usdjpy = jpy.data && jpy.data['JPY=X'];
+  const walcl = lastV(f.WALCL), debt = lastV(f.GFDEBTN);
+  return (
+    <div className="grid">
+      <Panel span={6} title="FED PLUMBING" badge="LIVE" err={ferr} foot={'FRED weekly/daily · B/S as of ' + (lastD(f.WALCL) || '—')}>
+        <div className="stats">
+          <Stat label="FED BALANCE SHEET" value={walcl != null ? '$' + fmt(walcl/1e6, 2) + 'T' : '—'}
+            sub={'Δ4W ' + (delta(f.WALCL, 4) != null ? sgn(delta(f.WALCL, 4)/1000, 0) + 'B' : '—')} subCls={cls(delta(f.WALCL, 4))}/>
+          <Stat label="ON RRP" value={lastV(f.RRPONTSYD) != null ? '$' + fmt(lastV(f.RRPONTSYD), 0) + 'B' : '—'}
+            sub={'Δ1W ' + sgn(delta(f.RRPONTSYD, 5), 0) + 'B'} subCls={cls(delta(f.RRPONTSYD, 5))}/>
+          <Stat label="BANK RESERVES" value={lastV(f.WRESBAL) != null ? '$' + fmt(lastV(f.WRESBAL)/1000, 2) + 'T' : '—'}
+            sub={'Δ4W ' + sgn(delta(f.WRESBAL, 4), 0) + 'B'} subCls={cls(delta(f.WRESBAL, 4))}/>
+        </div>
+        <div className="dim mono" style={{fontSize:9, marginTop:8, lineHeight:1.6}}>
+          Reserves &lt; ~$2.8T historically = scarcity zone. RRP near zero → QT bites reserves directly.
+        </div>
+      </Panel>
+
+      <Panel span={6} title="CME FEDWATCH — NEXT 4 FOMC" badge="MANUAL"
+        right={<span className="eft">{lastUpd(manual, 'fw.') ? 'upd ' + tsFmt(lastUpd(manual, 'fw.')) : ''}</span>}
+        foot="Update by hand from cmegroup.com FedWatch · click cells to edit">
+        <table className="tbl"><thead><tr><th>MEETING</th><th className="r">CUT %</th><th className="r">HOLD %</th><th className="r">HIKE %</th><th>NOTE</th></tr></thead>
+          <tbody>
+            {[1,2,3,4].map(i => (
+              <tr key={i}><td><Ecell k={'fw.m' + i + '.date'}/></td>
+                <td className="r up"><Ecell k={'fw.m' + i + '.cut'} unit="%"/></td>
+                <td className="r"><Ecell k={'fw.m' + i + '.hold'} unit="%"/></td>
+                <td className="r dn"><Ecell k={'fw.m' + i + '.hike'} unit="%"/></td>
+                <td><Ecell k={'fw.m' + i + '.note'}/></td></tr>
+            ))}
+          </tbody></table>
+      </Panel>
+
+      <Panel span={6} title="US FISCAL POSITION" badge="LIVE" err={ferr} foot="FRED: GFDEBTN · FYFSGDA188S · A091RC1Q027SBEA">
+        <div className="stats">
+          <Stat label="NATIONAL DEBT" value={debt != null ? '$' + fmt(debt/1e6, 2) + 'T' : '—'}
+            sub={'as of ' + (lastD(f.GFDEBTN) || '—')}/>
+          <Stat label="DEFICIT % GDP" value={lastV(f.FYFSGDA188S) != null ? fmt(Math.abs(lastV(f.FYFSGDA188S)), 1) + '%' : '—'}
+            sub={'FY' + (lastD(f.FYFSGDA188S) || '').slice(0, 4)} subCls="dn"/>
+          <Stat label="NET INTEREST (SAAR)" value={lastV(f.A091RC1Q027SBEA) != null ? '$' + fmt(lastV(f.A091RC1Q027SBEA), 0) + 'B' : '—'}
+            sub={'ΔYoY ' + sgn(delta(f.A091RC1Q027SBEA, 4), 0) + 'B'} subCls={cls(delta(f.A091RC1Q027SBEA, 4))}/>
+        </div>
+      </Panel>
+
+      <Panel span={6} title="FISCAL DOMINANCE RISK METER" badge="USER" foot="Composite = equal-weight average of the five inputs · saved locally">
+        {FDM_INPUTS.map(([k, lb, def]) => <SliderRow key={k} k={k} label={lb} def={def}/>)}
+        <Gauge value={fdm} zones={[[35,'CONTAINED','var(--up)'],[60,'ELEVATED','var(--amb)'],[101,'CRITICAL','var(--dn)']]}/>
+      </Panel>
+
+      <Panel span={6} title="G10 CENTRAL BANK RATES" badge="MANUAL"
+        right={<span className="eft">{lastUpd(manual, 'g10.') ? 'upd ' + tsFmt(lastUpd(manual, 'g10.')) : ''}</span>}
+        foot="Click cells to edit policy rate and stance">
+        <table className="tbl"><thead><tr><th>BANK</th><th className="r">POLICY RATE</th><th>STANCE / NOTE</th></tr></thead>
+          <tbody>
+            {G10_RATES.map(([lb, k]) => (
+              <tr key={lb}><td>{lb}</td><td className="r teal"><Ecell k={k + '.rate'} unit="%"/></td><td><Ecell k={k + '.note'}/></td></tr>
+            ))}
+          </tbody></table>
+      </Panel>
+
+      <Panel span={3} title="BOJ / YEN WATCH" badge="MANUAL"
+        right={usdjpy ? <span className={'mono ' + cls(usdjpy.pct)} style={{fontSize:10}}>¥{fmt(usdjpy.price, 2)}</span> : null}
+        foot="USDJPY live · rest manual">
+        <EditableField k="boj.rate" label="POLICY RATE" unit="%"/>
+        <EditableField k="boj.jgb10" label="JGB 10Y" unit="%"/>
+        <EditableField k="boj.line" label="MOF LINE" unit="USDJPY"/>
+        <EditableField k="boj.notes" label="NOTES" wide/>
+      </Panel>
+
+      <Panel span={3} title="PBOC WATCH" badge="MANUAL" foot="Manual — update on fixings / policy moves">
+        <EditableField k="pboc.lpr1" label="LPR 1Y" unit="%"/>
+        <EditableField k="pboc.lpr5" label="LPR 5Y" unit="%"/>
+        <EditableField k="pboc.rrr" label="RRR" unit="%"/>
+        <EditableField k="pboc.rev" label="7D REV REPO" unit="%"/>
+        <EditableField k="pboc.fix" label="CNY FIX NOTE" wide/>
+      </Panel>
+    </div>
+  );
+}
+
+/* ═══════════════ MODULE 3 — CREDIT & DEBT ═══════════════ */
+const M3_FRED = ['BAMLC0A0CM','BAMLH0A0HYM2','DRCCLACBS','DRSFRMACBS'];
+/* Corporate + leveraged-loan maturities, USD billions — best-estimate compilation */
+const WALL = [
+  {y:'2026', IG:780, HY:160, Loans:130},
+  {y:'2027', IG:860, HY:240, Loans:210},
+  {y:'2028', IG:920, HY:320, Loans:300},
+  {y:'2029', IG:880, HY:350, Loans:340},
+  {y:'2030', IG:840, HY:310, Loans:280},
+  {y:'2031', IG:790, HY:260, Loans:190},
+  {y:'2032', IG:700, HY:210, Loans:140},
+];
+const CDS_ROWS = [['US 5Y CDS','cds.us'],['ITALY 5Y CDS','cds.it'],['FRANCE 5Y CDS','cds.fr'],['JAPAN 5Y CDS','cds.jp'],['CHINA 5Y CDS','cds.cn']];
+
+function ModuleCredit(){
+  const fred = useAsyncData('m3.fred', () => fetchFredMap(M3_FRED), {ttlMs: 10*60e3});
+  const {manual} = useContext(ManualCtx);
+  const f = fred.data || {};
+  const ferr = fred.status === 'error';
+  const ig = lastV(f.BAMLC0A0CM), hy = lastV(f.BAMLH0A0HYM2);
+  const {ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend} = RC;
+  return (
+    <div className="grid">
+      <Panel span={6} title="CREDIT SPREADS (OAS)" badge="LIVE" err={ferr}
+        foot={'ICE BofA via FRED · as of ' + (lastD(f.BAMLH0A0HYM2) || '—')}>
+        <div className="stats">
+          <Stat label="IG OAS" value={ig != null ? Math.round(ig*100) + 'bp' : '—'}
+            sub={'Δ1M ' + bp(delta(f.BAMLC0A0CM, 21))} subCls={cls(-(delta(f.BAMLC0A0CM, 21) || 0))}/>
+          <Stat label="HY OAS" value={hy != null ? Math.round(hy*100) + 'bp' : '—'}
+            sub={'Δ1M ' + bp(delta(f.BAMLH0A0HYM2, 21))} subCls={cls(-(delta(f.BAMLH0A0HYM2, 21) || 0))}/>
+          <Stat label="HY − IG" value={ig != null && hy != null ? Math.round((hy-ig)*100) + 'bp' : '—'}
+            sub="compression = risk-on"/>
+        </div>
+        <div className="dim mono" style={{fontSize:9, marginTop:8, lineHeight:1.6}}>
+          Cycle context: IG &lt;100bp tight / &gt;200bp stress · HY &lt;350bp tight / &gt;800bp distress.
+        </div>
+      </Panel>
+
+      <Panel span={6} title="CONSUMER STRESS — DELINQUENCIES" badge="LIVE" err={ferr}
+        foot={'FRED quarterly, all commercial banks · as of ' + (lastD(f.DRCCLACBS) || '—')}>
+        <div className="stats">
+          <Stat label="CREDIT CARD DQ" value={fmt(lastV(f.DRCCLACBS), 2) + '%'}
+            sub={'ΔYoY ' + sgn(delta(f.DRCCLACBS, 4), 2) + 'pp'} subCls={cls(-(delta(f.DRCCLACBS, 4) || 0))}/>
+          <Stat label="MORTGAGE DQ" value={fmt(lastV(f.DRSFRMACBS), 2) + '%'}
+            sub={'ΔYoY ' + sgn(delta(f.DRSFRMACBS, 4), 2) + 'pp'} subCls={cls(-(delta(f.DRSFRMACBS, 4) || 0))}/>
+        </div>
+        <div className="dim mono" style={{fontSize:9, marginTop:8, lineHeight:1.6}}>
+          Card DQ &gt;3.5% historically coincides with late-cycle consumer strain; mortgage DQ lags labor market by ~2 quarters.
+        </div>
+      </Panel>
+
+      <Panel span={8} title="CORPORATE MATURITY WALL 2026–2032" badge="EST"
+        right={<span className="eft">Estimates — Bloomberg/SIFMA</span>}
+        foot="USD billions · hardcoded best-estimate compilation from public Bloomberg/SIFMA data — not live">
+        <div style={{height:230}}>
+          {RC.BarChart ? (
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={WALL} margin={{top:8, right:12, bottom:0, left:-10}}>
+                <CartesianGrid stroke="#1B2436" strokeDasharray="3 3" vertical={false}/>
+                <XAxis dataKey="y" tick={axisTick} axisLine={{stroke:'#1B2436'}} tickLine={false}/>
+                <YAxis tick={axisTick} axisLine={{stroke:'#1B2436'}} tickLine={false}/>
+                <Tooltip {...darkTooltip} formatter={(v, n) => ['$' + v + 'B', n]} cursor={{fill:'rgba(0,212,200,0.06)'}}/>
+                <Legend wrapperStyle={{fontSize:10, fontFamily:'IBM Plex Mono'}}/>
+                <Bar dataKey="IG" stackId="w" fill="#00D4C8" isAnimationActive={false}/>
+                <Bar dataKey="HY" stackId="w" fill="#FFB020" isAnimationActive={false}/>
+                <Bar dataKey="Loans" stackId="w" fill="#8B7CF6" isAnimationActive={false}/>
+              </BarChart>
+            </ResponsiveContainer>
+          ) : <ChartUnavailable/>}
+        </div>
+      </Panel>
+
+      <Panel span={4} title="SOVEREIGN RISK" badge="MANUAL"
+        right={<span className="eft">{lastUpd(manual, 'cds.') ? 'upd ' + tsFmt(lastUpd(manual, 'cds.')) : ''}</span>}
+        foot="Click to edit · source: your CDS screen of choice">
+        <table className="tbl"><thead><tr><th>NAME</th><th className="r">LEVEL</th></tr></thead>
+          <tbody>
+            {CDS_ROWS.map(([lb, k]) => (
+              <tr key={lb}><td>{lb}</td><td className="r"><Ecell k={k} unit="bp"/></td></tr>
+            ))}
+            <tr><td className="teal">BTP–BUND 10Y</td><td className="r teal"><Ecell k="cds.btpbund" unit="bp"/></td></tr>
+          </tbody></table>
+      </Panel>
+
+      <Panel span={6} title="LEVERAGED FINANCE" badge="MANUAL"
+        right={<span className="eft">{lastUpd(manual, 'lev.') ? 'upd ' + tsFmt(lastUpd(manual, 'lev.')) : ''}</span>}
+        foot="Morningstar LSTA index, distress ratio — update manually">
+        <EditableField k="lev.idx" label="LEV LOAN INDEX PX"/>
+        <EditableField k="lev.ccc" label="CCC SPREAD" unit="bp"/>
+        <EditableField k="lev.distress" label="DISTRESS RATIO" unit="%"/>
+        <EditableField k="lev.defrate" label="LTM DEFAULT RATE" unit="%"/>
+        <EditableField k="lev.note" label="NOTES" wide/>
+      </Panel>
+
+      <Panel span={6} title="CREDIT CYCLE CHECKLIST" badge="USER" foot="Your own regime read — saved locally">
+        <EditableField k="cc.stage" label="CYCLE STAGE"/>
+        <EditableField k="cc.issuance" label="ISSUANCE TONE"/>
+        <EditableField k="cc.lending" label="SLOOS / LENDING STD"/>
+        <EditableField k="cc.watch" label="WATCH ITEMS" wide/>
+      </Panel>
+    </div>
+  );
+}
+
+/* ═══════════════ MODULE 4 — EQUITY STRUCTURE & SENTIMENT ═══════════════ */
+const IDX_LIST = [['SPX','^GSPC'],['NDX','^NDX'],['RTY','^RUT'],['DOW','^DJI']];
+const SECTORS = [['XLK','TECH'],['XLF','FINS'],['XLV','HEALTH'],['XLY','DISCRET'],['XLP','STAPLES'],['XLE','ENERGY'],['XLI','INDUST'],['XLB','MATERIALS'],['XLU','UTIL'],['XLRE','REAL EST'],['XLC','COMMS']];
+const FACTORS = [['VTV','VALUE'],['VUG','GROWTH'],['QUAL','QUALITY'],['MTUM','MOMENTUM'],['USMV','MIN VOL'],['IWM','SMALL CAP']];
+function heatColor(p, scale){
+  if (p == null || isNaN(p)) return 'transparent';
+  const x = Math.max(-1, Math.min(1, p/scale));
+  return x >= 0 ? 'rgba(0,212,126,' + (0.10 + 0.45*x).toFixed(2) + ')' : 'rgba(255,77,109,' + (0.10 + 0.45*-x).toFixed(2) + ')';
+}
+function ModuleEquity(){
+  const idx = useAsyncData('m4.idx', () => fetchQuotes(IDX_LIST.map(i => i[1]), '1mo'), {refreshMs:60000});
+  const sec = useAsyncData('m4.sec', () => fetchQuotes(SECTORS.map(s => s[0]), '1mo'), {refreshMs:120000});
+  const fac = useAsyncData('m4.fac', () => fetchQuotes(FACTORS.map(s => s[0]), '1mo'), {refreshMs:120000});
+  const {manual} = useContext(ManualCtx);
+  const aaiiB = mnum(manual, 'sent.bull'), aaiiBr = mnum(manual, 'sent.bear');
+  const vtv = fac.data && fac.data.VTV, vug = fac.data && fac.data.VUG;
+  const gvSpread = vtv && vug && vug.pct1m != null && vtv.pct1m != null ? vug.pct1m - vtv.pct1m : null;
+  return (
+    <div className="grid">
+      <Panel span={7} title="US EQUITY INDICES" badge="LIVE" err={idx.status === 'error'} foot="Yahoo Finance · 60s refresh">
+        <div className="tiles" style={{gridTemplateColumns:'repeat(auto-fill,minmax(140px,1fr))'}}>
+          {IDX_LIST.map(([lb, sym]) => {
+            const q = idx.data && idx.data[sym];
+            return <Tile key={lb} label={lb} value={q ? fmt(q.price, 2) : '—'} pct={q ? q.pct : null}
+              extra={q && q.pct1m != null ? '1M ' + sgn(q.pct1m, 1) + '%' : null}/>;
+          })}
+        </div>
+      </Panel>
+
+      <Panel span={5} title="VALUATION" badge="MANUAL"
+        right={<span className="eft">{lastUpd(manual, 'val.') ? 'upd ' + tsFmt(lastUpd(manual, 'val.')) : ''}</span>}
+        foot="Update from your preferred source · timestamps set on save">
+        <EditableField k="val.fpe" label="SPX FWD P/E" unit="x"/>
+        <EditableField k="val.cape" label="SHILLER CAPE" unit="x"/>
+        <EditableField k="val.erp" label="EQUITY RISK PREM" unit="%"/>
+        <EditableField k="val.buffett" label="BUFFETT IND" unit="% GDP"/>
+      </Panel>
+
+      <Panel span={7} title="SECTOR ROTATION HEATMAP" badge="LIVE" err={sec.status === 'error'}
+        foot="SPDR sector ETFs · % change computed client-side · heat scaled ±3/±5/±8">
+        <table className="tbl"><thead><tr><th>SECTOR</th><th className="r">LAST</th><th className="r">1D %</th><th className="r">1W %</th><th className="r">1M %</th></tr></thead>
+          <tbody>
+            {SECTORS.map(([sym, lb]) => {
+              const q = sec.data && sec.data[sym];
+              return <tr key={sym}>
+                <td>{lb} <span className="dim">{sym}</span></td>
+                <td className="r">{q ? fmt(q.price, 2) : '—'}</td>
+                <td className="heatcell" style={{background: heatColor(q && q.pct, 3)}}>{q ? sgn(q.pct, 1) : '—'}</td>
+                <td className="heatcell" style={{background: heatColor(q && q.pct1w, 5)}}>{q && q.pct1w != null ? sgn(q.pct1w, 1) : '—'}</td>
+                <td className="heatcell" style={{background: heatColor(q && q.pct1m, 8)}}>{q && q.pct1m != null ? sgn(q.pct1m, 1) : '—'}</td>
+              </tr>;
+            })}
+          </tbody></table>
+      </Panel>
+
+      <Panel span={5} title="FACTOR DASHBOARD" badge="LIVE" err={fac.status === 'error'} foot="ETF proxies · Yahoo Finance">
+        <table className="tbl"><thead><tr><th>FACTOR</th><th className="r">1D %</th><th className="r">1M %</th></tr></thead>
+          <tbody>
+            {FACTORS.map(([sym, lb]) => {
+              const q = fac.data && fac.data[sym];
+              return <tr key={sym}><td>{lb} <span className="dim">{sym}</span></td>
+                <td className={'r ' + cls(q && q.pct)}>{q ? sgn(q.pct, 2) : '—'}</td>
+                <td className={'r ' + cls(q && q.pct1m)}>{q && q.pct1m != null ? sgn(q.pct1m, 1) : '—'}</td></tr>;
+            })}
+          </tbody></table>
+        <div className="chip" style={{marginTop:8}}>
+          <span className="chl">GROWTH − VALUE (1M)</span>
+          <span className={'mono ' + cls(gvSpread)}>{gvSpread != null ? sgn(gvSpread, 1) + 'pp' : '—'}</span>
+        </div>
+      </Panel>
+
+      <Panel span={6} title="SENTIMENT" badge="MANUAL"
+        right={<span className="eft">{lastUpd(manual, 'sent.') ? 'upd ' + tsFmt(lastUpd(manual, 'sent.')) : ''}</span>}
+        foot="AAII weekly Thu · CNN F&G · NAAIM Wed — update by hand">
+        <EditableField k="sent.bull" label="AAII BULL" unit="%"/>
+        <EditableField k="sent.bear" label="AAII BEAR" unit="%"/>
+        <div className="ef"><span className="efl">AAII SPREAD</span>
+          <span className={'mono ' + cls(aaiiB != null && aaiiBr != null ? aaiiB - aaiiBr : null)} style={{fontSize:12}}>
+            {aaiiB != null && aaiiBr != null ? sgn(aaiiB - aaiiBr, 1) + 'pp' : '—'}</span>
+          <span className="eft">computed</span></div>
+        <EditableField k="sent.fg" label="FEAR & GREED" unit="/100"/>
+        <EditableField k="sent.naaim" label="NAAIM EXPOSURE" unit="%"/>
+      </Panel>
+
+      <Panel span={6} title="BREADTH" badge="MANUAL"
+        right={<span className="eft">{lastUpd(manual, 'br.') ? 'upd ' + tsFmt(lastUpd(manual, 'br.')) : ''}</span>}
+        foot="Update from your breadth source — barchart, stockcharts, etc.">
+        <EditableField k="br.a50" label="% ABOVE 50DMA" unit="%"/>
+        <EditableField k="br.a200" label="% ABOVE 200DMA" unit="%"/>
+        <EditableField k="br.nhnl" label="NH − NL (NYSE)"/>
+        <EditableField k="br.rspspy" label="RSP/SPY RATIO"/>
+        <EditableField k="br.note" label="NOTES" wide/>
+      </Panel>
+    </div>
+  );
+}
+
+/* ═══════════════ MODULE 5 — GLOBAL MACRO & GEO ═══════════════ */
+const M5_FRED = ['PAYEMS','UNRATE','CIVPART','AHETPI'];
+const DALIO_ZONES = [
+  [20,'EARLY CYCLE — credit grows with incomes','var(--up)'],
+  [40,'MID CYCLE — leverage building','var(--up)'],
+  [60,'BUBBLE — debt outruns incomes','var(--amb)'],
+  [75,'TOP — tightening, debt-service strain','var(--amb)'],
+  [90,'DELEVERAGING — defaults & printing','var(--dn)'],
+  [101,'RESET / BEAUTIFUL DELEVERAGING','var(--pur)'],
+];
+const DEBT_GDP_ROWS = [['UNITED STATES','dg.us'],['CHINA','dg.cn'],['EUROZONE','dg.ez'],['JAPAN','dg.jp']];
+
+function GeoBoard(){
+  const [notes, setNotes] = useLocalStorage('ani.geo.v1', []);
+  const [draft, setDraft] = useState(null);
+  const save = () => {
+    if (!draft || !draft.title){ setDraft(null); return; }
+    setNotes(ns => draft.id && ns.some(n => n.id === draft.id)
+      ? ns.map(n => n.id === draft.id ? {...draft, t: Date.now()} : n)
+      : [...ns, {...draft, id: uid(), t: Date.now()}]);
+    setDraft(null);
+  };
+  return (
+    <Panel span={12} title="GEOPOLITICAL BOARD" badge="USER"
+      right={<button className="xbtn" onClick={() => setDraft({title:'', body:'', tag:'WATCH'})}>+ NOTE</button>}
+      foot="Sticky notes persisted in localStorage · tag cycles INFO → WATCH → RISK">
+      {draft ? (
+        <div style={{border:'1px solid var(--teal)', padding:8, marginBottom:8, display:'flex', flexDirection:'column', gap:4}}>
+          <input style={{height:24, fontSize:11, padding:'0 6px'}} placeholder="title" autoFocus value={draft.title}
+            onChange={e => setDraft({...draft, title: e.target.value})}/>
+          <textarea rows={3} placeholder="situation / watch items / triggers" value={draft.body}
+            onChange={e => setDraft({...draft, body: e.target.value})}/>
+          <div style={{display:'flex', gap:6}}>
+            <button className="xbtn" onClick={() => setDraft({...draft, tag: draft.tag === 'INFO' ? 'WATCH' : draft.tag === 'WATCH' ? 'RISK' : 'INFO'})}>
+              TAG: <span className={draft.tag === 'RISK' ? 'dn' : draft.tag === 'WATCH' ? 'amb' : 'teal'}>{draft.tag}</span>
+            </button>
+            <button className="xbtn teal" onClick={save}>SAVE</button>
+            <button className="xbtn" onClick={() => setDraft(null)}>CANCEL</button>
+          </div>
+        </div>
+      ) : null}
+      <div className="notes">
+        {notes.length === 0 && !draft ? <div className="dim mono" style={{fontSize:10}}>No notes yet — + NOTE to add a situation card.</div> : null}
+        {notes.map(n => (
+          <div className={'note ' + n.tag} key={n.id}>
+            <div className="ntitle">{n.title} <span className={'mono ' + (n.tag === 'RISK' ? 'dn' : n.tag === 'WATCH' ? 'amb' : 'teal')} style={{fontSize:8}}>{n.tag}</span></div>
+            <div className="nbody">{n.body}</div>
+            <div className="nbar">
+              <span className="eft">{tsFmt(n.t)}</span>
+              <button className="xbtn" style={{marginLeft:'auto'}} onClick={() => setDraft({...n})}>EDIT</button>
+              <button className="xbtn" onClick={() => setNotes(ns => ns.filter(x => x.id !== n.id))}>DEL</button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </Panel>
+  );
+}
+
+function ModuleGlobal(){
+  const fred = useAsyncData('m5.fred', () => fetchFredMap(M5_FRED), {ttlMs: 10*60e3});
+  const gdp = useAsyncData('m5.gdpnow', fetchGdpNow, {ttlMs: 30*60e3});
+  const {manual} = useContext(ManualCtx);
+  const f = fred.data || {};
+  const ferr = fred.status === 'error';
+  const dalio = manual['dalio.pos'] != null ? Number(manual['dalio.pos'].v) : 62;
+  const nfp = delta(f.PAYEMS, 1);
+  return (
+    <div className="grid">
+      <Panel span={4} title="GROWTH NOWCAST" badge={gdp.status === 'ok' ? 'LIVE' : 'MANUAL'} err={gdp.status === 'error'}
+        foot="Atlanta Fed GDPNow scraped from public page · manual override below">
+        <div className="stats">
+          <Stat label="ATL FED GDPNOW" value={gdp.data ? fmt(gdp.data.value, 1) + '%' : '—'}
+            sub={gdp.data ? gdp.data.asof : gdp.status === 'loading' ? 'loading…' : 'fetch failed — use override'}
+            subCls={gdp.status === 'error' ? 'dn' : ''}/>
+        </div>
+        <EditableField k="gdp.override" label="MANUAL OVERRIDE" unit="%"/>
+        <EditableField k="gdp.consensus" label="STREET CONSENSUS" unit="%"/>
+      </Panel>
+
+      <Panel span={4} title="SURVEYS & CYCLE" badge="MANUAL"
+        right={<span className="eft">{lastUpd(manual, 'svy.') ? 'upd ' + tsFmt(lastUpd(manual, 'svy.')) : ''}</span>}
+        foot="ISM 1st bus day · S&P flash PMIs · LEI monthly · Sahm from FRED">
+        <EditableField k="svy.ismmfg" label="ISM MFG"/>
+        <EditableField k="svy.ismsvc" label="ISM SERVICES"/>
+        <EditableField k="svy.pmi" label="S&P COMPOSITE PMI"/>
+        <EditableField k="svy.lei" label="LEI YOY" unit="%"/>
+        <EditableField k="svy.sahm" label="SAHM RULE" unit="pp"/>
+      </Panel>
+
+      <Panel span={4} title="US LABOR" badge="LIVE" err={ferr} foot={'FRED monthly · as of ' + (lastD(f.PAYEMS) || '—')}>
+        <div className="stats" style={{gridTemplateColumns:'1fr 1fr'}}>
+          <Stat label="NFP Δ LATEST" value={nfp != null ? sgn(nfp, 0) + 'K' : '—'}
+            sub={'prior ' + (delta(f.PAYEMS, 2) != null && nfp != null ? sgn(f.PAYEMS[f.PAYEMS.length-2].value - f.PAYEMS[f.PAYEMS.length-3].value, 0) + 'K' : '—')}
+            subCls={cls(nfp)}/>
+          <Stat label="UNEMPLOYMENT" value={fmt(lastV(f.UNRATE), 1) + '%'}
+            sub={'ΔYoY ' + sgn(delta(f.UNRATE, 12), 1) + 'pp'} subCls={cls(-(delta(f.UNRATE, 12) || 0))}/>
+          <Stat label="PARTICIPATION" value={fmt(lastV(f.CIVPART), 1) + '%'} sub={'Δ3M ' + sgn(delta(f.CIVPART, 3), 1) + 'pp'}/>
+          <Stat label="AHE YOY" value={fmt(yoy(f.AHETPI), 1) + '%'} sub="prod & nonsupervisory"/>
+        </div>
+      </Panel>
+
+      <Panel span={4} title="CHINA WATCH" badge="MANUAL"
+        right={<span className="eft">{lastUpd(manual, 'cn.') ? 'upd ' + tsFmt(lastUpd(manual, 'cn.')) : ''}</span>}
+        foot="NBS releases — update by hand">
+        <EditableField k="cn.gdp" label="GDP YOY" unit="%"/>
+        <EditableField k="cn.retail" label="RETAIL SALES YOY" unit="%"/>
+        <EditableField k="cn.prop" label="NEW HOME PX YOY" unit="%"/>
+        <EditableField k="cn.exports" label="EXPORTS YOY" unit="%"/>
+        <EditableField k="cn.stim" label="STIMULUS NOTES" wide/>
+      </Panel>
+
+      <Panel span={4} title="DALIO LONG-TERM DEBT CYCLE" badge="USER" foot="Your positioning of the cycle — saved locally">
+        <SliderRow k="dalio.pos" label="CYCLE POSITION" def={62}/>
+        <Gauge value={isNaN(dalio) ? 62 : dalio} zones={DALIO_ZONES}/>
+        <div className="dim mono" style={{fontSize:9, marginTop:6, lineHeight:1.6}}>
+          0 = post-reset clean slate · 100 = end-of-cycle restructuring. Reference: Principles for Navigating Big Debt Crises.
+        </div>
+      </Panel>
+
+      <Panel span={4} title="DEBT / GDP" badge="MANUAL"
+        right={<span className="eft">{lastUpd(manual, 'dg.') ? 'upd ' + tsFmt(lastUpd(manual, 'dg.')) : ''}</span>}
+        foot="BIS/IMF totals — click cells to edit · % of GDP">
+        <table className="tbl"><thead><tr><th>REGION</th><th className="r">GOVT</th><th className="r">HSHLD</th><th className="r">CORP</th></tr></thead>
+          <tbody>
+            {DEBT_GDP_ROWS.map(([lb, k]) => (
+              <tr key={lb}><td>{lb}</td>
+                <td className="r"><Ecell k={k + '.g'} unit="%"/></td>
+                <td className="r"><Ecell k={k + '.h'} unit="%"/></td>
+                <td className="r"><Ecell k={k + '.c'} unit="%"/></td></tr>
+            ))}
+          </tbody></table>
+      </Panel>
+
+      <GeoBoard/>
+    </div>
+  );
+}
+
+/* ═══════════════ MODULE 6 — RESEARCH JOURNAL ═══════════════ */
+const CASE_STUDIES = [
+  {id:'stagflation', title:'1970s STAGFLATION', period:'1968–1982 · UNITED STATES',
+   indicators:['CPI peaks 14.8% (Mar 1980), three separate inflation waves','Unemployment 9.0% (1975) — Phillips curve breaks down','Fed funds taken to 20% (1981) under Volcker','Gold $35 → $850 after Bretton Woods collapse','S&P 500 real total return ≈ −40% over the decade'],
+   trigger:'Guns-and-butter deficits (Vietnam + Great Society), Nixon closes the gold window (Aug 1971), oil embargoes 1973 and 1979, and a Fed (Burns) that accommodated each shock.',
+   resolution:'Volcker shock 1979–82: 20% funds rate and a double-dip recession broke the inflation psychology. CPI back under 4% by 1983; set up the great 1982–2000 bond and equity bull.',
+   lesson:'Inflation entrenches through expectations and repeated policy capitulation. Only credible, painful tightening ends it. While CPI accelerates, real assets beat financial assets.'},
+  {id:'bond94', title:'1994 BOND MASSACRE', period:'FEB 1994 – FEB 1995 · GLOBAL RATES',
+   indicators:['Fed funds 3.00% → 6.00% in twelve months','US 10Y 5.6% → 8.0%; ~$1.5T global bond losses','MBS convexity selling amplified every leg higher','Hidden leverage: Orange County, Askin Capital blow-ups'],
+   trigger:'Surprise February 1994 hike after funds had sat at 3% for 17 months; leveraged carry and structured-note positions built for a static curve unwound violently.',
+   resolution:'Tequila crisis (Dec 1994) and Orange County bankruptcy were the casualties, but the Fed engineered a soft landing — 1995 became one of the best balanced-portfolio years ever.',
+   lesson:'The pace of tightening matters as much as the level. Carry trades are short volatility — they look riskless precisely when crowding is at its peak.'},
+  {id:'ltcm', title:'1998 LTCM COLLAPSE', period:'AUG–OCT 1998 · LEVERAGE / CONTAGION',
+   indicators:['$4.6B of losses in under two months','~25:1 balance-sheet leverage; >$1T notional derivatives on <$5B equity','Swap spreads and off-the-run spreads at multi-decade wides','Flight-to-liquidity into on-the-run Treasuries'],
+   trigger:'Russia default (17 Aug 1998) blew out every convergence trade simultaneously — positions assumed to be diversified were all short the same liquidity factor.',
+   resolution:'Fed-brokered $3.6B consortium recapitalization (Sep 1998) plus 75bp of cuts. Markets V-bottomed and the rescue liquidity helped fuel the 1999 Nasdaq melt-up.',
+   lesson:'Correlations go to one in a crisis. Convergence trades are short liquidity and short volatility. Crisis-response liquidity often seeds the next bubble.'},
+  {id:'dotcom', title:'2000 DOT-COM BUST', period:'MAR 2000 – OCT 2002 · US EQUITIES',
+   indicators:['NASDAQ 5,048 → 1,114 (−78%); SPX −49%','Shiller CAPE 44 (Dec 1999) — highest in US history','Profitless IPOs, day-trading mania, Y2K liquidity overhang','Fed tightened to 6.5% into the top'],
+   trigger:'Tightening into an over-owned, over-valued market; March–April 2000 sentiment break, then a capex bust as telecom/internet spending collapsed.',
+   resolution:'Mild 2001 recession but a 2.5-year equity bear; funds rate 6.5% → 1%. NASDAQ needed 15 years to reclaim its high. Value, small caps and EM led the next cycle.',
+   lesson:'Valuation never times the top, but it governs the following decade of returns. Narrative manias die of liquidity withdrawal, not of news.'},
+  {id:'gfc', title:'2008 GLOBAL FINANCIAL CRISIS', period:'2007–2009 · CREDIT / BANKING',
+   indicators:['US household debt/GDP ~98% at peak','Banks levered 30:1+ on mortgage collateral','ABX/subprime indices cracking from early 2007','TED spread 460bp post-Lehman; SPX −57% peak-to-trough'],
+   trigger:'Housing prices rolled over in 2006; securitized leverage transmitted losses into wholesale funding. Bear Stearns (Mar 2008), then Lehman (15 Sep 2008) triggered a run on the shadow banking system.',
+   resolution:'TARP, QE1, ZIRP, FDIC guarantees and stress tests. Equities bottomed March 2009. A decade of below-target inflation, QE and deleveraging followed.',
+   lesson:'Credit tops before equities. Institutions die of liability runs, not asset losses — watch wholesale funding spreads, not just prices.'},
+  {id:'eu2011', title:'2011 EU DEBT CRISIS', period:'2010–2012 · SOVEREIGN / EUROZONE',
+   indicators:['Greece 10Y >30%; Italy & Spain 10Y through 7%','BTP–Bund spread >550bp','TARGET2 imbalances ballooning; EUR bank USD funding stress','Doom-loop: weak sovereigns ↔ banks stuffed with their bonds'],
+   trigger:'Greek deficit restatement (2009) exposed the design flaw: euro members issue debt in a currency they do not print, with no lender of last resort, while austerity crushed growth.',
+   resolution:"Draghi's 'whatever it takes' (Jul 2012) + OMT backstop. Spreads collapsed without OMT ever being activated. Crisis ended by promise, not purchase.",
+   lesson:'In sovereign crises the credible backstop IS the resolution. A sovereign borrowing in a currency it cannot print defaults like an EM — until the central bank steps behind it.'},
+  {id:'weimar', title:'WEIMAR HYPERINFLATION', period:'1919–1923 · GERMANY',
+   indicators:['Mark: 4.2/USD (1914) → 4.2 trillion/USD (Nov 1923)','Majority of state spending financed by the printing press','Prices doubling every few days at the peak; wages paid twice daily','Dollarization and barter replace the unit of account'],
+   trigger:'WWI financed by domestic debt, reparations owed in gold/FX, then the Ruhr occupation (Jan 1923) answered with money-printed strike pay — fiscal financing with no anchor.',
+   resolution:'Rentenmark (Nov 1923): hard cap on issuance, land-backed, independent issuer, budget balanced, Dawes Plan (1924) rescheduled reparations. Stabilized within weeks once credible.',
+   lesson:'Hyperinflation is a fiscal phenomenon — it ends only when monetary financing of the deficit credibly stops. Confidence collapses gradually, then instantly; it can also return instantly.'},
+  {id:'japan89', title:'JAPAN 1989 BUBBLE', period:'1985–1990 TOP · 30-YEAR AFTERMATH',
+   indicators:['Nikkei 38,957 (29 Dec 1989) at ~60x earnings','Imperial Palace grounds notionally worth more than California','Urban land prices +~400% in the decade; keiretsu cross-holdings','BOJ discount rate held at 2.5% through 1987–89 post-Plaza'],
+   trigger:'BOJ hiked 2.5% → 6.0% (May 1989 – Aug 1990) and capped real-estate lending; collateral chains built on land values imploded.',
+   resolution:'Three lost decades: zombie banks, deflation, ZIRP → QE → YCC all pioneered in Tokyo. Debt migrated from private to public balance sheet (gross govt debt >250% GDP). Nikkei only reclaimed the 1989 high in 2024.',
+   lesson:'Post-bubble balance-sheet recessions do not respond to rate cuts — credit demand is dead. Speed of bank recapitalization decides whether you lose years or decades.'},
+];
+function CaseCard({c}){
+  return (
+    <div className="case">
+      <h3>{c.title}</h3><div className="cper">{c.period}</div>
+      <dt>KEY INDICATORS</dt>
+      <ul>{c.indicators.map((x, i) => <li key={i}>{x}</li>)}</ul>
+      <dt>TRIGGER</dt><dd>{c.trigger}</dd>
+      <dt>RESOLUTION</dt><dd>{c.resolution}</dd>
+      <dt>LESSON</dt><dd className="teal" style={{color:'var(--teal)'}}>{c.lesson}</dd>
+    </div>
+  );
+}
+const MEMO_FIELDS = [['thesis','THESIS'],['evidence','EVIDENCE'],['bear','BEAR CASE'],['analog','HISTORICAL ANALOG'],['risks','KEY RISKS'],['conclusion','CONCLUSION']];
+
+function ModuleJournal({tab, setTab, journal, setJournal}){
+  const [notes, setNotes] = useLocalStorage('ani.notes.v1', {text:'', t:0});
+  const [memo, setMemo] = useLocalStorage('ani.memo.v1', {});
+  const [q, setQ] = useState('');
+  const [draft, setDraft] = useState(null);
+  const [copied, flashCopy] = useFlash();
+  const [saved, flashSave] = useFlash();
+  const memoText = () => {
+    let out = '═══ RESEARCH MEMO — ' + (memo.title || 'untitled') + ' ═══\n' + (memo.t ? 'saved ' + tsFmt(memo.t) + '\n' : '') + '\n';
+    for (const [k, lb] of MEMO_FIELDS) out += '■ ' + lb + '\n' + (memo[k] || '—') + '\n\n';
+    return out + '— ANI TERMINAL';
+  };
+  const filtered = useMemo(() => {
+    const s = q.trim().toLowerCase();
+    const list = [...journal].sort((a, b) => b.t - a.t);
+    return s ? list.filter(j => (j.title + ' ' + j.body).toLowerCase().includes(s)) : list;
+  }, [journal, q]);
+  const cycle = st => st === 'active' ? 'confirmed' : st === 'confirmed' ? 'invalidated' : 'active';
+  const saveThesis = () => {
+    if (!draft || !draft.title){ setDraft(null); return; }
+    setJournal(js => draft.id && js.some(j => j.id === draft.id)
+      ? js.map(j => j.id === draft.id ? {...draft, t: Date.now()} : j)
+      : [...js, {...draft, id: uid(), status:'active', t: Date.now()}]);
+    setDraft(null);
+  };
+  return (
+    <div className="grid">
+      <div className="panel g12">
+        <div className="jtabs">
+          {['NOTES','MEMO','JOURNAL','LIBRARY'].map(t => (
+            <span key={t} className={'jtab' + (tab === t ? ' on' : '')} onClick={() => setTab(t)}>{t}</span>
+          ))}
+          <span className="pright" style={{marginLeft:'auto', paddingRight:8, alignSelf:'center'}}><Badge type="USER"/></span>
+        </div>
+        <div className="pbody">
+
+          {tab === 'NOTES' ? (
+            <div>
+              <textarea rows={18} placeholder="Scratchpad — auto-saved locally on every keystroke…"
+                value={notes.text} onChange={e => setNotes({text: e.target.value, t: Date.now()})}/>
+              <div className="pfoot" style={{border:0, display:'flex', gap:12}}>
+                <span>{notes.text.length} chars</span>
+                <span>{notes.t ? 'auto-saved ' + tsFmt(notes.t) : 'nothing saved yet'}</span>
+              </div>
+            </div>
+          ) : null}
+
+          {tab === 'MEMO' ? (
+            <div style={{display:'flex', flexDirection:'column', gap:8}}>
+              <div style={{display:'flex', gap:6, alignItems:'center'}}>
+                <input style={{height:26, flex:1, padding:'0 8px', fontSize:12}} placeholder="memo title"
+                  value={memo.title || ''} onChange={e => setMemo(m => ({...m, title: e.target.value}))}/>
+                <button className="tbtn" onClick={() => { setMemo(m => ({...m, t: Date.now()})); flashSave(); }}>{saved ? 'SAVED ✓' : 'SAVE'}</button>
+                <button className="tbtn" onClick={async () => { await copyText(memoText()); flashCopy(); }}>{copied ? 'COPIED ✓' : 'COPY'}</button>
+                <button className="tbtn" onClick={() => download('memo-' + (memo.title || 'untitled').replace(/\W+/g,'-') + '.txt', memoText())}>EXPORT .TXT</button>
+              </div>
+              {memo.t ? <span className="eft">last saved {tsFmt(memo.t)}</span> : null}
+              {MEMO_FIELDS.map(([k, lb]) => (
+                <div key={k}>
+                  <div className="flabel">{lb}</div>
+                  <textarea rows={k === 'thesis' || k === 'evidence' ? 4 : 3} value={memo[k] || ''}
+                    onChange={e => setMemo(m => ({...m, [k]: e.target.value}))}/>
+                </div>
+              ))}
+            </div>
+          ) : null}
+
+          {tab === 'JOURNAL' ? (
+            <div>
+              <div style={{display:'flex', gap:6, marginBottom:8}}>
+                <input style={{height:26, flex:1, padding:'0 8px', fontSize:11}} placeholder="search theses…"
+                  value={q} onChange={e => setQ(e.target.value)}/>
+                <button className="tbtn" onClick={() => setDraft({title:'', body:''})}>+ THESIS</button>
+              </div>
+              {draft ? (
+                <div style={{border:'1px solid var(--teal)', padding:8, marginBottom:8, display:'flex', flexDirection:'column', gap:4}}>
+                  <input style={{height:24, fontSize:11, padding:'0 6px'}} placeholder="thesis title" autoFocus
+                    value={draft.title} onChange={e => setDraft({...draft, title: e.target.value})}/>
+                  <textarea rows={3} placeholder="thesis · falsification criteria · horizon"
+                    value={draft.body} onChange={e => setDraft({...draft, body: e.target.value})}/>
+                  <div style={{display:'flex', gap:6}}>
+                    <button className="xbtn teal" onClick={saveThesis}>SAVE</button>
+                    <button className="xbtn" onClick={() => setDraft(null)}>CANCEL</button>
+                  </div>
+                </div>
+              ) : null}
+              {filtered.length === 0 && !draft ? <div className="dim mono" style={{fontSize:10}}>No theses{q ? ' matching "' + q + '"' : ''} — + THESIS to add one.</div> : null}
+              {filtered.map(j => (
+                <div className="thesis" key={j.id}>
+                  <div style={{display:'flex', gap:8, alignItems:'baseline'}}>
+                    <span className="ntitle">{j.title}</span>
+                    <span className={'status st-' + j.status} title="click to cycle status"
+                      onClick={() => setJournal(js => js.map(x => x.id === j.id ? {...x, status: cycle(x.status), t: Date.now()} : x))}>
+                      {j.status.toUpperCase()}
+                    </span>
+                    <span className="eft" style={{marginLeft:'auto'}}>{tsFmt(j.t)}</span>
+                    <button className="xbtn" onClick={() => setDraft({...j})}>EDIT</button>
+                    <button className="xbtn" onClick={() => setJournal(js => js.filter(x => x.id !== j.id))}>DEL</button>
+                  </div>
+                  <div className="nbody">{j.body}</div>
+                </div>
+              ))}
+            </div>
+          ) : null}
+
+          {tab === 'LIBRARY' ? (
+            <div>
+              <div className="dim mono" style={{fontSize:9, marginBottom:8}}>8 PRE-LOADED HISTORICAL CASE STUDIES — pattern library for the thesis journal</div>
+              <div className="notes" style={{gridTemplateColumns:'repeat(auto-fill,minmax(320px,1fr))'}}>
+                {CASE_STUDIES.map(c => <CaseCard key={c.id} c={c}/>)}
+              </div>
+            </div>
+          ) : null}
+
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════ APP ═══════════════ */
+function App(){
+  const [active, setActive] = useState(0);
+  const [m6Tab, setM6Tab] = useState('NOTES');
+  const [journal, setJournal] = useLocalStorage('ani.journal.v1', []);
+  const [manual, setManualRaw] = useLocalStorage('ani.manual.v1', {});
+  const [showCal, setShowCal] = useLocalStorage('ani.showcal', true);
+  const [showBrief, setShowBrief] = useState(false);
+  const setField = useCallback((k, v) => setManualRaw(m => ({...m, [k]: {v, t: Date.now()}})), [setManualRaw]);
+  const clock = useClock();
+  useEffect(() => {
+    const h = e => {
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      if (e.key >= '1' && e.key <= '6'){ setActive(+e.key - 1); }
+      if (e.key === '/'){ e.preventDefault(); const el = document.getElementById('gsearch'); if (el) el.focus(); }
+    };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, []);
+  const searchIndex = useMemo(() => [
+    ...MODULES.map((m, i) => ({type:'MODULE', label: m.name, sub: m.desc, go: () => setActive(i)})),
+    ...CASE_STUDIES.map(c => ({type:'CASE', label: c.title, sub: c.period, go: () => { setActive(5); setM6Tab('LIBRARY'); }})),
+    ...journal.map(j => ({type:'THESIS', label: j.title, sub: j.status.toUpperCase(), go: () => { setActive(5); setM6Tab('JOURNAL'); }})),
+  ], [journal]);
+  const ctx = useMemo(() => ({manual, setField}), [manual, setField]);
+  const mod = active === 0 ? <ModulePulse/> : active === 1 ? <ModulePolicy/> : active === 2 ? <ModuleCredit/>
+    : active === 3 ? <ModuleEquity/> : active === 4 ? <ModuleGlobal/>
+    : <ModuleJournal tab={m6Tab} setTab={setM6Tab} journal={journal} setJournal={setJournal}/>;
+  const p = n => String(n).padStart(2, '0');
+  return (
+    <ManualCtx.Provider value={ctx}>
+      <div className="app">
+        <Ticker/>
+        <div className="topbar">
+          <span className="logo">ANI<span>TERMINAL</span></span>
+          <GlobalSearch searchIndex={searchIndex}/>
+          <button className="tbtn" onClick={() => setShowBrief(true)}>☀ BRIEF</button>
+          <button className={'tbtn' + (showCal ? ' on' : '')} onClick={() => setShowCal(v => !v)}>CAL</button>
+          <span className="clock">{p(clock.getHours())}:{p(clock.getMinutes())}:{p(clock.getSeconds())}</span>
+        </div>
+        <div className="layout">
+          <Sidebar active={active} setActive={setActive}/>
+          <div className="content">
+            <div className="mhead">
+              <span className="mtitle">{(active+1) + ' · ' + MODULES[active].name}</span>
+              <span className="mdesc">{MODULES[active].desc}</span>
+            </div>
+            {mod}
+          </div>
+          {showCal ? <CalendarBar/> : null}
+        </div>
+        <TabBar active={active} setActive={setActive}/>
+        {showBrief ? <MorningBrief onClose={() => setShowBrief(false)}/> : null}
+      </div>
+    </ManualCtx.Provider>
+  );
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<ErrorBoundary><App/></ErrorBoundary>);
+</script>
+</body>
+</html>
