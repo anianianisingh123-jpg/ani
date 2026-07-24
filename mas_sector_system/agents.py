@@ -31,6 +31,11 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 from market_data import fetch_ticker_fundamentals  # noqa: E402
 
+try:
+    from tavily import TavilyClient
+except ImportError:  # keep the pipeline importable without the extra dep
+    TavilyClient = None
+
 # Credentials: the repo's .env stores the key as MAS_ANTHROPIC_KEY; the
 # Anthropic SDK looks for ANTHROPIC_API_KEY, so map it across. An already-set
 # ANTHROPIC_API_KEY in the environment always wins.
@@ -129,13 +134,20 @@ discussion, segment trends, and any disclosures a diligent analyst would not
 want to miss. From the latest earnings report/call, assess sentiment: beats
 or misses, guidance direction, and management's confidence level.
 
-When the user message includes LIVE MARKET DATA (fetched from yfinance),
-treat those figures as ground truth: build your ratios from them, reconcile
-your adjusted metrics against them, and pay special attention to any fiscal
-year flagged `tax_year_looks_distorted` — recompute the normalized P/E from
-`normalized_net_income` for those years. Fill gaps (null fields) from your
-own knowledge, but clearly mark which figures came from the feed and which
-are estimates.
+The user message may include two live data blocks — treat them as ground
+truth, in this order of authority:
+1. LIVE WEB RESEARCH (Tavily): real-time search results covering recent SEC
+   filings, earnings figures, one-time items, and current price/valuation.
+   Prefer these for anything time-sensitive, and cite the source URL next to
+   figures you take from them.
+2. LIVE MARKET DATA (yfinance): structured quote/statement feed — use it to
+   cross-check the web figures, and pay special attention to any fiscal year
+   flagged `tax_year_looks_distorted` — recompute the normalized P/E from
+   `normalized_net_income` for those years.
+Fill gaps from your own knowledge only when both sources are silent, and
+clearly mark which figures are sourced vs. estimated. If both blocks report
+errors, say so prominently in sec_filings_summary so downstream agents know
+the data is unanchored.
 
 Populate ALL FOUR output fields — an answer missing any of them is
 incomplete:
@@ -146,6 +158,51 @@ incomplete:
   sec_filings_summary: prose summary of the filing analysis,
   earnings_sentiment: prose read on the latest earnings tone and guidance.
 """
+
+
+def _tavily_research(ticker: str, sector: str, user_query: str) -> dict:
+    """Live web research via Tavily: recent SEC filings, earnings figures,
+    one-time items, and current valuation for the target ticker.
+
+    Same degradation contract as the yfinance fetcher — a missing API key,
+    missing package, or network failure records an error and returns, so the
+    pipeline never stalls on the search layer.
+    """
+    out: dict = {"source": "tavily", "results": {}, "errors": []}
+    if TavilyClient is None:
+        out["errors"].append("tavily-python not installed")
+        return out
+    api_key = os.environ.get("TAVILY_API_KEY")
+    if not api_key:
+        out["errors"].append("TAVILY_API_KEY not set")
+        return out
+
+    client = TavilyClient(api_key=api_key)
+    queries = [
+        f"{ticker} latest 10-K 10-Q SEC filing risk factors segment results",
+        f"{ticker} most recent quarterly earnings revenue EPS guidance",
+        f"{ticker} one-time charges tax impairment non-recurring items",
+        f"{ticker} stock price market cap P/E valuation today",
+    ]
+    for q in queries:
+        try:
+            resp = client.search(
+                query=q, search_depth="advanced", max_results=5, include_answer=True
+            )
+            out["results"][q] = {
+                "answer": resp.get("answer"),
+                "sources": [
+                    {
+                        "title": r.get("title"),
+                        "url": r.get("url"),
+                        "content": (r.get("content") or "")[:800],
+                    }
+                    for r in resp.get("results", [])
+                ],
+            }
+        except Exception as e:
+            out["errors"].append(f"{q}: {e}")
+    return out
 
 
 class GathererOutput(BaseModel):
@@ -184,11 +241,23 @@ def data_gatherer_node(state: ResearchState) -> dict:
     Populates: raw_financials, normalized_metrics, sec_filings_summary,
     earnings_sentiment.
     """
-    # Pull real quote/valuation/statement data via yfinance (market_data.py).
-    # The fetch degrades to None fields on any network failure, so the node
-    # still runs — the model is told which figures are live vs. estimated.
-    live_data = fetch_ticker_fundamentals(state["ticker"]) if state.get("ticker") else None
+    # Primary live source: Tavily web research (real-time SEC filings,
+    # earnings figures, one-time items, current valuation). Secondary:
+    # structured yfinance feed as a cross-check. Both degrade to recorded
+    # errors on any failure, so the node still runs — the model is told
+    # which figures are live vs. estimated.
+    ticker = state.get("ticker")
+    web_research = (
+        _tavily_research(ticker, state["sector"], state["user_query"])
+        if ticker else None
+    )
+    live_data = fetch_ticker_fundamentals(ticker) if ticker else None
 
+    web_block = (
+        f"LIVE WEB RESEARCH (Tavily):\n{json.dumps(web_research, indent=2, default=str)}\n\n"
+        if web_research else
+        "LIVE WEB RESEARCH: none available for this request.\n\n"
+    )
     live_block = (
         f"LIVE MARKET DATA (yfinance):\n{json.dumps(live_data, indent=2, default=str)}\n\n"
         if live_data else
@@ -197,9 +266,9 @@ def data_gatherer_node(state: ResearchState) -> dict:
     user_prompt = (
         f"Mode: {state['mode']}\n"
         f"Sector: {state['sector']}\n"
-        f"Ticker: {state.get('ticker') or 'N/A (sector screener)'}\n"
+        f"Ticker: {ticker or 'N/A (sector screener)'}\n"
         f"User request: {state['user_query']}\n\n"
-        + live_block +
+        + web_block + live_block +
         "Gather and normalize the financial data as instructed."
     )
     system = DATA_GATHERER_SYSTEM_PROMPT + _sector_lens(state)
@@ -231,10 +300,13 @@ def data_gatherer_node(state: ResearchState) -> dict:
             sec_filings_summary = raw
             earnings_sentiment = ""
 
-    # Keep the untouched feed alongside the model's derived metrics so the
-    # bull/bear agents can check the analysis against the source numbers.
-    if live_data is not None and isinstance(raw_financials, dict):
-        raw_financials["live_market_data"] = live_data
+    # Keep the untouched feeds alongside the model's derived metrics so the
+    # bull/bear agents can check the analysis against the source material.
+    if isinstance(raw_financials, dict):
+        if web_research is not None:
+            raw_financials["web_research"] = web_research
+        if live_data is not None:
+            raw_financials["live_market_data"] = live_data
 
     return {
         "raw_financials": raw_financials,

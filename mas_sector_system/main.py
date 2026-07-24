@@ -8,6 +8,12 @@ graph; the supervisor node routes on the `mode` input:
         └───────(mode == 'deep_dive')──> data_gatherer ─> bull ─> bear ─> red_team ─> synthesis ─> END
                                                                     (screener) ─────^
 
+The data_gatherer performs its own live research before analysis (keeping
+the CLAUDE.md §3 topology unchanged): a Tavily web search for real-time SEC
+filings, earnings figures, and valuation (requires TAVILY_API_KEY in the
+environment or .env), cross-checked against the structured yfinance feed
+from market_data.py. Both sources degrade gracefully when unavailable.
+
 Usage:
     from mas_sector_system.main import app
     result = app.invoke({
