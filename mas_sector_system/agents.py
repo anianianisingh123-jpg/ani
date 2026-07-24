@@ -14,17 +14,28 @@ Per the master spec (CLAUDE.md):
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from .state import ResearchState
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
 # market_data.py lives at the repo root, one level above this package.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(_REPO_ROOT))
 from market_data import fetch_ticker_fundamentals  # noqa: E402
+
+# Credentials: the repo's .env stores the key as MAS_ANTHROPIC_KEY; the
+# Anthropic SDK looks for ANTHROPIC_API_KEY, so map it across. An already-set
+# ANTHROPIC_API_KEY in the environment always wins.
+load_dotenv(_REPO_ROOT / ".env")
+if os.environ.get("MAS_ANTHROPIC_KEY") and not os.environ.get("ANTHROPIC_API_KEY"):
+    os.environ["ANTHROPIC_API_KEY"] = os.environ["MAS_ANTHROPIC_KEY"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # §5 Multi-model tiering (Anthropic mapping)
