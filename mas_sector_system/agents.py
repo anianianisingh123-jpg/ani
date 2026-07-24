@@ -43,9 +43,9 @@ if os.environ.get("MAS_ANTHROPIC_KEY") and not os.environ.get("ANTHROPIC_API_KEY
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Heavy workers: cheap, fast extraction and drafting.
-WORKER_MODEL = "claude-haiku-4-5"
+WORKER_MODEL = "claude-3-5-haiku-20241022"
 # Red-team critic + senior writer: high-capability tier.
-SENIOR_MODEL = "claude-opus-4-8"
+SENIOR_MODEL = "claude-3-5-sonnet-20241022"
 MAX_TOKENS = 8000
 
 
