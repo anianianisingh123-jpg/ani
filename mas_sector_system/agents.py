@@ -47,10 +47,12 @@ if os.environ.get("MAS_ANTHROPIC_KEY") and not os.environ.get("ANTHROPIC_API_KEY
 # §5 Multi-model tiering (Anthropic mapping)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Heavy workers: cheap, fast extraction and drafting.
-WORKER_MODEL = "claude-3-5-haiku-20241022"
-# Red-team critic + senior writer: high-capability tier.
-SENIOR_MODEL = "claude-3-5-sonnet-20241022"
+# Heavy workers: cheap, fast extraction and drafting. (Haiku 3.5 was
+# retired Feb 2026; claude-haiku-4-5 is its official replacement.)
+WORKER_MODEL = "claude-haiku-4-5"
+# Red-team critic + senior writer: high-capability tier. (Sonnet 3.5 was
+# retired Oct 2025; claude-sonnet-5 is its official replacement.)
+SENIOR_MODEL = "claude-sonnet-5"
 MAX_TOKENS = 8000
 
 

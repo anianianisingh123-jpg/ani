@@ -25,5 +25,5 @@ When an agent node runs, it inspects `state["sector"]` to dynamically inject val
 
 ## 5. Multi-Model Tiering Logic (Anthropic mapping)
 - Heavy Workers (`data_gatherer`, `screener`, `bull`, `bear`): Claude Haiku 4.5 (`claude-haiku-4-5` — cheap, fast data extraction).
-- Red Team Critic (`red_team_node`): Claude Opus 4.8 (`claude-opus-4-8`) — independent auditor that critiques both bull and bear arguments against `raw_financials` for logical flaws or cherry-picked data.
-- Senior Planner & Writer (`supervisor`, `synthesis`): Claude Opus 4.8 (`claude-opus-4-8` — high-level synthesis and institutional memo drafting). The supervisor itself is deterministic routing code and makes no LLM calls.
+- Red Team Critic (`red_team_node`): Claude Sonnet 5 (`claude-sonnet-5`) — independent auditor that critiques both bull and bear arguments against `raw_financials` for logical flaws or cherry-picked data.
+- Senior Planner & Writer (`supervisor`, `synthesis`): Claude Sonnet 5 (`claude-sonnet-5` — high-level synthesis and institutional memo drafting). The supervisor itself is deterministic routing code and makes no LLM calls.
