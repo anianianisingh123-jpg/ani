@@ -3,12 +3,14 @@
 Each node is a plain function that takes the shared ResearchState and
 returns a partial state update (a dict containing only the keys it
 produced). LangGraph merges these updates into the state as the graph
-runs. The graph wiring itself lives elsewhere — these are just the nodes.
+runs. The graph wiring itself lives in main.py — these are just the nodes.
 
-Node flow (wired in the next step):
-
-    data_gatherer_node ──> bull_agent_node ──┐
-                      └──> bear_agent_node ──┴──> synthesis_node
+Per the master spec (CLAUDE.md):
+- §4 Dynamic sector prompt injection: every agent call appends a
+  sector-specific valuation lens chosen from state["sector"].
+- §5 Multi-model tiering: heavy workers (data_gatherer, screener, bull,
+  bear) run on the cheap/fast tier; the red-team critic and the senior
+  synthesis writer run on the high-capability tier.
 """
 
 import json
@@ -24,30 +26,73 @@ from .state import ResearchState
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from market_data import fetch_ticker_fundamentals  # noqa: E402
 
-# The repo's Streamlit app currently runs Sonnet; for the research agents we
-# default to Opus, Anthropic's most capable generally-available tier.
-MODEL = "claude-opus-4-8"
+# ─────────────────────────────────────────────────────────────────────────────
+# §5 Multi-model tiering (Anthropic mapping)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Heavy workers: cheap, fast extraction and drafting.
+WORKER_MODEL = "claude-haiku-4-5"
+# Red-team critic + senior writer: high-capability tier.
+SENIOR_MODEL = "claude-opus-4-8"
 MAX_TOKENS = 8000
 
 
-def _llm() -> ChatAnthropic:
-    """Build the chat model shared by all agents.
+def _llm(model: str) -> ChatAnthropic:
+    """Build a chat model for the requested tier.
 
     ChatAnthropic reads ANTHROPIC_API_KEY from the environment.
     """
-    return ChatAnthropic(model=MODEL, max_tokens=MAX_TOKENS)
+    return ChatAnthropic(model=model, max_tokens=MAX_TOKENS)
 
 
-def _run(system_prompt: str, user_prompt: str) -> str:
-    """One system + user round trip, returning the text response."""
-    response = _llm().invoke(
+def _run(system_prompt: str, user_prompt: str, model: str = SENIOR_MODEL) -> str:
+    """One system + user round trip on the given model tier."""
+    response = _llm(model).invoke(
         [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
     )
     return response.content if isinstance(response.content, str) else str(response.content)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. Data Gatherer — populates raw_financials and sec_filing_summary
+# §4 Dynamic sector prompt injection
+# ─────────────────────────────────────────────────────────────────────────────
+
+SECTOR_VALUATION_RULES = {
+    "Technology": (
+        "Focus on SaaS-style margin structure (gross margin trajectory, "
+        "recurring revenue mix — e.g. QTL-style licensing streams), R&D "
+        "intensity as a % of revenue, and value the business with a DCF "
+        "cross-checked by a Sum-of-the-Parts (SOTP) where segments differ "
+        "materially in quality."
+    ),
+    "Financials": (
+        "Focus on Net Interest Margin (NIM) trends, Loan-to-Deposit ratios, "
+        "credit quality and reserve coverage, and value the business with "
+        "Residual Income / Price-to-Book models rather than raw P/E."
+    ),
+    "Energy": (
+        "Focus on Net Asset Value (NAV) of the reserve base, the reserve "
+        "replacement ratio, break-even costs, and sensitivity/correlation "
+        "to Brent crude. Value on NAV and strip-price cash flows, not "
+        "spot-cycle earnings multiples."
+    ),
+}
+
+_DEFAULT_SECTOR_RULES = (
+    "Apply standard fundamental analysis: revenue durability, margin "
+    "structure, capital intensity, balance-sheet strength, and a DCF "
+    "sanity-checked against comparable-company multiples."
+)
+
+
+def _sector_lens(state: ResearchState) -> str:
+    """The valuation-rules block injected into every agent's system prompt."""
+    rules = SECTOR_VALUATION_RULES.get(state["sector"], _DEFAULT_SECTOR_RULES)
+    return f"\n\nSECTOR VALUATION LENS ({state['sector']}):\n{rules}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. Data Gatherer (worker) — fills the scratchpads and the normalized ledger
 # ─────────────────────────────────────────────────────────────────────────────
 
 DATA_GATHERER_SYSTEM_PROMPT = """\
@@ -69,7 +114,8 @@ headline numbers. Explicitly look for and calculate ADJUSTED metrics:
 
 From SEC filings (10-K, 10-Q, 8-K), summarize risk factors, management's
 discussion, segment trends, and any disclosures a diligent analyst would not
-want to miss.
+want to miss. From the latest earnings report/call, assess sentiment: beats
+or misses, guidance direction, and management's confidence level.
 
 When the user message includes LIVE MARKET DATA (fetched from yfinance),
 treat those figures as ground truth: build your ratios from them, reconcile
@@ -79,17 +125,20 @@ year flagged `tax_year_looks_distorted` — recompute the normalized P/E from
 own knowledge, but clearly mark which figures came from the feed and which
 are estimates.
 
-Return your answer as JSON with two keys:
-  "raw_financials": an object of the metrics you extracted/derived
-    (include both headline and adjusted values where they differ),
-  "sec_filing_summary": a prose summary of the filing analysis.
+Return your answer as JSON with four keys:
+  "raw_financials": object of raw extracted metrics (headline figures),
+  "normalized_metrics": the adjustment ledger — each one-time item isolated
+    with its impact, plus adjusted EPS / normalized P/E / clean margins,
+  "sec_filings_summary": prose summary of the filing analysis,
+  "earnings_sentiment": prose read on the latest earnings tone and guidance.
 """
 
 
 def data_gatherer_node(state: ResearchState) -> dict:
-    """Extract normalized financial data and a filing summary for the target.
+    """Extract raw + normalized financial data and filing/earnings reads.
 
-    Populates: raw_financials, sec_filing_summary.
+    Populates: raw_financials, normalized_metrics, sec_filings_summary,
+    earnings_sentiment.
     """
     # Pull real quote/valuation/statement data via yfinance (market_data.py).
     # The fetch degrades to None fields on any network failure, so the node
@@ -109,17 +158,25 @@ def data_gatherer_node(state: ResearchState) -> dict:
         + live_block +
         "Gather and normalize the financial data as instructed."
     )
-    raw = _run(DATA_GATHERER_SYSTEM_PROMPT, user_prompt)
+    raw = _run(
+        DATA_GATHERER_SYSTEM_PROMPT + _sector_lens(state),
+        user_prompt,
+        model=WORKER_MODEL,
+    )
 
     # Best-effort parse of the requested JSON shape; fall back to storing the
     # raw text so downstream agents always have something to work with.
     try:
         parsed = json.loads(raw)
         raw_financials = parsed.get("raw_financials", {})
-        sec_filing_summary = parsed.get("sec_filing_summary", raw)
+        normalized_metrics = parsed.get("normalized_metrics", {})
+        sec_filings_summary = parsed.get("sec_filings_summary", raw)
+        earnings_sentiment = parsed.get("earnings_sentiment", "")
     except (json.JSONDecodeError, AttributeError):
         raw_financials = {"unparsed_output": raw}
-        sec_filing_summary = raw
+        normalized_metrics = {}
+        sec_filings_summary = raw
+        earnings_sentiment = ""
 
     # Keep the untouched feed alongside the model's derived metrics so the
     # bull/bear agents can check the analysis against the source numbers.
@@ -128,12 +185,51 @@ def data_gatherer_node(state: ResearchState) -> dict:
 
     return {
         "raw_financials": raw_financials,
-        "sec_filing_summary": sec_filing_summary,
+        "normalized_metrics": normalized_metrics,
+        "sec_filings_summary": sec_filings_summary,
+        "earnings_sentiment": earnings_sentiment,
     }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. Bull Agent — writes the strongest good-faith long case
+# 2. Screener (worker) — "The Radar": drafts the sector shortlist
+# ─────────────────────────────────────────────────────────────────────────────
+
+SCREENER_SYSTEM_PROMPT = """\
+You are a sector screener for an investment research team. Survey the given
+sector and produce a ranked shortlist of the most interesting candidates for
+further research.
+
+For each candidate: ticker, one-line thesis, key metric that earns it the
+spot, and the main risk. Rank by attractiveness and say why the top pick is
+ranked first. Flag any candidate that deserves a full deep dive.
+
+Your output is a DRAFT for the senior writer — favor completeness and
+evidence over polish.
+"""
+
+
+def screener_node(state: ResearchState) -> dict:
+    """Broad sector sweep producing a ranked shortlist draft.
+
+    Populates: quantitative_raw_data['screener_shortlist'] — the synthesis
+    node polishes this draft into the final memo.
+    """
+    user_prompt = (
+        f"Sector: {state['sector']}\n"
+        f"User request: {state['user_query']}\n\n"
+        "Run the screen and produce the ranked shortlist draft."
+    )
+    draft = _run(
+        SCREENER_SYSTEM_PROMPT + _sector_lens(state),
+        user_prompt,
+        model=WORKER_MODEL,
+    )
+    return {"quantitative_raw_data": {"screener_shortlist": draft}}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. Bull Agent (worker) — writes the strongest good-faith long case
 # ─────────────────────────────────────────────────────────────────────────────
 
 BULL_SYSTEM_PROMPT = """\
@@ -154,31 +250,45 @@ analyst reading the same data.
 """
 
 
-def bull_agent_node(state: ResearchState) -> dict:
-    """Write the bull thesis from the gathered data.
-
-    Reads: raw_financials, sec_filing_summary, macro_context.
-    Populates: bull_thesis.
-    """
-    user_prompt = (
+def _debate_prompt(state: ResearchState, closing_line: str) -> str:
+    """Shared evidence pack for the bull and bear agents."""
+    return (
         f"Target: {state.get('ticker') or state['sector']}\n"
         f"User request: {state['user_query']}\n\n"
         f"Raw financials:\n{json.dumps(state['raw_financials'], indent=2, default=str)}\n\n"
-        f"SEC filing summary:\n{state['sec_filing_summary']}\n\n"
+        f"Normalized metrics (adjustment ledger):\n"
+        f"{json.dumps(state['normalized_metrics'], indent=2, default=str)}\n\n"
+        f"SEC filings summary:\n{state['sec_filings_summary']}\n\n"
+        f"Earnings sentiment:\n{state.get('earnings_sentiment') or 'None provided.'}\n\n"
         f"Macro context:\n{state.get('macro_context') or 'None provided.'}\n\n"
-        "Write the bull thesis."
+        f"{closing_line}"
     )
-    return {"bull_thesis": _run(BULL_SYSTEM_PROMPT, user_prompt)}
+
+
+def bull_agent_node(state: ResearchState) -> dict:
+    """Write the bull thesis from the gathered data.
+
+    Reads: raw_financials, normalized_metrics, sec_filings_summary,
+    earnings_sentiment, macro_context.
+    Populates: bull_thesis.
+    """
+    return {
+        "bull_thesis": _run(
+            BULL_SYSTEM_PROMPT + _sector_lens(state),
+            _debate_prompt(state, "Write the bull thesis."),
+            model=WORKER_MODEL,
+        )
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. Bear Agent (Red Team) — hunts for what could go wrong
+# 4. Bear Agent (worker) — hunts for what could go wrong
 # ─────────────────────────────────────────────────────────────────────────────
 
 BEAR_SYSTEM_PROMPT = """\
-You are the red team: the bear analyst whose job is to find every reason this
-investment could fail. Using only the data provided, write the strongest
-good-faith case AGAINST the investment.
+You are the bear analyst whose job is to find every reason this investment
+could fail. Using only the data provided, write the strongest good-faith
+case AGAINST the investment.
 
 Hunt specifically for:
 - Accounting red flags: revenue recognition games, widening gaps between
@@ -195,24 +305,23 @@ ruthless but fair — a weak bear case helps no one.
 
 
 def bear_agent_node(state: ResearchState) -> dict:
-    """Write the bear thesis (red-team attack) from the gathered data.
+    """Write the bear thesis from the gathered data.
 
-    Reads: raw_financials, sec_filing_summary, macro_context.
+    Reads: raw_financials, normalized_metrics, sec_filings_summary,
+    earnings_sentiment, macro_context.
     Populates: bear_thesis.
     """
-    user_prompt = (
-        f"Target: {state.get('ticker') or state['sector']}\n"
-        f"User request: {state['user_query']}\n\n"
-        f"Raw financials:\n{json.dumps(state['raw_financials'], indent=2, default=str)}\n\n"
-        f"SEC filing summary:\n{state['sec_filing_summary']}\n\n"
-        f"Macro context:\n{state.get('macro_context') or 'None provided.'}\n\n"
-        "Write the bear thesis."
-    )
-    return {"bear_thesis": _run(BEAR_SYSTEM_PROMPT, user_prompt)}
+    return {
+        "bear_thesis": _run(
+            BEAR_SYSTEM_PROMPT + _sector_lens(state),
+            _debate_prompt(state, "Write the bear thesis."),
+            model=WORKER_MODEL,
+        )
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. Red Team Critique — attacks the debate itself before synthesis
+# 5. Red Team Critique (senior tier) — attacks the debate itself
 # ─────────────────────────────────────────────────────────────────────────────
 
 RED_TEAM_SYSTEM_PROMPT = """\
@@ -242,7 +351,8 @@ Be specific and cite the data. A vague critique is worthless.
 def red_team_node(state: ResearchState) -> dict:
     """Critique both theses against the underlying data before synthesis.
 
-    Reads: bull_thesis, bear_thesis, raw_financials, sec_filing_summary.
+    Reads: bull_thesis, bear_thesis, raw_financials, normalized_metrics,
+    sec_filings_summary.
     Populates: red_team_critique.
     """
     user_prompt = (
@@ -250,24 +360,32 @@ def red_team_node(state: ResearchState) -> dict:
         f"User request: {state['user_query']}\n\n"
         f"UNDERLYING DATA (check every claim against this):\n"
         f"{json.dumps(state['raw_financials'], indent=2, default=str)}\n\n"
-        f"SEC filing summary:\n{state['sec_filing_summary']}\n\n"
+        f"Normalized metrics (adjustment ledger):\n"
+        f"{json.dumps(state['normalized_metrics'], indent=2, default=str)}\n\n"
+        f"SEC filings summary:\n{state['sec_filings_summary']}\n\n"
         f"BULL THESIS UNDER REVIEW:\n{state['bull_thesis']}\n\n"
         f"BEAR THESIS UNDER REVIEW:\n{state['bear_thesis']}\n\n"
         "Write the red-team critique."
     )
-    return {"red_team_critique": _run(RED_TEAM_SYSTEM_PROMPT, user_prompt)}
+    return {
+        "red_team_critique": _run(
+            RED_TEAM_SYSTEM_PROMPT + _sector_lens(state),
+            user_prompt,
+            model=SENIOR_MODEL,
+        )
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. Synthesis — the senior writer producing the final memo
+# 6. Synthesis (senior tier) — the senior writer producing the final memo
 # ─────────────────────────────────────────────────────────────────────────────
 
 SYNTHESIS_SYSTEM_PROMPT = """\
-You are the senior portfolio strategist and lead writer. You have received a
-bull thesis and a bear thesis built from the same underlying data. Your job is
-to synthesize them into a single decision-ready investment memo.
+You are the senior portfolio strategist and lead writer. You produce the
+team's final, decision-ready deliverable.
 
-Requirements:
+For a DEEP DIVE you receive a bull thesis, a bear thesis, and a red-team
+critique built from the same underlying data:
 - Weigh the two theses against each other explicitly: where does the bear
   case actually land a blow, and where does the bull case survive contact?
 - Apply the red-team critique: discard or caveat any argument it discredited,
@@ -276,23 +394,46 @@ Requirements:
   evidence would change it.
 - Structure the memo: summary and recommendation up front, then the key
   debate points, then risks and monitoring triggers.
-- Keep it grounded in the underlying data; strip any claim neither side
-  supported with evidence.
+
+For a SCREENER you receive a draft shortlist from the screener worker:
+- Polish it into an institutional-grade screener memo: ranked shortlist,
+  one-line thesis + key metric + main risk per name, and a clear call on
+  which candidates deserve a full deep dive.
+- Cut weak candidates rather than padding the list.
+
+Either way: keep it grounded in the underlying data; strip any claim that
+is not supported by evidence.
 """
 
 
 def synthesis_node(state: ResearchState) -> dict:
-    """Synthesize the debate and the red-team critique into the final memo.
+    """Write the final memo for whichever pipeline ran.
 
-    Reads: bull_thesis, bear_thesis, red_team_critique.
+    Deep dive — reads: bull_thesis, bear_thesis, red_team_critique.
+    Screener — reads: quantitative_raw_data['screener_shortlist'].
     Populates: final_memo.
     """
-    user_prompt = (
-        f"Target: {state.get('ticker') or state['sector']}\n"
-        f"User request: {state['user_query']}\n\n"
-        f"BULL THESIS:\n{state['bull_thesis']}\n\n"
-        f"BEAR THESIS:\n{state['bear_thesis']}\n\n"
-        f"RED TEAM CRITIQUE:\n{state.get('red_team_critique') or 'None provided.'}\n\n"
-        "Write the final investment memo."
-    )
-    return {"final_memo": _run(SYNTHESIS_SYSTEM_PROMPT, user_prompt)}
+    if state["mode"] == "screener":
+        user_prompt = (
+            f"Sector: {state['sector']}\n"
+            f"User request: {state['user_query']}\n\n"
+            f"SCREENER SHORTLIST DRAFT:\n"
+            f"{state['quantitative_raw_data'].get('screener_shortlist', 'None provided.')}\n\n"
+            "Polish this into the final screener memo."
+        )
+    else:
+        user_prompt = (
+            f"Target: {state.get('ticker') or state['sector']}\n"
+            f"User request: {state['user_query']}\n\n"
+            f"BULL THESIS:\n{state['bull_thesis']}\n\n"
+            f"BEAR THESIS:\n{state['bear_thesis']}\n\n"
+            f"RED TEAM CRITIQUE:\n{state['red_team_critique']}\n\n"
+            "Write the final investment memo."
+        )
+    return {
+        "final_memo": _run(
+            SYNTHESIS_SYSTEM_PROMPT + _sector_lens(state),
+            user_prompt,
+            model=SENIOR_MODEL,
+        )
+    }
