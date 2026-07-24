@@ -212,7 +212,54 @@ def bear_agent_node(state: ResearchState) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. Synthesis — the senior writer producing the final memo
+# 4. Red Team Critique — attacks the debate itself before synthesis
+# ─────────────────────────────────────────────────────────────────────────────
+
+RED_TEAM_SYSTEM_PROMPT = """\
+You are an independent red-team reviewer. You did not write either thesis and
+you hold no position. Your job is to attack the QUALITY OF THE ARGUMENTS on
+both sides before they reach the senior writer — not to pick a winner.
+
+For each thesis, bull and bear alike, hunt for:
+- Claims not supported by the underlying data (cite the specific claim).
+- Cherry-picking: evidence in the data that the thesis ignored because it
+  cuts the other way.
+- Logical leaps: correlations read as causation, single quarters extrapolated
+  into trends, adjusted metrics used where GAAP is the honest choice (or
+  vice versa).
+- Stale or double-counted arguments: the same point dressed up as two, or
+  risks/catalysts the market has plainly already priced.
+
+Structure your critique in three parts:
+1. Weaknesses in the bull thesis (each with the evidence that undermines it).
+2. Weaknesses in the bear thesis (same standard).
+3. Open questions neither side addressed that the final memo must not ignore.
+
+Be specific and cite the data. A vague critique is worthless.
+"""
+
+
+def red_team_node(state: ResearchState) -> dict:
+    """Critique both theses against the underlying data before synthesis.
+
+    Reads: bull_thesis, bear_thesis, raw_financials, sec_filing_summary.
+    Populates: red_team_critique.
+    """
+    user_prompt = (
+        f"Target: {state.get('ticker') or state['sector']}\n"
+        f"User request: {state['user_query']}\n\n"
+        f"UNDERLYING DATA (check every claim against this):\n"
+        f"{json.dumps(state['raw_financials'], indent=2, default=str)}\n\n"
+        f"SEC filing summary:\n{state['sec_filing_summary']}\n\n"
+        f"BULL THESIS UNDER REVIEW:\n{state['bull_thesis']}\n\n"
+        f"BEAR THESIS UNDER REVIEW:\n{state['bear_thesis']}\n\n"
+        "Write the red-team critique."
+    )
+    return {"red_team_critique": _run(RED_TEAM_SYSTEM_PROMPT, user_prompt)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. Synthesis — the senior writer producing the final memo
 # ─────────────────────────────────────────────────────────────────────────────
 
 SYNTHESIS_SYSTEM_PROMPT = """\
@@ -223,6 +270,8 @@ to synthesize them into a single decision-ready investment memo.
 Requirements:
 - Weigh the two theses against each other explicitly: where does the bear
   case actually land a blow, and where does the bull case survive contact?
+- Apply the red-team critique: discard or caveat any argument it discredited,
+  and answer the open questions it says the memo must not ignore.
 - Do not split the difference reflexively — take a view, and say what
   evidence would change it.
 - Structure the memo: summary and recommendation up front, then the key
@@ -233,10 +282,9 @@ Requirements:
 
 
 def synthesis_node(state: ResearchState) -> dict:
-    """Synthesize the debate into the final memo.
+    """Synthesize the debate and the red-team critique into the final memo.
 
-    Reads: bull_thesis, bear_thesis (plus red_team_critique when a dedicated
-    critique node is added to the graph).
+    Reads: bull_thesis, bear_thesis, red_team_critique.
     Populates: final_memo.
     """
     user_prompt = (

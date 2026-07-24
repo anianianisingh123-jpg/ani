@@ -4,8 +4,8 @@ Wires the agent nodes from agents.py into a LangGraph StateGraph over
 ResearchState. Two pipelines share one graph, selected by the `mode`
 input at the entry point:
 
-    entry ──(mode == 'screener')──> screener ────────────────────────> END
-      └───(mode == 'deep_dive')──> data_gatherer ─> bull ─> bear ─> synthesis ─> END
+    entry ──(mode == 'screener')──> screener ─────────────────────────────────> END
+      └───(mode == 'deep_dive')──> data_gatherer ─> bull ─> bear ─> red_team ─> synthesis ─> END
 
 Usage:
     from mas_sector_system.main import app
@@ -29,6 +29,7 @@ from .agents import (
     bear_agent_node,
     bull_agent_node,
     data_gatherer_node,
+    red_team_node,
     synthesis_node,
 )
 from .state import ResearchState
@@ -99,6 +100,7 @@ def build_graph():
     workflow.add_node("data_gatherer", data_gatherer_node)
     workflow.add_node("bull_agent", bull_agent_node)
     workflow.add_node("bear_agent", bear_agent_node)
+    workflow.add_node("red_team", red_team_node)
     workflow.add_node("synthesis", synthesis_node)
 
     # Conditional entry point: the graph starts by calling route_by_mode on
@@ -111,11 +113,12 @@ def build_graph():
         },
     )
 
-    # Deep-dive assembly line: gather data, argue both sides, then have the
-    # senior writer synthesize the debate into the final memo.
+    # Deep-dive assembly line: gather data, argue both sides, red-team the
+    # debate itself, then have the senior writer synthesize the final memo.
     workflow.add_edge("data_gatherer", "bull_agent")
     workflow.add_edge("bull_agent", "bear_agent")
-    workflow.add_edge("bear_agent", "synthesis")
+    workflow.add_edge("bear_agent", "red_team")
+    workflow.add_edge("red_team", "synthesis")
     workflow.add_edge("synthesis", END)
 
     # The screener report is terminal — no debate stage on this path.
