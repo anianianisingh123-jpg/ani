@@ -30,6 +30,8 @@ Usage:
     print(result["final_memo"])
 """
 
+from __future__ import annotations
+
 from langgraph.graph import END, StateGraph
 
 from .agents import (

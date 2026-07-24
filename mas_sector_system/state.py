@@ -7,6 +7,8 @@ synthesis step) to build on prior work. Field layout follows the master
 architecture specification in CLAUDE.md (§2).
 """
 
+from __future__ import annotations
+
 from typing import Literal, Optional
 
 try:

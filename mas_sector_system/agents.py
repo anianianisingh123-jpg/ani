@@ -13,6 +13,8 @@ Per the master spec (CLAUDE.md):
   synthesis writer run on the high-capability tier.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import sys
