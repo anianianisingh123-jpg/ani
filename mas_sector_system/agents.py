@@ -12,11 +12,17 @@ Node flow (wired in the next step):
 """
 
 import json
+import sys
+from pathlib import Path
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from .state import ResearchState
+
+# market_data.py lives at the repo root, one level above this package.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from market_data import fetch_ticker_fundamentals  # noqa: E402
 
 # The repo's Streamlit app currently runs Sonnet; for the research agents we
 # default to Opus, Anthropic's most capable generally-available tier.
@@ -65,6 +71,14 @@ From SEC filings (10-K, 10-Q, 8-K), summarize risk factors, management's
 discussion, segment trends, and any disclosures a diligent analyst would not
 want to miss.
 
+When the user message includes LIVE MARKET DATA (fetched from yfinance),
+treat those figures as ground truth: build your ratios from them, reconcile
+your adjusted metrics against them, and pay special attention to any fiscal
+year flagged `tax_year_looks_distorted` — recompute the normalized P/E from
+`normalized_net_income` for those years. Fill gaps (null fields) from your
+own knowledge, but clearly mark which figures came from the feed and which
+are estimates.
+
 Return your answer as JSON with two keys:
   "raw_financials": an object of the metrics you extracted/derived
     (include both headline and adjusted values where they differ),
@@ -77,13 +91,22 @@ def data_gatherer_node(state: ResearchState) -> dict:
 
     Populates: raw_financials, sec_filing_summary.
     """
-    # TODO: wire real data sources (e.g. yfinance via market_data.py, EDGAR)
-    # and pass their output into the prompt instead of relying on the model.
+    # Pull real quote/valuation/statement data via yfinance (market_data.py).
+    # The fetch degrades to None fields on any network failure, so the node
+    # still runs — the model is told which figures are live vs. estimated.
+    live_data = fetch_ticker_fundamentals(state["ticker"]) if state.get("ticker") else None
+
+    live_block = (
+        f"LIVE MARKET DATA (yfinance):\n{json.dumps(live_data, indent=2, default=str)}\n\n"
+        if live_data else
+        "LIVE MARKET DATA: none available for this request.\n\n"
+    )
     user_prompt = (
         f"Mode: {state['mode']}\n"
         f"Sector: {state['sector']}\n"
         f"Ticker: {state.get('ticker') or 'N/A (sector screener)'}\n"
         f"User request: {state['user_query']}\n\n"
+        + live_block +
         "Gather and normalize the financial data as instructed."
     )
     raw = _run(DATA_GATHERER_SYSTEM_PROMPT, user_prompt)
@@ -97,6 +120,11 @@ def data_gatherer_node(state: ResearchState) -> dict:
     except (json.JSONDecodeError, AttributeError):
         raw_financials = {"unparsed_output": raw}
         sec_filing_summary = raw
+
+    # Keep the untouched feed alongside the model's derived metrics so the
+    # bull/bear agents can check the analysis against the source numbers.
+    if live_data is not None and isinstance(raw_financials, dict):
+        raw_financials["live_market_data"] = live_data
 
     return {
         "raw_financials": raw_financials,

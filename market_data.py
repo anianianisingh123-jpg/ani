@@ -244,6 +244,124 @@ def country_label_map(data: dict) -> dict[str, str]:
     return out
 
 
+# ── Per-ticker fundamentals (for the mas_sector_system research agents) ──────
+
+# Statutory-ish baseline used to spot distorted tax years (e.g. a one-time
+# deferred-tax remeasurement) and to compute a normalized net income.
+_NORMAL_TAX_RATE = 0.21
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_ticker_fundamentals(ticker: str) -> dict:
+    """
+    Live yfinance fundamentals for a single ticker, shaped for the research
+    agents' Fundamental Adjustment Ledger. Includes an effective-tax-rate
+    check per fiscal year so a one-time tax charge shows up explicitly, with
+    a normalized net income (at the statutory rate) beside the headline one.
+    All failures degrade to None fields — never raises.
+    """
+    out: dict = {
+        "ticker": ticker,
+        "quote": {"price": None, "market_cap": None, "shares": None,
+                  "hi_52w": None, "lo_52w": None},
+        "valuation": {"trailing_pe": None, "forward_pe": None,
+                      "price_to_book": None, "dividend_yield_pct": None},
+        "income_statement_by_fy": {},   # fiscal-year -> line items + tax check
+        "balance_sheet": {"total_debt": None, "cash_and_equivalents": None},
+        "cash_flow": {"operating_cf": None, "capex": None, "free_cf": None},
+        "fetch_errors": [],
+    }
+
+    try:
+        import yfinance as yf
+    except Exception:
+        out["fetch_errors"].append("yfinance not installed")
+        return out
+
+    t = yf.Ticker(ticker)
+
+    try:
+        fi = t.fast_info
+        out["quote"].update({
+            "price": _safe_num(fi.last_price),
+            "market_cap": _safe_num(fi.market_cap),
+            "shares": _safe_num(fi.shares),
+            "hi_52w": _safe_num(fi.year_high),
+            "lo_52w": _safe_num(fi.year_low),
+        })
+    except Exception as e:
+        out["fetch_errors"].append(f"quote: {e}")
+
+    try:
+        info = t.info or {}
+        dy = _safe_num(info.get("dividendYield"))
+        out["valuation"].update({
+            "trailing_pe": _safe_num(info.get("trailingPE")),
+            "forward_pe": _safe_num(info.get("forwardPE")),
+            "price_to_book": _safe_num(info.get("priceToBook")),
+            # yfinance reports dividendYield as a fraction on most versions
+            "dividend_yield_pct": dy * 100.0 if dy is not None and dy < 1 else dy,
+        })
+    except Exception as e:
+        out["fetch_errors"].append(f"valuation: {e}")
+
+    try:
+        inc = t.income_stmt
+        if inc is not None and not inc.empty:
+            def row(name):
+                return inc.loc[name] if name in inc.index else None
+
+            fields = {
+                "revenue": row("Total Revenue"),
+                "operating_income": row("Operating Income"),
+                "pretax_income": row("Pretax Income"),
+                "tax_provision": row("Tax Provision"),
+                "net_income": row("Net Income"),
+                "r_and_d": row("Research And Development"),
+            }
+            for col in inc.columns:  # one column per fiscal year, newest first
+                fy = str(col.date()) if hasattr(col, "date") else str(col)
+                rec = {k: _safe_num(s[col]) if s is not None else None
+                       for k, s in fields.items()}
+                # Tax-distortion check: effective rate vs statutory baseline.
+                pretax, tax = rec["pretax_income"], rec["tax_provision"]
+                if pretax and tax is not None and pretax > 0:
+                    eff = tax / pretax
+                    rec["effective_tax_rate_pct"] = eff * 100.0
+                    rec["tax_year_looks_distorted"] = abs(eff - _NORMAL_TAX_RATE) > 0.10
+                    rec["normalized_net_income"] = pretax * (1 - _NORMAL_TAX_RATE)
+                out["income_statement_by_fy"][fy] = rec
+    except Exception as e:
+        out["fetch_errors"].append(f"income_stmt: {e}")
+
+    try:
+        bs = t.balance_sheet
+        if bs is not None and not bs.empty:
+            col = bs.columns[0]
+            if "Total Debt" in bs.index:
+                out["balance_sheet"]["total_debt"] = _safe_num(bs.loc["Total Debt", col])
+            if "Cash And Cash Equivalents" in bs.index:
+                out["balance_sheet"]["cash_and_equivalents"] = _safe_num(
+                    bs.loc["Cash And Cash Equivalents", col])
+    except Exception as e:
+        out["fetch_errors"].append(f"balance_sheet: {e}")
+
+    try:
+        cf = t.cash_flow
+        if cf is not None and not cf.empty:
+            col = cf.columns[0]
+            ocf = _safe_num(cf.loc["Operating Cash Flow", col]) if "Operating Cash Flow" in cf.index else None
+            capex = _safe_num(cf.loc["Capital Expenditure", col]) if "Capital Expenditure" in cf.index else None
+            out["cash_flow"]["operating_cf"] = ocf
+            out["cash_flow"]["capex"] = capex
+            if ocf is not None and capex is not None:
+                out["cash_flow"]["free_cf"] = ocf + capex  # capex is negative
+    except Exception as e:
+        out["fetch_errors"].append(f"cash_flow: {e}")
+
+    return out
+
+
 # ── Currency debasement vs gold (live, computed from yfinance) ───────────────
 # (code, label, USD->ccy yfinance FX symbol)  — USD has no pair (base).
 CURRENCIES = [
