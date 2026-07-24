@@ -136,20 +136,20 @@ discussion, segment trends, and any disclosures a diligent analyst would not
 want to miss. From the latest earnings report/call, assess sentiment: beats
 or misses, guidance direction, and management's confidence level.
 
-The user message may include two live data blocks — treat them as ground
-truth, in this order of authority:
-1. LIVE WEB RESEARCH (Tavily): real-time search results covering recent SEC
+Sources, in order of authority:
+1. LIVE WEB RESEARCH SNIPPETS (Tavily) — when present at the end of this
+   system prompt, these are real-time search results covering recent SEC
    filings, earnings figures, one-time items, and current price/valuation.
-   Prefer these for anything time-sensitive, and cite the source URL next to
+   Prefer them for anything time-sensitive, and cite the source URL next to
    figures you take from them.
-2. LIVE MARKET DATA (yfinance): structured quote/statement feed — use it to
-   cross-check the web figures, and pay special attention to any fiscal year
-   flagged `tax_year_looks_distorted` — recompute the normalized P/E from
-   `normalized_net_income` for those years.
+2. LIVE MARKET DATA (yfinance) — structured quote/statement feed in the
+   user message; use it to cross-check the web figures, and pay special
+   attention to any fiscal year flagged `tax_year_looks_distorted` —
+   recompute the normalized P/E from `normalized_net_income` for those.
 Fill gaps from your own knowledge only when both sources are silent, and
-clearly mark which figures are sourced vs. estimated. If both blocks report
-errors, say so prominently in sec_filings_summary so downstream agents know
-the data is unanchored.
+clearly mark which figures are sourced vs. estimated. If both sources are
+unavailable, say so prominently in sec_filings_summary so downstream agents
+know the data is unanchored.
 
 Populate ALL FOUR output fields — an answer missing any of them is
 incomplete:
@@ -207,6 +207,25 @@ def _tavily_research(ticker: str, sector: str, user_query: str) -> dict:
     return out
 
 
+def _format_web_snippets(web_research: dict | None) -> str:
+    """Render Tavily results as readable snippets for prompt injection.
+
+    Returns an empty string when there is nothing usable, so callers can
+    distinguish 'live data present' from 'search failed' and prompt honestly.
+    """
+    if not web_research or not web_research.get("results"):
+        return ""
+    parts: list[str] = []
+    for query, payload in web_research["results"].items():
+        parts.append(f"### Search: {query}")
+        if payload.get("answer"):
+            parts.append(f"Synthesized answer: {payload['answer']}")
+        for s in payload.get("sources", []):
+            parts.append(f"- [{s.get('title')}]({s.get('url')})\n  {s.get('content')}")
+        parts.append("")
+    return "\n".join(parts).strip()
+
+
 class GathererOutput(BaseModel):
     """Structured contract for the data gatherer's response — enforced via
     tool calling so the model cannot drift into prose or fenced markdown.
@@ -255,11 +274,6 @@ def data_gatherer_node(state: ResearchState) -> dict:
     )
     live_data = fetch_ticker_fundamentals(ticker) if ticker else None
 
-    web_block = (
-        f"LIVE WEB RESEARCH (Tavily):\n{json.dumps(web_research, indent=2, default=str)}\n\n"
-        if web_research else
-        "LIVE WEB RESEARCH: none available for this request.\n\n"
-    )
     live_block = (
         f"LIVE MARKET DATA (yfinance):\n{json.dumps(live_data, indent=2, default=str)}\n\n"
         if live_data else
@@ -270,10 +284,33 @@ def data_gatherer_node(state: ResearchState) -> dict:
         f"Sector: {state['sector']}\n"
         f"Ticker: {ticker or 'N/A (sector screener)'}\n"
         f"User request: {state['user_query']}\n\n"
-        + web_block + live_block +
+        + live_block +
         "Gather and normalize the financial data as instructed."
     )
+
     system = DATA_GATHERER_SYSTEM_PROMPT + _sector_lens(state)
+
+    # Inject the raw Tavily snippets directly into the system prompt. The
+    # no-disclaimer instruction is asserted ONLY when snippets actually
+    # exist — telling the model it has live data when the search failed
+    # would push it to fabricate figures instead of flagging the gap.
+    snippets = _format_web_snippets(web_research)
+    if snippets:
+        system += (
+            "\n\n─── LIVE WEB RESEARCH SNIPPETS (Tavily) ───\n"
+            "You are provided live web research snippets below fetched via "
+            "Tavily. Extract the GAAP EPS, Non-GAAP EPS, revenue, share "
+            "price, and tax items from these snippets. Do NOT claim you "
+            "lack live access, as the live data is provided in this "
+            "prompt.\n\n" + snippets
+        )
+    else:
+        errs = "; ".join(web_research["errors"]) if web_research else "no ticker provided"
+        system += (
+            f"\n\nNOTE: Live web research is unavailable for this run ({errs}). "
+            "Do not invent figures to compensate — mark estimates as estimates "
+            "and state the data gap prominently in sec_filings_summary."
+        )
 
     # Primary path: schema-enforced output (tool calling), so the model
     # cannot drift into prose. Fallback: plain text with best-effort JSON
