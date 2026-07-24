@@ -21,6 +21,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
+from pydantic import BaseModel
 
 from .state import ResearchState
 
@@ -136,13 +137,45 @@ year flagged `tax_year_looks_distorted` — recompute the normalized P/E from
 own knowledge, but clearly mark which figures came from the feed and which
 are estimates.
 
-Return your answer as JSON with four keys:
-  "raw_financials": object of raw extracted metrics (headline figures),
-  "normalized_metrics": the adjustment ledger — each one-time item isolated
+Populate ALL FOUR output fields — an answer missing any of them is
+incomplete:
+  raw_financials: compact object of raw extracted metrics (headline figures
+    only — a few dozen key numbers, not an exhaustive dump),
+  normalized_metrics: the adjustment ledger — each one-time item isolated
     with its impact, plus adjusted EPS / normalized P/E / clean margins,
-  "sec_filings_summary": prose summary of the filing analysis,
-  "earnings_sentiment": prose read on the latest earnings tone and guidance.
+  sec_filings_summary: prose summary of the filing analysis,
+  earnings_sentiment: prose read on the latest earnings tone and guidance.
 """
+
+
+class GathererOutput(BaseModel):
+    """Structured contract for the data gatherer's response — enforced via
+    tool calling so the model cannot drift into prose or fenced markdown.
+    Fields default to empty so a partial tool call degrades instead of
+    failing validation outright."""
+
+    raw_financials: dict = {}
+    normalized_metrics: dict = {}
+    sec_filings_summary: str = ""
+    earnings_sentiment: str = ""
+
+
+def _run_structured(system_prompt: str, user_prompt: str, model: str) -> GathererOutput:
+    """Schema-enforced round trip; one retry if the ledger comes back empty."""
+    structured_llm = _llm(model).with_structured_output(GathererOutput)
+    messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
+    result = structured_llm.invoke(messages)
+    if result is None or not result.normalized_metrics:
+        retry_messages = messages + [HumanMessage(content=(
+            "Your previous tool call was incomplete. Call the tool again and "
+            "populate ALL FOUR fields — raw_financials, normalized_metrics, "
+            "sec_filings_summary, earnings_sentiment. Keep raw_financials "
+            "compact so you have room for the other three."
+        ))]
+        retried = structured_llm.invoke(retry_messages)
+        if retried is not None and retried.normalized_metrics:
+            return retried
+    return result if result is not None else GathererOutput()
 
 
 def data_gatherer_node(state: ResearchState) -> dict:
@@ -169,25 +202,34 @@ def data_gatherer_node(state: ResearchState) -> dict:
         + live_block +
         "Gather and normalize the financial data as instructed."
     )
-    raw = _run(
-        DATA_GATHERER_SYSTEM_PROMPT + _sector_lens(state),
-        user_prompt,
-        model=WORKER_MODEL,
-    )
+    system = DATA_GATHERER_SYSTEM_PROMPT + _sector_lens(state)
 
-    # Best-effort parse of the requested JSON shape; fall back to storing the
-    # raw text so downstream agents always have something to work with.
+    # Primary path: schema-enforced output (tool calling), so the model
+    # cannot drift into prose. Fallback: plain text with best-effort JSON
+    # parsing (stripping any ```json fence), so the pipeline never stalls.
     try:
-        parsed = json.loads(raw)
-        raw_financials = parsed.get("raw_financials", {})
-        normalized_metrics = parsed.get("normalized_metrics", {})
-        sec_filings_summary = parsed.get("sec_filings_summary", raw)
-        earnings_sentiment = parsed.get("earnings_sentiment", "")
-    except (json.JSONDecodeError, AttributeError):
-        raw_financials = {"unparsed_output": raw}
-        normalized_metrics = {}
-        sec_filings_summary = raw
-        earnings_sentiment = ""
+        parsed = _run_structured(system, user_prompt, model=WORKER_MODEL)
+        raw_financials = parsed.raw_financials
+        normalized_metrics = parsed.normalized_metrics
+        sec_filings_summary = parsed.sec_filings_summary
+        earnings_sentiment = parsed.earnings_sentiment
+    except Exception:
+        raw = _run(system, user_prompt, model=WORKER_MODEL)
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned
+            cleaned = cleaned.rstrip().removesuffix("```").rstrip()
+        try:
+            parsed_json = json.loads(cleaned)
+            raw_financials = parsed_json.get("raw_financials", {})
+            normalized_metrics = parsed_json.get("normalized_metrics", {})
+            sec_filings_summary = parsed_json.get("sec_filings_summary", raw)
+            earnings_sentiment = parsed_json.get("earnings_sentiment", "")
+        except (json.JSONDecodeError, AttributeError):
+            raw_financials = {"unparsed_output": raw}
+            normalized_metrics = {}
+            sec_filings_summary = raw
+            earnings_sentiment = ""
 
     # Keep the untouched feed alongside the model's derived metrics so the
     # bull/bear agents can check the analysis against the source numbers.
