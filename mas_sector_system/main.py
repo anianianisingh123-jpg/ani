@@ -1,71 +1,100 @@
 """Graph orchestration for the LangGraph Multi-Agent Sector Research System.
 
 Wires the agent nodes from agents.py into a LangGraph StateGraph over
-ResearchState, per the master spec (CLAUDE.md §3). Two pipelines share one
-graph; the supervisor node routes on the `mode` input:
+ResearchState. Two pipelines share one graph, selected by the `mode`
+input at the entry point:
 
-    supervisor ──(mode == 'screener')──> screener ──────────────────────────────┐
-        └───────(mode == 'deep_dive')──> data_gatherer ─> bull ─> bear ─> red_team ─> synthesis ─> END
-                                                                    (screener) ─────^
-
-The data_gatherer performs its own live research before analysis (keeping
-the CLAUDE.md §3 topology unchanged): a Tavily web search for real-time SEC
-filings, earnings figures, and valuation (requires TAVILY_API_KEY in the
-environment or .env), cross-checked against the structured yfinance feed
-from market_data.py. Both sources degrade gracefully when unavailable.
+    entry ──(mode == 'screener')──> screener ────────────────────────> END
+      └───(mode == 'deep_dive')──> data_gatherer ─> bull ─> bear ─> synthesis ─> END
 
 Usage:
     from mas_sector_system.main import app
     result = app.invoke({
         "ticker": "NVDA",
-        "sector": "Technology",
+        "sector": "Semiconductors",
         "mode": "deep_dive",
         "user_query": "Is NVDA still a buy after the run-up?",
         # remaining fields start empty and are filled by the nodes
-        "sec_filings_summary": "", "earnings_sentiment": "",
-        "quantitative_raw_data": {}, "raw_financials": {}, "macro_context": "",
-        "normalized_metrics": {}, "bull_thesis": "", "bear_thesis": "",
-        "red_team_critique": "", "final_memo": "",
+        "raw_financials": {}, "sec_filing_summary": "", "macro_context": "",
+        "bull_thesis": "", "bear_thesis": "", "red_team_critique": "",
+        "final_memo": "",
     })
     print(result["final_memo"])
 """
 
-from __future__ import annotations
-
 from langgraph.graph import END, StateGraph
 
 from .agents import (
+    _run,
     bear_agent_node,
     bull_agent_node,
     data_gatherer_node,
-    red_team_node,
-    screener_node,
     synthesis_node,
 )
 from .state import ResearchState
+from .tools import multi_search
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Supervisor / routing
+# Screener node
+#
+# The screener path surveys the whole sector instead of dissecting a single
+# name, so it skips the adversarial debate entirely. It first pulls live
+# Tavily research on the sector, then ranks candidates from that evidence.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def supervisor_node(state: ResearchState) -> dict:
-    """Supervisor router (spec §3): the graph's entry node.
+SCREENER_SYSTEM_PROMPT = """\
+You are a sector screener for an investment research team. You will be given
+LIVE web research (Tavily) about the sector. Survey that evidence and produce
+a ranked shortlist of the most interesting candidates for further research.
 
-    Routing itself happens on this node's conditional edges (route_by_mode
-    below), so the node body validates the request and changes no state.
+Rules:
+- Prefer names and metrics that appear in the live research. Do not invent
+  stale prices or valuation multiples from training memory.
+- If a candidate is interesting but the live packet lacks a key metric, say
+  so and flag it for a deep dive rather than fabricating the number.
+
+For each candidate: ticker, one-line thesis, key metric that earns it the
+spot (with source if possible), and the main risk. Rank by attractiveness
+and say why the top pick is ranked first. Flag any candidate that deserves
+a full deep dive.
+"""
+
+
+def screener_node(state: ResearchState) -> dict:
+    """Broad sector sweep producing a ranked candidate list.
+
+    Populates: final_memo (the screener report IS the deliverable on this
+    path — no debate stage runs).
     """
-    if not state.get("sector"):
-        raise ValueError("sector is required")
-    if state["mode"] == "deep_dive" and not state.get("ticker"):
-        raise ValueError("deep_dive mode requires a ticker")
-    return {}
+    sector = state["sector"]
+    query = state["user_query"]
+    web = multi_search(
+        [
+            f"{sector} sector stocks top performers valuation outlook latest",
+            f"{sector} industry news earnings leaders laggards risks",
+            f"{sector} {query}",
+        ],
+        max_results=6,
+        topic="finance",
+    )
+    user_prompt = (
+        f"Sector: {sector}\n"
+        f"User request: {query}\n\n"
+        f"=== LIVE WEB RESEARCH (Tavily) ===\n{web}\n\n"
+        "Using the live research above, run the screen and produce the ranked shortlist."
+    )
+    return {"final_memo": _run(SCREENER_SYSTEM_PROMPT, user_prompt)}
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Routing
+# ─────────────────────────────────────────────────────────────────────────────
 
 def route_by_mode(state: ResearchState) -> str:
-    """Pick the pipeline branch from the `mode` input.
+    """Entry-point router: pick the pipeline based on the `mode` input.
 
     Returns the key LangGraph uses to look up the target node in the
-    conditional-edge mapping below. Raising on an unknown mode keeps a bad
+    conditional-entry mapping below. Raising on an unknown mode keeps a bad
     input from silently running the wrong (and expensive) pipeline.
     """
     mode = state["mode"]
@@ -84,40 +113,32 @@ def build_graph():
     """Assemble and compile the research graph."""
     workflow = StateGraph(ResearchState)
 
-    # Register every node in the topology.
-    workflow.add_node("supervisor", supervisor_node)
+    # Register every node the router can reach.
     workflow.add_node("screener", screener_node)
     workflow.add_node("data_gatherer", data_gatherer_node)
     workflow.add_node("bull_agent", bull_agent_node)
     workflow.add_node("bear_agent", bear_agent_node)
-    workflow.add_node("red_team", red_team_node)
     workflow.add_node("synthesis", synthesis_node)
 
-    # The supervisor is the entry point; its conditional edges dispatch to
-    # whichever branch route_by_mode selects.
-    workflow.set_entry_point("supervisor")
-    workflow.add_conditional_edges(
-        "supervisor",
+    # Conditional entry point: the graph starts by calling route_by_mode on
+    # the initial state, then jumps to whichever node its return value maps to.
+    workflow.set_conditional_entry_point(
         route_by_mode,
         {
-            "screener": "screener",        # "The Radar": broad sweep
-            "deep_dive": "data_gatherer",  # "The Sniper": adversarial pipeline
+            "screener": "screener",        # broad sweep, no debate
+            "deep_dive": "data_gatherer",  # full adversarial pipeline
         },
     )
 
-    # Deep-dive assembly line: gather data, argue both sides, red-team the
-    # debate itself, then have the senior writer synthesize the final memo.
+    # Deep-dive assembly line: gather data, argue both sides, then have the
+    # senior writer synthesize the debate into the final memo.
     workflow.add_edge("data_gatherer", "bull_agent")
     workflow.add_edge("bull_agent", "bear_agent")
-    workflow.add_edge("bear_agent", "red_team")
-    workflow.add_edge("red_team", "synthesis")
-
-    # The screener's draft shortlist also goes through the senior writer
-    # for the final polish (spec §3: screener -> synthesis -> END).
-    workflow.add_edge("screener", "synthesis")
-
-    # Both branches converge on synthesis, which produces final_memo.
+    workflow.add_edge("bear_agent", "synthesis")
     workflow.add_edge("synthesis", END)
+
+    # The screener report is terminal — no debate stage on this path.
+    workflow.add_edge("screener", END)
 
     return workflow.compile()
 
