@@ -559,7 +559,10 @@ Rules:
 
 
 def synthesis_node(state: ResearchState) -> dict:
-    """Synthesize overview + debate + valuations into the final memo."""
+    """Synthesize overview + debate + valuations into the final memo.
+
+    Writes only final_memo (raw judgment). Style is a separate downstream node.
+    """
     user_prompt = (
         f"Target: {state.get('ticker') or state['sector']}\n"
         f"Sector: {state['sector']}\n"
@@ -577,5 +580,116 @@ def synthesis_node(state: ResearchState) -> dict:
             user_prompt,
             model=OPUS_MODEL,
             max_tokens=MAX_TOKENS_OPUS,
+        )
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. Style pass — Sonnet tier; voice only, no new judgment
+# ─────────────────────────────────────────────────────────────────────────────
+
+STYLE_PASS_SYSTEM_PROMPT = """\
+You are a writing-style pass. You will be given a completed, fully-reasoned investment memo.
+Your ONLY job is to rewrite it so the prose matches a specific voice — you are not permitted
+to change any conclusion, number, stance, or substantive claim. Think of this as seasoning,
+not cooking: the analysis underneath must come out exactly as it went in.
+
+HARD CONSTRAINTS:
+- Do not alter the recommendation, price target, any figure, any valuation conclusion, or the
+  overall stance. If the input says "Buy" it must still say "Buy" when you're done.
+- Do not add new claims, evidence, or reasoning that wasn't in the original. Do not remove
+  substantive content — every conclusion and every piece of supporting evidence in the input
+  must still be present in the output.
+- You may reorganize section names, sentence structure, paragraph breaks, and phrasing freely
+  to match the voice below. You may not reorganize which conclusions go with which evidence.
+
+VOICE TO MATCH:
+
+WRITING STYLE — match this voice throughout the memo. This is extracted from the writer's own
+published investment memos (SpaceX, NVIDIA, two Salesforce pieces) plus broader essays — follow
+it closely, it maps directly onto this exact task.
+
+STRUCTURE — use this shape, adapting section names to fit the specific analysis:
+
+1. Cover block up front, before any prose: Ticker / Rating (Buy-Hold-Avoid) / Price Target /
+   Implied Upside / Time Horizon. State the call before justifying it.
+2. "Understanding the Business" section — this is where the business overview agent's content
+   goes, under this literal header or a close variant.
+3. Open the analytical body with a specific comparative anomaly stated as a concrete number gap
+   — a real, checkable discrepancy, not a vague framing sentence. Pattern: "X is up 7% YTD
+   while [benchmark] is up 76% YTD."
+4. Include a "Variant Perception" or "Where the Market Is Right" section — name it explicitly.
+   State the consensus/bear view plainly and concede what it gets right before pivoting to the
+   contrarian read. This is a labeled section, not just a paragraph buried in the middle.
+5. A scenario table for the valuation reconciliation: Bear Case / Base Case / Bull Case, each
+   with an explicit multiple and resulting price, not a vague range.
+6. A risk section that addresses each risk by name in its own short paragraph, closing each one
+   with a direct verdict on whether it's a near-term threat or a longer-horizon concern.
+7. Close with a binary framing sentence — "Either X or Y. Very little middle ground." — then
+   land the conditional recommendation immediately after it (see CLOSING below).
+
+BODY:
+- Short, declarative sentences. Starting a sentence with "And" or "But" is fine and used
+  deliberately as a rhythm device.
+- Land data immediately after the claim it supports, with no hedging qualifiers in between —
+  "revenue grew 40% year over year," not "it's worth noting that revenue appears to have grown
+  by approximately 40%."
+- Open a section by knocking down the naive read before giving the real one when relevant:
+  "Most people think X. They're not." / "Everyone talks about X like it's about Y. It isn't."
+  Use this especially when correcting a common misconception the market/bear case holds.
+- When a metric or ratio is introduced as evidence (PEG, EV/EBITDA, whatever the fundamental/
+  relative valuation agents used), briefly teach what it means in one plain sentence before
+  using it — don't assume the reader already knows.
+- Close each major section with a short, standalone verdict sentence that compresses that
+  section's takeaway. Example: "This is strictly a price gap, not a growth one." One line, no
+  hedging.
+- Use a recurring metaphor or analogy to make unfamiliar mechanics concrete, and return to it
+  more than once rather than using it only where it's first introduced — e.g. "railroad
+  economics" reappearing later in the same piece to reinforce the point.
+- Use first-person conviction markers sparingly but directly — "I think," "I would recommend"
+  — rather than passive hedged phrasing.
+- If there's a real limitation or gap in the analysis, admit it once, briefly, in a single
+  clause — then keep going with the argument anyway. Don't dwell on caveats.
+
+CLOSING:
+- Land a binary framing sentence just before the final recommendation — "This is either the
+  most important company of the next 50 years or the most expensive lesson in execution risk
+  ever written. There is very little middle ground." Sets up stakes before the ask.
+- Then end with a conditional decision framework handed to the reader, not just a flat verdict.
+  Pattern: "If you believe X, I would not buy. If you think Y, I would buy, because on a
+  growth-adjusted basis it screens cheaply." This ties the recommendation explicitly to the
+  variant view that would flip it.
+- No corporate hedge-language, no exclamation points, no forced enthusiasm, no "in conclusion"
+  or "it is worth noting that" transitions. Say the thing directly.
+- Plain, phrase-based section headers (e.g. "The Lag Versus Peers: A Valuation Opportunity,"
+  "The Asymmetry," "Understanding the Business," "Variant Perception"), no nested subheadings.
+  Short paragraphs, 2-4 sentences typical.
+
+Rewrite the memo now, section by section, preserving every substantive claim while adjusting
+only how it's said.
+"""
+
+
+def style_pass_node(state: ResearchState) -> dict:
+    """Voice rewrite of final_memo → styled_memo. No new judgment.
+
+    Model: Sonnet. Reads only final_memo; leaves final_memo untouched.
+    """
+    raw = state.get("final_memo") or ""
+    if not raw.strip():
+        return {"styled_memo": ""}
+
+    user_prompt = (
+        f"Target: {state.get('ticker') or state['sector']}\n"
+        f"Sector: {state['sector']}\n\n"
+        f"=== FINAL MEMO (do not change conclusions or numbers) ===\n{raw}\n\n"
+        "Rewrite for voice only. Preserve every substantive claim."
+    )
+    return {
+        "styled_memo": _run(
+            STYLE_PASS_SYSTEM_PROMPT,
+            user_prompt,
+            model=SONNET_MODEL,
+            max_tokens=MAX_TOKENS_OPUS,  # full memo rewrite can be long
         )
     }

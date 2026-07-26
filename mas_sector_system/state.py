@@ -101,9 +101,13 @@ class ResearchState(TypedDict):
     relative_valuation: str
 
     # ------------------------------------------------------------------
-    # Output field (populated by the synthesis agent, terminal node)
+    # Output fields
     # ------------------------------------------------------------------
 
-    # The finished investment memo: business overview, recommendation,
-    # debate, valuation reconciliation, and monitoring triggers.
+    # Raw investment memo from synthesis — pure judgment, unstyled.
+    # Never overwritten by the style pass; kept for audit/debug.
     final_memo: str
+
+    # Voice-seasoned rewrite of final_memo from style_pass_node.
+    # Reader-facing deliverable; substantive claims must match final_memo.
+    styled_memo: str

@@ -10,30 +10,24 @@ input at the entry point:
               ├─> data_gatherer ──────────┐
               └─> business_overview ──────┼─> bull_agent ──────────────────┐
                                           ├─> bear_agent ──────────────────┤
-                                          ├─> fundamental_valuation ───────┼─> synthesis ─> END
+                                          ├─> fundamental_valuation ───────┼─> synthesis
                                           └─> relative_valuation ──────────┘
+                                                → style_pass → docx_export → END
 
 Usage:
-    from mas_sector_system.main import app
-    result = app.invoke({
-        "ticker": "NVDA",
-        "sector": "Semiconductors",
-        "mode": "deep_dive",
-        "user_query": "Is NVDA still a buy after the run-up?",
-        "business_overview": "",
-        "income_statement": {},
-        "balance_sheet": {},
-        "cash_flow_statement": {},
-        "sec_filing_summary": "",
-        "macro_context": "",
-        "bull_thesis": "",
-        "bear_thesis": "",
-        "fundamental_valuation": "",
-        "relative_valuation": "",
-        "final_memo": "",
-    })
-    print(result["final_memo"])
+    from mas_sector_system.main import app, run_deep_dive
+    result = run_deep_dive(
+        ticker="NVDA",
+        sector="Semiconductors",
+        user_query="Is NVDA still a buy after the run-up?",
+    )
+    print(result["styled_memo"])
+    # result["final_memo"] is the unstyled audit copy
 """
+
+from __future__ import annotations
+
+from typing import Any, Optional
 
 from langgraph.graph import END, StateGraph
 
@@ -45,8 +39,10 @@ from .agents import (
     data_gatherer_node,
     fundamental_valuation_node,
     relative_valuation_node,
+    style_pass_node,
     synthesis_node,
 )
+from .export_docx import docx_export_node
 from .state import ResearchState
 from .tools import multi_search
 
@@ -140,6 +136,8 @@ def build_graph():
     workflow.add_node("fundamental_valuation", fundamental_valuation_node)
     workflow.add_node("relative_valuation", relative_valuation_node)
     workflow.add_node("synthesis", synthesis_node)
+    workflow.add_node("style_pass", style_pass_node)
+    workflow.add_node("docx_export", docx_export_node)
 
     # Conditional entry: screener path vs deep-dive fan-out start.
     workflow.set_conditional_entry_point(
@@ -168,7 +166,12 @@ def build_graph():
         # Fan-in: synthesis waits for all four analysis branches.
         workflow.add_edge(node, "synthesis")
 
-    workflow.add_edge("synthesis", END)
+    # Synthesis (judgment) → style pass (voice only) → docx export → END
+    workflow.add_edge("synthesis", "style_pass")
+    workflow.add_edge("style_pass", "docx_export")
+    workflow.add_edge("docx_export", END)
+
+    # Screener report is terminal (no style pass on this path).
     workflow.add_edge("screener", END)
 
     return workflow.compile()
@@ -176,6 +179,56 @@ def build_graph():
 
 # Compiled once at import time so callers can just `from ... import app`.
 app = build_graph()
+
+
+def empty_state(
+    *,
+    ticker: Optional[str],
+    sector: str,
+    mode: str,
+    user_query: str,
+) -> dict:
+    """Build a fully-keyed initial ResearchState dict for invoke()."""
+    return {
+        "ticker": ticker,
+        "sector": sector,
+        "mode": mode,
+        "user_query": user_query,
+        "business_overview": "",
+        "income_statement": {},
+        "balance_sheet": {},
+        "cash_flow_statement": {},
+        "sec_filing_summary": "",
+        "macro_context": "",
+        "bull_thesis": "",
+        "bear_thesis": "",
+        "fundamental_valuation": "",
+        "relative_valuation": "",
+        "final_memo": "",
+        "styled_memo": "",
+    }
+
+
+def run_deep_dive(
+    *,
+    ticker: str,
+    sector: str,
+    user_query: str,
+) -> dict[str, Any]:
+    """Convenience entry: run deep_dive, style pass, and docx export.
+
+    Returns the full result state. Prints the saved .docx path (via the
+    export node). final_memo is unstyled audit copy; styled_memo is the
+    reader-facing memo that was exported.
+    """
+    return app.invoke(
+        empty_state(
+            ticker=ticker,
+            sector=sector,
+            mode="deep_dive",
+            user_query=user_query,
+        )
+    )
 
 
 if __name__ == "__main__":

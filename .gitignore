@@ -8,3 +8,4 @@ venv/
 *.pdf
 valuation_history.json
 mas_sector_system/.cache/
+outputs/
