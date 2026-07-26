@@ -7,3 +7,4 @@ venv/
 .streamlit/secrets.toml
 *.pdf
 valuation_history.json
+mas_sector_system/.cache/

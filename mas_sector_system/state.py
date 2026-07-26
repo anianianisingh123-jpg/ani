@@ -3,8 +3,7 @@
 This module defines the shared state object that flows between every agent
 node in the graph. Each agent reads the fields it needs and writes its
 output back into the state, allowing downstream agents (and the final
-synthesis step) to build on prior work. Field layout follows the master
-architecture specification in CLAUDE.md (§2).
+synthesis step) to build on prior work.
 """
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ except ImportError:
 
 class ResearchState(TypedDict):
     # ------------------------------------------------------------------
-    # Base inputs (set once at graph invocation, read-only thereafter)
+    # Input parameters (set once at graph invocation, read-only thereafter)
     # ------------------------------------------------------------------
 
     # Stock ticker symbol to analyze (e.g. "NVDA"). Optional because in
@@ -29,15 +28,15 @@ class ResearchState(TypedDict):
     # ticker is specified up front.
     ticker: Optional[str]
 
-    # The market sector under investigation (e.g. "Technology",
-    # "Financials"). Always required — it scopes screener sweeps and
-    # deep dives, and drives the dynamic sector prompt injection.
+    # The market sector under investigation (e.g. "Semiconductors",
+    # "Healthcare"). Always required — it scopes both screener sweeps
+    # and single-name deep dives.
     sector: str
 
     # Operating mode for the graph:
-    #   'screener'  — "The Radar": broad sweep across the sector.
-    #   'deep_dive' — "The Sniper": exhaustive analysis of one ticker.
-    # The supervisor routes on this value.
+    #   'screener'  — broad sweep across the sector to rank candidates.
+    #   'deep_dive' — exhaustive analysis of a single ticker.
+    # Routing nodes branch on this value.
     mode: Literal["screener", "deep_dive"]
 
     # The user's original natural-language request. Preserved verbatim so
@@ -46,61 +45,65 @@ class ResearchState(TypedDict):
     user_query: str
 
     # ------------------------------------------------------------------
-    # Worker scratchpads (populated by the data-gathering workers)
+    # Business description (populated by business_overview_node)
     # ------------------------------------------------------------------
 
-    # Condensed summary of relevant SEC filings (10-K, 10-Q, 8-K) —
-    # risk factors, management discussion, and notable disclosures.
-    sec_filings_summary: str
+    # Plain-language description of what the company does: products,
+    # segments, revenue model, geography, competitive position, history,
+    # and strategic direction. Purely descriptive — no valuation opinion.
+    business_overview: str
 
-    # Tone and takeaways from the latest earnings report / call: beats or
-    # misses, guidance direction, and management's confidence level.
-    earnings_sentiment: str
+    # ------------------------------------------------------------------
+    # Quantitative / filing fields (populated by data_gatherer_node)
+    # ------------------------------------------------------------------
 
-    # General-purpose quantitative scratchpad. In screener mode this holds
-    # the ranked shortlist draft before the synthesis polish; deep-dive
-    # workers may stash intermediate computations here.
-    quantitative_raw_data: dict
+    # Parsed income statement: current + prior fiscal year and quarter
+    # line items from SEC XBRL company facts (plus any LLM-normalized
+    # adjustments nested under an "adjusted" key).
+    income_statement: dict
 
-    # Structured financial data pulled from market-data APIs: income
-    # statement items, balance sheet figures, valuation multiples, plus
-    # the untouched live feed under 'live_market_data'.
-    raw_financials: dict
+    # Parsed balance sheet: current + prior periods from SEC XBRL.
+    balance_sheet: dict
+
+    # Parsed cash flow statement: current + prior periods from SEC XBRL,
+    # including computed FreeCashFlow where Operating CF and CapEx exist.
+    cash_flow_statement: dict
+
+    # Condensed summary of relevant SEC filings and narrative context
+    # (risk factors, MD&A themes, earnings-call takeaways) written by
+    # the data gatherer from Tavily + filing search.
+    sec_filing_summary: str
 
     # Top-down macroeconomic backdrop relevant to the sector: rates,
     # inflation, FX, commodity trends, and policy developments.
     macro_context: str
 
     # ------------------------------------------------------------------
-    # Normalized ledger (the Fundamental Adjustment Ledger)
-    # ------------------------------------------------------------------
-
-    # Clean non-GAAP math: one-time items isolated and stripped (e.g.
-    # non-cash tax distortions, impairments) with headline vs. adjusted
-    # figures side by side — the true adjusted P/E lives here.
-    normalized_metrics: dict
-
-    # ------------------------------------------------------------------
-    # Adversarial debate (populated by the debate agents)
+    # Adversarial debate fields (populated by the debate agents)
     # ------------------------------------------------------------------
 
     # The strongest good-faith case FOR the investment, written by the
-    # bull agent using the gathered and normalized data above.
+    # bull agent using the data gathered above.
     bull_thesis: str
 
     # The strongest good-faith case AGAINST the investment, written by
     # the bear agent — same evidence base, opposite conclusion.
     bear_thesis: str
 
-    # Independent critique from the red-team agent: attacks weak logic,
-    # unsupported claims, and cherry-picked data in BOTH theses before
-    # anything reaches the final memo.
-    red_team_critique: str
-
     # ------------------------------------------------------------------
-    # Final output (populated by the synthesis agent, terminal node)
+    # Valuation fields (independent of bull/bear)
     # ------------------------------------------------------------------
 
-    # The finished deliverable: the deep-dive investment memo, or the
-    # polished screener shortlist memo, depending on mode.
+    # Intrinsic valuation write-up (DCF / DDM / FFO / etc. by archetype).
+    fundamental_valuation: str
+
+    # Relative / comps valuation write-up (multiples vs peers + history).
+    relative_valuation: str
+
+    # ------------------------------------------------------------------
+    # Output field (populated by the synthesis agent, terminal node)
+    # ------------------------------------------------------------------
+
+    # The finished investment memo: business overview, recommendation,
+    # debate, valuation reconciliation, and monitoring triggers.
     final_memo: str

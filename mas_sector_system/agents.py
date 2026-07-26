@@ -2,18 +2,15 @@
 
 Each node is a plain function that takes the shared ResearchState and
 returns a partial state update (a dict containing only the keys it
-produced). LangGraph merges these updates into the state as the graph
-runs. The graph wiring itself lives elsewhere — these are just the nodes.
+produced). LangGraph merges these updates into the state as the graph runs.
 
-Node flow (wired in the next step):
+Deep-dive fan-out (wired in main.py):
 
-    data_gatherer_node ──> bull_agent_node ──┐
-                      └──> bear_agent_node ──┴──> synthesis_node
-
-Live data: data_gatherer_node calls Tavily (web) + yfinance (quotes/
-fundamentals) BEFORE prompting the LLM. Downstream agents only reason over
-that grounded context — they do not invent market numbers.
+    entry ──┬─> data_gatherer ──────────┐
+            └─> business_overview ──────┼─> bull / bear / fundamental / relative ─> synthesis
 """
+
+from __future__ import annotations
 
 import json
 import re
@@ -23,26 +20,75 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from .state import ResearchState
-from .tools import gather_live_research_context
+from .tools import (
+    gather_business_overview_context,
+    gather_live_research_context,
+    multi_search,
+)
 
-# The repo's Streamlit app currently runs Sonnet; for the research agents we
-# default to Opus, Anthropic's most capable generally-available tier.
-MODEL = "claude-opus-4-8"
-MAX_TOKENS = 8000
+# ── Model tiering ────────────────────────────────────────────────────────────
+# Opus: highest-stakes reasoning (data foundation + final deliverable).
+# Sonnet: bounded analytical writing over already-clean data.
+OPUS_MODEL = "claude-opus-5"
+SONNET_MODEL = "claude-sonnet-5"
+
+MAX_TOKENS_OPUS = 8000
+MAX_TOKENS_SONNET = 4000
 
 
-def _llm() -> ChatAnthropic:
-    """Build the chat model shared by all agents.
+def _llm(model: str = SONNET_MODEL, max_tokens: Optional[int] = None) -> ChatAnthropic:
+    """Build a chat model. ChatAnthropic reads ANTHROPIC_API_KEY from the env."""
+    if max_tokens is None:
+        max_tokens = MAX_TOKENS_OPUS if model == OPUS_MODEL else MAX_TOKENS_SONNET
+    return ChatAnthropic(model=model, max_tokens=max_tokens)
 
-    ChatAnthropic reads ANTHROPIC_API_KEY from the environment.
-    """
-    return ChatAnthropic(model=MODEL, max_tokens=MAX_TOKENS)
 
-
-def _run(system_prompt: str, user_prompt: str) -> str:
+def _run(
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    model: str = SONNET_MODEL,
+    max_tokens: Optional[int] = None,
+) -> str:
     """One system + user round trip, returning the text response."""
-    response = _llm().invoke(
+    response = _llm(model, max_tokens=max_tokens).invoke(
         [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
+    )
+    return response.content if isinstance(response.content, str) else str(response.content)
+
+
+def _run_with_shared_cache(
+    system_prompt: str,
+    shared_data_block: str,
+    task_instruction: str,
+    *,
+    model: str = SONNET_MODEL,
+    max_tokens: Optional[int] = None,
+) -> str:
+    """Round trip with Anthropic prompt caching on the shared data block.
+
+    bull / bear / fundamental / relative all receive the same statement +
+    overview payload; only the system lens and task instruction differ.
+    Marking the shared block with cache_control makes subsequent calls in
+    the same run hit a cheaper cached read.
+    """
+    response = _llm(model, max_tokens=max_tokens).invoke(
+        [
+            SystemMessage(content=system_prompt),
+            HumanMessage(
+                content=[
+                    {
+                        "type": "text",
+                        "text": shared_data_block,
+                        "cache_control": {"type": "ephemeral"},
+                    },
+                    {
+                        "type": "text",
+                        "text": task_instruction,
+                    },
+                ]
+            ),
+        ]
     )
     return response.content if isinstance(response.content, str) else str(response.content)
 
@@ -50,7 +96,6 @@ def _run(system_prompt: str, user_prompt: str) -> str:
 def _parse_json_blob(raw: str) -> Optional[Dict[str, Any]]:
     """Best-effort extract of a JSON object from model output (may be fenced)."""
     text = raw.strip()
-    # Strip ```json ... ``` fences if present
     fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
     if fence:
         text = fence.group(1).strip()
@@ -58,7 +103,6 @@ def _parse_json_blob(raw: str) -> Optional[Dict[str, Any]]:
         parsed = json.loads(text)
         return parsed if isinstance(parsed, dict) else None
     except (json.JSONDecodeError, TypeError):
-        # Last resort: first {...} block
         brace = re.search(r"\{[\s\S]*\}", text)
         if not brace:
             return None
@@ -69,56 +113,147 @@ def _parse_json_blob(raw: str) -> Optional[Dict[str, Any]]:
             return None
 
 
+def _json_block(label: str, payload: Any) -> str:
+    return f"=== {label} ===\n{json.dumps(payload, indent=2, default=str)}"
+
+
+def _shared_research_payload(state: ResearchState) -> str:
+    """Shared data block for the four parallel analysis agents.
+
+    Intentionally excludes debug/audit fields (_live_*, queries, timestamps)
+    so they are not re-serialized into every downstream prompt.
+    """
+    return "\n\n".join(
+        [
+            f"Target: {state.get('ticker') or state['sector']}",
+            f"Sector: {state['sector']}",
+            f"User request: {state['user_query']}",
+            _json_block("BUSINESS OVERVIEW", state.get("business_overview") or "Not provided."),
+            _json_block("INCOME STATEMENT", state.get("income_statement") or {}),
+            _json_block("BALANCE SHEET", state.get("balance_sheet") or {}),
+            _json_block("CASH FLOW STATEMENT", state.get("cash_flow_statement") or {}),
+            _json_block("SEC FILING SUMMARY", state.get("sec_filing_summary") or "Not provided."),
+            _json_block("MACRO CONTEXT", state.get("macro_context") or "Not provided."),
+        ]
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. Data Gatherer — populates raw_financials, sec_filing_summary, macro_context
+# 0. Business Overview — pure description, parallel with data_gatherer
+# ─────────────────────────────────────────────────────────────────────────────
+
+BUSINESS_OVERVIEW_SYSTEM_PROMPT = """\
+You are a company research analyst writing the descriptive foundation for an
+investment memo. Your only job is to explain what the business *is* — not
+whether it is cheap, expensive, a buy, or a sell.
+
+You will be given LIVE web research focused on the 10-K Item 1 "Business"
+section and related company materials. Ground every claim in those sources.
+If a detail is not in the sources, say so rather than inventing it from
+training memory.
+
+Cover, in clear plain language (no jargon without a one-clause definition):
+1. What the company does
+2. Products and segments, and how they relate to each other
+3. Revenue streams (subscription vs. one-time, product vs. services,
+   recurring vs. project)
+4. Geographic footprint
+5. Competitive position and any durable advantage (or lack of one)
+6. Corporate history — founding, pivots, major M&A
+7. Strategic direction per management's own stated priorities
+
+EXPLICITLY OUT OF SCOPE — do not include:
+- Valuation opinions or multiples
+- Buy / hold / sell language
+- Financial ratios or margin analysis
+- Price targets
+
+Write tight prose suitable to open a professional investment memo
+(roughly 400–800 words). Use short markdown headers sparingly if helpful.
+"""
+
+
+def business_overview_node(state: ResearchState) -> dict:
+    """Produce a pure-descriptive company overview.
+
+    Populates: business_overview.
+    Independent of data_gatherer — runs in parallel from the entry point.
+    """
+    ctx = gather_business_overview_context(
+        ticker=state.get("ticker"),
+        sector=state["sector"],
+        user_query=state["user_query"],
+    )
+    user_prompt = (
+        f"Ticker: {state.get('ticker') or 'N/A'}\n"
+        f"Sector: {state['sector']}\n"
+        f"User request: {state['user_query']}\n"
+        f"Research gathered at (UTC): {ctx['gathered_at_utc']}\n\n"
+        f"=== LIVE WEB RESEARCH (Tavily — Business narrative) ===\n"
+        f"{ctx['web_research']}\n\n"
+        "Using ONLY the research above, write the business overview."
+    )
+    return {
+        "business_overview": _run(
+            BUSINESS_OVERVIEW_SYSTEM_PROMPT,
+            user_prompt,
+            model=SONNET_MODEL,
+        )
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. Data Gatherer — SEC statements + narrative; Opus tier
 # ─────────────────────────────────────────────────────────────────────────────
 
 DATA_GATHERER_SYSTEM_PROMPT = """\
 You are a forensic financial data analyst preparing the quantitative foundation
 for an investment research team.
 
-You will be given LIVE data pulled moments ago from:
-  (1) yfinance — price, multiples, margins, balance-sheet items
-  (2) Tavily web search — recent news, earnings coverage, SEC filing summaries
+You will be given:
+  (1) Parsed SEC EDGAR XBRL company facts — income statement, balance sheet,
+      and cash flow statement for the most recent and prior fiscal year and
+      quarter (each line has value/end/fy/fp/form or value=null with a note).
+  (2) A live market snapshot (price + market cap only — NO pre-baked ratios).
+  (3) Tavily web research for narrative context XBRL cannot provide: earnings
+      call takeaways, analyst commentary, guidance changes, litigation/
+      regulatory items, MD&A themes.
 
-Treat that live data as the source of truth. Do NOT invent numbers that are
-not supported by the provided live data or search snippets. If a metric is
-missing, say so explicitly rather than filling it from memory.
+Treat the SEC statement numbers as the source of truth for financials. Do NOT
+invent numbers unsupported by the provided data. If a line is null, say so.
 
-Your job is to extract and normalize the company's financials — not just report
-headline numbers. Explicitly look for and calculate ADJUSTED metrics:
+Your job:
+- Review and lightly annotate the three statements. You may nest an
+  "adjusted" / "normalized" object under a period when one-time items are
+  clearly identifiable from the narrative (tax hits, impairments, legal
+  settlements, divestiture gains). Show headline vs. adjusted with the
+  reconciling items listed. Never silently overwrite a GAAP line.
+- Compute derived metrics that agents will need (e.g. gross/operating/net
+  margins, YoY revenue growth, FCF if not already present) ONLY when the
+  inputs exist; put them under a "derived" key per period.
+- Summarize SEC filings / narrative into sec_filing_summary (risk factors,
+  MD&A, segment trends, guidance, litigation).
+- Write a short macro_context grounded in the search hits.
 
-- Strip out one-time items before computing valuation ratios. A massive
-  non-recurring tax hit, impairment, legal settlement, or divestiture gain can
-  make headline EPS meaningless — recompute a normalized P/E on earnings with
-  those items removed, and show your work (headline vs. adjusted, with the
-  reconciling items listed).
-- Normalize margins for one-off charges so the trend is comparable
-  quarter-over-quarter and year-over-year.
-- Flag any metric where GAAP and adjusted figures diverge materially, and say
-  why they diverge.
+Return JSON with exactly these keys:
+  "income_statement": the statement dict (pass through structure; enrich with
+    adjusted/derived as needed; include "live_market" key with the price snapshot),
+  "balance_sheet": same pattern,
+  "cash_flow_statement": same pattern,
+  "sec_filing_summary": prose string,
+  "macro_context": prose string.
 
-From the search results covering SEC filings (10-K, 10-Q, 8-K) and news,
-summarize risk factors, management's discussion, segment trends, and any
-disclosures a diligent analyst would not want to miss.
-
-Also extract a short macro backdrop relevant to this name/sector from the
-search hits (rates, inflation, policy, sector cycle).
-
-Return your answer as JSON with three keys:
-  "raw_financials": an object of the metrics you extracted/derived
-    (include both headline and adjusted values where they differ; copy through
-    key live fields such as price, trailing_pe, forward_pe, market_cap,
-    margins, debt, growth rates with an as_of stamp),
-  "sec_filing_summary": a prose summary of the filing / disclosure analysis,
-  "macro_context": a short prose macro/sector backdrop grounded in the search.
+If statements_incomplete is true, still produce the best JSON you can from
+Tavily + live price, set each statement's "incomplete": true, and explain the
+gap in sec_filing_summary. Do not crash into empty silence.
 """
 
 
 def data_gatherer_node(state: ResearchState) -> dict:
-    """Fetch live market + web data, then normalize via the LLM.
+    """Fetch SEC statements + narrative, then normalize via Opus.
 
-    Populates: raw_financials, sec_filing_summary, macro_context.
+    Populates: income_statement, balance_sheet, cash_flow_statement,
+    sec_filing_summary, macro_context.
     """
     live = gather_live_research_context(
         ticker=state.get("ticker"),
@@ -129,172 +264,318 @@ def data_gatherer_node(state: ResearchState) -> dict:
     user_prompt = (
         f"Mode: {state['mode']}\n"
         f"Sector: {state['sector']}\n"
-        f"Ticker: {state.get('ticker') or 'N/A (sector screener)'}\n"
+        f"Ticker: {state.get('ticker') or 'N/A'}\n"
+        f"Entity: {live.get('entity_name') or 'n/a'}\n"
+        f"CIK: {live.get('cik') or 'n/a'}\n"
         f"User request: {state['user_query']}\n"
         f"Live data gathered at (UTC): {live['gathered_at_utc']}\n"
+        f"statements_incomplete: {live['statements_incomplete']}\n"
+        f"statements_error: {live.get('statements_error')}\n"
         f"Search queries run: {json.dumps(live['queries_run'])}\n\n"
-        f"=== LIVE FUNDAMENTALS (yfinance) ===\n"
-        f"{json.dumps(live['fundamentals'], indent=2, default=str)}\n\n"
-        f"=== LIVE WEB RESEARCH (Tavily) ===\n"
-        f"{live['web_research']}\n\n"
-        "Using ONLY the live data above, normalize the financials and produce "
-        "the requested JSON. Cite which search hit or yfinance field supports "
-        "material claims."
+        f"{_json_block('INCOME STATEMENT (SEC XBRL)', live['income_statement'])}\n\n"
+        f"{_json_block('BALANCE SHEET (SEC XBRL)', live['balance_sheet'])}\n\n"
+        f"{_json_block('CASH FLOW STATEMENT (SEC XBRL)', live['cash_flow_statement'])}\n\n"
+        f"{_json_block('LIVE MARKET (price only)', live['live_market'])}\n\n"
+        f"=== NARRATIVE WEB RESEARCH (Tavily) ===\n{live['web_research']}\n\n"
+        "Using ONLY the data above, produce the requested JSON."
     )
-    raw = _run(DATA_GATHERER_SYSTEM_PROMPT, user_prompt)
+    raw = _run(
+        DATA_GATHERER_SYSTEM_PROMPT,
+        user_prompt,
+        model=OPUS_MODEL,
+        max_tokens=MAX_TOKENS_OPUS,
+    )
 
     parsed = _parse_json_blob(raw)
+
+    def _stmt(key: str) -> dict:
+        base = live.get(key) or {}
+        if parsed and isinstance(parsed.get(key), dict):
+            out = parsed[key]
+        else:
+            out = dict(base) if isinstance(base, dict) else {}
+        # Always attach live market under a clean key (not a _debug field).
+        if isinstance(out, dict) and "live_market" not in out:
+            out = {**out, "live_market": live.get("live_market") or {}}
+        if live.get("statements_incomplete") and isinstance(out, dict):
+            out.setdefault("incomplete", True)
+            if live.get("statements_error"):
+                out.setdefault("error", live["statements_error"])
+        return out
+
     if parsed:
-        raw_financials = parsed.get("raw_financials") or {}
-        if not isinstance(raw_financials, dict):
-            raw_financials = {"value": raw_financials}
-        # Always attach the live source payload so downstream agents can audit.
-        raw_financials.setdefault("_live_yfinance", live["fundamentals"])
-        raw_financials.setdefault("_live_queries", live["queries_run"])
-        raw_financials.setdefault("_gathered_at_utc", live["gathered_at_utc"])
         sec_filing_summary = parsed.get("sec_filing_summary") or raw
         macro_context = parsed.get("macro_context") or ""
     else:
-        raw_financials = {
-            "unparsed_output": raw,
-            "_live_yfinance": live["fundamentals"],
-            "_live_queries": live["queries_run"],
-            "_gathered_at_utc": live["gathered_at_utc"],
-        }
         sec_filing_summary = raw
         macro_context = ""
 
-    # If the model skipped macro, fall back to a compact search digest.
     if not macro_context:
         macro_context = (
             f"Live web research digest (gathered {live['gathered_at_utc']} UTC):\n"
-            f"{live['web_research'][:4000]}"
+            f"{(live.get('web_research') or '')[:4000]}"
         )
 
+    # Audit fields stay in process memory only — not written to state prompts.
+    # (Caller can inspect live dict during debugging if needed.)
     return {
-        "raw_financials": raw_financials,
+        "income_statement": _stmt("income_statement"),
+        "balance_sheet": _stmt("balance_sheet"),
+        "cash_flow_statement": _stmt("cash_flow_statement"),
         "sec_filing_summary": sec_filing_summary,
         "macro_context": macro_context,
     }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. Bull Agent — writes the strongest good-faith long case
+# 2. Bull Agent
 # ─────────────────────────────────────────────────────────────────────────────
 
 BULL_SYSTEM_PROMPT = """\
 You are the bull analyst on an investment research team. Using only the LIVE
-data provided (yfinance fundamentals + Tavily web research normalized by the
-data gatherer), write the strongest good-faith case FOR the investment.
+data provided (business overview + SEC financial statements + filing summary
++ macro context), write the strongest good-faith case FOR the investment.
 
 Focus on:
-- Upside risks the market may be underpricing: optionality, new product
-  cycles, pricing power, sector tailwinds.
-- Margin expansion: operating leverage, mix shift toward higher-margin
-  revenue, cost programs that are already showing up in the numbers.
-- Where the adjusted (normalized) figures tell a better story than the
-  headline GAAP numbers, and why the adjustment is legitimate.
+- Upside the market may be underpricing: optionality, product cycles, pricing
+  power, sector tailwinds — grounded in the business overview's segment/
+  geography/competitive-position picture.
+- Margin expansion or operating leverage visible in the income statement
+  (cite specific line items and periods, e.g. "operating margin expanded from
+  X% to Y% on OperatingIncomeLoss / Revenues").
+- Balance-sheet or cash-flow support (liquidity, FCF, buybacks) where relevant.
+- Where adjusted/normalized figures tell a better story than headline GAAP,
+  and why the adjustment is legitimate.
 
-Ground every claim in the data you were given. Do not invent figures or pull
-stale training-data numbers. If the live packet lacks a metric, say so. Be
-persuasive but intellectually honest — your work will be attacked by a bear
-analyst reading the same data.
+Ground every claim in the data you were given. Cite specific statement line
+items by name. Do not invent figures or pull stale training-data numbers.
+If a metric is missing, say so. Be persuasive but intellectually honest —
+your work will be attacked by a bear analyst reading the same data.
 """
 
 
 def bull_agent_node(state: ResearchState) -> dict:
-    """Write the bull thesis from the gathered data.
-
-    Reads: raw_financials, sec_filing_summary, macro_context.
-    Populates: bull_thesis.
-    """
-    user_prompt = (
-        f"Target: {state.get('ticker') or state['sector']}\n"
-        f"User request: {state['user_query']}\n\n"
-        f"Raw financials:\n{json.dumps(state['raw_financials'], indent=2, default=str)}\n\n"
-        f"SEC filing summary:\n{state['sec_filing_summary']}\n\n"
-        f"Macro context:\n{state.get('macro_context') or 'None provided.'}\n\n"
-        "Write the bull thesis."
+    """Write the bull thesis from gathered data. Populates: bull_thesis."""
+    text = _run_with_shared_cache(
+        BULL_SYSTEM_PROMPT,
+        _shared_research_payload(state),
+        "Write the bull thesis. Cite specific statement line items.",
+        model=SONNET_MODEL,
     )
-    return {"bull_thesis": _run(BULL_SYSTEM_PROMPT, user_prompt)}
+    return {"bull_thesis": text}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. Bear Agent (Red Team) — hunts for what could go wrong
+# 3. Bear Agent
 # ─────────────────────────────────────────────────────────────────────────────
 
 BEAR_SYSTEM_PROMPT = """\
 You are the red team: the bear analyst whose job is to find every reason this
-investment could fail. Using only the LIVE data provided (yfinance
-fundamentals + Tavily web research normalized by the data gatherer), write
-the strongest good-faith case AGAINST the investment.
+investment could fail. Using only the LIVE data provided (business overview +
+SEC financial statements + filing summary + macro context), write the
+strongest good-faith case AGAINST the investment.
 
 Hunt specifically for:
-- Accounting red flags: revenue recognition games, widening gaps between
-  GAAP and \"adjusted\" earnings, receivables growing faster than revenue,
-  serial \"one-time\" charges that recur every year.
-- Debt walls: maturities clustered in the next few years, covenant pressure,
-  refinancing risk at today's rates, off-balance-sheet obligations.
-- Downside risks: customer concentration, secular decline masked by cyclical
-  strength, margin peaks being extrapolated, management's incentives.
+- Accounting red flags visible in the statements: revenue recognition stress,
+  receivables growing faster than revenue, serial "one-time" charges, GAAP vs.
+  adjusted gaps.
+- Debt walls and balance-sheet pressure: maturities, leverage, covenant risk,
+  off-balance-sheet obligations if disclosed in the filing summary.
+- Business-model risks from the overview: customer concentration, secular
+  decline, competitive erosion, geography concentration.
+- Cash-flow deterioration (operating CF, FCF, buybacks funded by debt).
 
-Ground every claim in the data you were given. Do not invent figures or pull
-stale training-data numbers. If the live packet lacks a metric, say so. Be
-ruthless but fair — a weak bear case helps no one.
+Ground every claim in the data you were given. Cite specific statement line
+items by name and period. Do not invent figures. If a metric is missing, say
+so. Be ruthless but fair — a weak bear case helps no one.
 """
 
 
 def bear_agent_node(state: ResearchState) -> dict:
-    """Write the bear thesis (red-team attack) from the gathered data.
-
-    Reads: raw_financials, sec_filing_summary, macro_context.
-    Populates: bear_thesis.
-    """
-    user_prompt = (
-        f"Target: {state.get('ticker') or state['sector']}\n"
-        f"User request: {state['user_query']}\n\n"
-        f"Raw financials:\n{json.dumps(state['raw_financials'], indent=2, default=str)}\n\n"
-        f"SEC filing summary:\n{state['sec_filing_summary']}\n\n"
-        f"Macro context:\n{state.get('macro_context') or 'None provided.'}\n\n"
-        "Write the bear thesis."
+    """Write the bear thesis from gathered data. Populates: bear_thesis."""
+    text = _run_with_shared_cache(
+        BEAR_SYSTEM_PROMPT,
+        _shared_research_payload(state),
+        "Write the bear thesis. Cite specific statement line items.",
+        model=SONNET_MODEL,
     )
-    return {"bear_thesis": _run(BEAR_SYSTEM_PROMPT, user_prompt)}
+    return {"bear_thesis": text}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. Synthesis — the senior writer producing the final memo
+# 4. Fundamental Valuation Agent
+# ─────────────────────────────────────────────────────────────────────────────
+
+FUNDAMENTAL_VALUATION_SYSTEM_PROMPT = """\
+You are a fundamental valuation analyst. Using only the LIVE data provided
+(business overview + SEC statements + filing summary + macro context + live
+price if present under statements), estimate intrinsic value.
+
+STEP 1 — classify the business-model archetype BEFORE choosing a method.
+State the archetype and why in ONE sentence, then run the matching method(s):
+
+| Archetype | Signal | Right fundamental method |
+|---|---|---|
+| Bank / lender | Financials sector; BS dominated by loans/deposits; leverage is the model | DDM or excess-return-on-equity (book + PV of (ROE − r_e)×equity). Standard FCF DCF is INVALID — interest is operating. |
+| REIT / real estate | Real estate sector; heavy PP&E; rent revenue | FFO/AFFO-based valuation (not NI); NAV with property-level cap rates. |
+| Asset-heavy industrial / utility / energy | High PP&E/revenue; capital-intensive | DCF with normalized mid-cycle margins; split maintenance vs growth capex; NAV/replacement-cost sanity check. |
+| Insurance | Insurance sector; float/reserves on BS | Embedded value or P/B-vs-ROE excess return (bank-like). |
+| Software / SaaS | High gross margin; low PP&E; subscription | DCF OK but allow negative near-term FCF if growth-stage; rule-of-40; longer high-growth explicit period before fade. |
+| Mature dividend-payer / consumer staple | Low growth; stable payout; low capex | DDM or steady-state FCF DCF; note if they diverge and why. |
+| Cyclical / commodity producer | Margins swing with commodity/macro cycle | Normalize earnings across a full cycle; DCF or EPV off normalized base — do not extrapolate peak/trough. |
+| Pre-profit / early-stage growth | Negative/near-zero NI; high revenue growth | Scenario path-to-profitability DCF with unit economics; avoid false-precision point estimates. |
+
+Then:
+- Build the chosen model from the company's own statement history (FCF, ROE,
+  growth rates, etc.). Show explicit assumptions (discount rate / cost of
+  equity, growth/fade path, projection period).
+- Cross-check with a second simpler method where reasonable (e.g. EPV beside DCF).
+- State a fair-value estimate (or range), confidence level, and the key swing
+  assumption that would most change the estimate.
+- This is INTRINSIC value — independent of what peers currently trade at.
+  Do not invent numbers missing from the packet; mark gaps explicitly.
+"""
+
+
+def fundamental_valuation_node(state: ResearchState) -> dict:
+    """Intrinsic valuation by archetype. Populates: fundamental_valuation."""
+    text = _run_with_shared_cache(
+        FUNDAMENTAL_VALUATION_SYSTEM_PROMPT,
+        _shared_research_payload(state),
+        "Classify the archetype, then produce the fundamental valuation write-up.",
+        model=SONNET_MODEL,
+    )
+    return {"fundamental_valuation": text}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. Relative Valuation Agent
+# ─────────────────────────────────────────────────────────────────────────────
+
+RELATIVE_VALUATION_SYSTEM_PROMPT = """\
+You are a relative valuation analyst. Using the LIVE company data provided
+plus any peer multiples supplied in the user message, assess whether the
+stock is cheap/fair/rich *relative to peers and its own history*.
+
+STEP 1 — classify the business-model archetype BEFORE choosing multiples.
+State the archetype and multiple(s) selected and why in ONE sentence:
+
+| Archetype | Right relative multiple(s) | Why |
+|---|---|---|
+| Bank / lender | P/B vs ROE (or P/TBV), P/E | EV/EBITDA is meaningless — debt is inventory. |
+| REIT / real estate | P/FFO or P/AFFO, not P/E | NI distorted by heavy D&A. |
+| Asset-heavy industrial / utility | EV/EBITDA, EV/Invested Capital | Normalizes capital structure & D&A policy. |
+| Insurance | P/B vs ROE | Book value and ROE matter more than earnings multiples. |
+| Software / SaaS | EV/Revenue or EV/ARR (if unprofitable); EV/EBITDA if mature | P/E useless if reinvestment drives near-zero NI. |
+| Mature dividend-payer / consumer staple | P/E, EV/EBITDA, dividend yield vs peers | Standard multiples work. |
+| Cyclical / commodity producer | EV/EBITDA on mid-cycle / normalized earnings | Trailing P/E distorted at peaks/troughs. |
+| Pre-profit / early-stage growth | EV/Revenue, EV/Gross Profit | No earnings to multiple; growth-adjust where possible. |
+
+Then:
+- Use the subject company's live price / market cap / shares and statement
+  data to compute or infer its current trading multiple(s).
+- Compare to 2–4 named direct competitors that share the SAME archetype.
+  Comping across archetypes (e.g. bank vs software EV/EBITDA) is a hard
+  error — if peer data is mixed, flag it explicitly rather than averaging.
+- Compare to the stock's own historical multiple range if available.
+- Conclude cheap / fair / rich relative to peers and history.
+- Explicitly state this says NOTHING about intrinsic value (that is the
+  fundamental agent's job).
+- Ground claims in provided data; do not invent peer multiples from memory
+  when they are absent — say the data is missing.
+"""
+
+
+def relative_valuation_node(state: ResearchState) -> dict:
+    """Comps / multiples valuation. Populates: relative_valuation.
+
+    May run a focused Tavily peer search — the only analysis node allowed
+    independent search, because peer multiples are not in the gatherer packet.
+    """
+    ticker = state.get("ticker") or ""
+    sector = state["sector"]
+    peer_research = ""
+    if ticker:
+        peer_research = multi_search(
+            [
+                f"{ticker} valuation multiples peers competitors {sector}",
+                f"{ticker} vs peers EV/EBITDA P/E P/B P/S FFO trading multiples",
+            ],
+            max_results=5,
+            topic="finance",
+        )
+
+    shared = _shared_research_payload(state)
+    if peer_research:
+        shared = (
+            shared
+            + "\n\n=== PEER / MULTIPLES WEB RESEARCH (Tavily) ===\n"
+            + peer_research
+        )
+
+    text = _run_with_shared_cache(
+        RELATIVE_VALUATION_SYSTEM_PROMPT,
+        shared,
+        "Classify the archetype, then produce the relative valuation write-up.",
+        model=SONNET_MODEL,
+    )
+    return {"relative_valuation": text}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. Synthesis — Opus tier; final deliverable
 # ─────────────────────────────────────────────────────────────────────────────
 
 SYNTHESIS_SYSTEM_PROMPT = """\
-You are the senior portfolio strategist and lead writer. You have received a
-bull thesis and a bear thesis built from the same underlying data. Your job is
-to synthesize them into a single decision-ready investment memo.
+You are the senior portfolio strategist and lead writer. You have received:
+  (1) a descriptive business overview,
+  (2) a bull thesis,
+  (3) a bear thesis,
+  (4) a fundamental (intrinsic) valuation, and
+  (5) a relative (comps) valuation.
 
-Requirements:
-- Weigh the two theses against each other explicitly: where does the bear
-  case actually land a blow, and where does the bull case survive contact?
-- Do not split the difference reflexively — take a view, and say what
-  evidence would change it.
-- Structure the memo: summary and recommendation up front, then the key
-  debate points, then risks and monitoring triggers.
-- Keep it grounded in the underlying data; strip any claim neither side
-  supported with evidence.
+Your job is a single decision-ready investment memo.
+
+Structure (in this order):
+1. BUSINESS OVERVIEW — open with 2–4 concise paragraphs drawn directly from
+   the business overview agent's output so a reader unfamiliar with the
+   company understands what it does before any argument about the stock.
+2. RECOMMENDATION — take an explicit stance (buy / hold / avoid or equivalent).
+   No hedging that avoids a position. State what evidence would change it.
+3. KEY DEBATE POINTS — weigh bull vs bear against the valuation picture, not
+   just against each other. Where does the bear case land a blow? Where does
+   the bull case survive contact?
+4. VALUATION RECONCILIATION — explicitly reconcile disagreement between
+   fundamental and relative calls (e.g. "DCF says overvalued, but cheap vs
+   peers — which matters more here and why").
+5. RISKS AND MONITORING TRIGGERS — what to watch next.
+
+Rules:
+- Build the stance strictly from the data assembled upstream. No outside
+  numbers from training memory.
+- Do not split the difference reflexively — take a view.
+- Strip any claim none of the upstream agents supported with evidence.
 """
 
 
 def synthesis_node(state: ResearchState) -> dict:
-    """Synthesize the debate into the final memo.
-
-    Reads: bull_thesis, bear_thesis (plus red_team_critique when a dedicated
-    critique node is added to the graph).
-    Populates: final_memo.
-    """
+    """Synthesize overview + debate + valuations into the final memo."""
     user_prompt = (
         f"Target: {state.get('ticker') or state['sector']}\n"
+        f"Sector: {state['sector']}\n"
         f"User request: {state['user_query']}\n\n"
-        f"BULL THESIS:\n{state['bull_thesis']}\n\n"
-        f"BEAR THESIS:\n{state['bear_thesis']}\n\n"
-        f"RED TEAM CRITIQUE:\n{state.get('red_team_critique') or 'None provided.'}\n\n"
-        "Write the final investment memo."
+        f"=== BUSINESS OVERVIEW ===\n{state.get('business_overview') or 'None provided.'}\n\n"
+        f"=== BULL THESIS ===\n{state.get('bull_thesis') or 'None provided.'}\n\n"
+        f"=== BEAR THESIS ===\n{state.get('bear_thesis') or 'None provided.'}\n\n"
+        f"=== FUNDAMENTAL VALUATION ===\n{state.get('fundamental_valuation') or 'None provided.'}\n\n"
+        f"=== RELATIVE VALUATION ===\n{state.get('relative_valuation') or 'None provided.'}\n\n"
+        "Write the final investment memo in the required structure."
     )
-    return {"final_memo": _run(SYNTHESIS_SYSTEM_PROMPT, user_prompt)}
+    return {
+        "final_memo": _run(
+            SYNTHESIS_SYSTEM_PROMPT,
+            user_prompt,
+            model=OPUS_MODEL,
+            max_tokens=MAX_TOKENS_OPUS,
+        )
+    }

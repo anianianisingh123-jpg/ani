@@ -1,18 +1,24 @@
 """Live data tools for the sector research agents.
 
-Two sources of truth for "what's real right now":
+Sources of truth:
 
-  1. Tavily web search  — news, filings coverage, sector developments
-  2. yfinance           — prices, multiples, fundamentals for a ticker
+  1. SEC EDGAR XBRL Company Facts — full financial statements
+  2. yfinance                       — live price / market cap only
+  3. Tavily web search              — narrative context SEC tags can't give
 
 These are plain Python helpers (not LangChain tool objects). Nodes call them
-before prompting the LLM so the model is grounded in fresh external data
-instead of its training cutoff.
+before prompting the LLM so the model is grounded in fresh external data.
 """
 
 from __future__ import annotations
 
+import gzip
+import io
+import json
 import os
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -24,14 +30,70 @@ _REPO_ROOT = os.path.dirname(_PKG_DIR)
 load_dotenv(os.path.join(_PKG_DIR, ".env"))
 load_dotenv(os.path.join(_REPO_ROOT, ".env"))
 
+_CACHE_DIR = os.path.join(_PKG_DIR, ".cache")
+_TICKERS_CACHE = os.path.join(_CACHE_DIR, "company_tickers.json")
+_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
+_COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+
+# Conservative spacing between SEC requests (~5 req/s max; SEC limit is ~10).
+_SEC_MIN_INTERVAL_SEC = 0.25
+_last_sec_request_at = 0.0
+
+
+def _strip_env(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    return value.strip().strip('"').strip("'")
+
 
 def _tavily_key() -> Optional[str]:
-    key = os.environ.get("TAVILY_API_KEY")
-    if not key:
-        return None
-    # Strip accidental quotes from .env lines like KEY="tvly-..."
-    return key.strip().strip('"').strip("'")
+    return _strip_env(os.environ.get("TAVILY_API_KEY"))
 
+
+def _sec_user_agent() -> str:
+    """SEC-compliant User-Agent — required or EDGAR blocks the request.
+
+    Format expected by SEC: application name + contact email, e.g.
+    ``Ani Singh ani-research-tool contact@example.com``.
+    Set ``SEC_EDGAR_USER_AGENT`` in .env — do not leave the default in prod.
+    """
+    ua = _strip_env(os.environ.get("SEC_EDGAR_USER_AGENT"))
+    if ua:
+        return ua
+    return "Ani Singh ani-research-tool contact: ani.research@example.com"
+
+
+def _sec_rate_limit() -> None:
+    global _last_sec_request_at
+    now = time.monotonic()
+    wait = _SEC_MIN_INTERVAL_SEC - (now - _last_sec_request_at)
+    if wait > 0:
+        time.sleep(wait)
+    _last_sec_request_at = time.monotonic()
+
+
+def _http_get_json(url: str, *, headers: Optional[dict] = None, timeout: int = 60) -> Any:
+    """GET JSON with SEC-friendly headers. Raises on HTTP/parse errors."""
+    req_headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Encoding": "gzip, deflate",
+        "User-Agent": _sec_user_agent(),
+    }
+    if headers:
+        req_headers.update(headers)
+    req = urllib.request.Request(url, headers=req_headers, method="GET")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+        encoding = (resp.headers.get("Content-Encoding") or "").lower()
+        if encoding == "gzip" or raw[:2] == b"\x1f\x8b":
+            raw = gzip.GzipFile(fileobj=io.BytesIO(raw)).read()
+        body = raw.decode("utf-8")
+    return json.loads(body)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tavily
+# ─────────────────────────────────────────────────────────────────────────────
 
 def web_search(
     query: str,
@@ -41,19 +103,7 @@ def web_search(
     topic: str = "finance",
     include_answer: bool = True,
 ) -> dict[str, Any]:
-    """Run a Tavily search and return a structured result dict.
-
-    Returns:
-        {
-          "query": str,
-          "answer": str | None,          # Tavily's short synthesized answer
-          "results": [                   # ranked hits
-            {"title", "url", "content", "score", "published_date"},
-            ...
-          ],
-          "error": str | None,
-        }
-    """
+    """Run a Tavily search and return a structured result dict."""
     key = _tavily_key()
     if not key:
         return {
@@ -77,7 +127,7 @@ def web_search(
             topic=topic,
             include_answer=include_answer,
         )
-    except Exception as exc:  # network / auth / package issues
+    except Exception as exc:
         return {
             "query": query,
             "answer": None,
@@ -137,12 +187,461 @@ def multi_search(queries: list[str], **kwargs: Any) -> str:
     return "\n\n".join(blocks)
 
 
-def fetch_ticker_fundamentals(ticker: str) -> dict[str, Any]:
-    """Pull live price + key fundamentals for a ticker via yfinance.
+# ─────────────────────────────────────────────────────────────────────────────
+# SEC EDGAR — CIK lookup + Company Facts
+# ─────────────────────────────────────────────────────────────────────────────
 
-    Failures degrade to an error field rather than raising, so agents can
-    still proceed on web-search context alone.
+def _load_ticker_map(*, force_refresh: bool = False) -> dict[str, str]:
+    """Return {TICKER: zero-padded-10-digit-CIK} from SEC company_tickers.json.
+
+    Caches the raw JSON under mas_sector_system/.cache/ (refreshed if missing
+    or older than 7 days).
     """
+    os.makedirs(_CACHE_DIR, exist_ok=True)
+    refresh = force_refresh or not os.path.exists(_TICKERS_CACHE)
+    if not refresh:
+        age = time.time() - os.path.getmtime(_TICKERS_CACHE)
+        if age > 7 * 24 * 3600:
+            refresh = True
+
+    if refresh:
+        _sec_rate_limit()
+        raw = _http_get_json(_TICKERS_URL)
+        with open(_TICKERS_CACHE, "w", encoding="utf-8") as f:
+            json.dump(raw, f)
+    else:
+        with open(_TICKERS_CACHE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+
+    mapping: dict[str, str] = {}
+    # File shape: {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "..."}, ...}
+    for entry in raw.values() if isinstance(raw, dict) else raw:
+        if not isinstance(entry, dict):
+            continue
+        ticker = (entry.get("ticker") or "").upper().strip()
+        cik_raw = entry.get("cik_str")
+        if not ticker or cik_raw is None:
+            continue
+        mapping[ticker] = str(cik_raw).zfill(10)
+    return mapping
+
+
+def get_cik_for_ticker(ticker: str) -> str:
+    """Look up the 10-digit zero-padded CIK for a ticker.
+
+    Raises ValueError if the ticker is not found in the SEC ticker map.
+    """
+    if not ticker or not str(ticker).strip():
+        raise ValueError("Empty ticker — cannot look up CIK.")
+    symbol = ticker.strip().upper()
+    mapping = _load_ticker_map()
+    cik = mapping.get(symbol)
+    if not cik:
+        # One forced refresh in case the cache is stale for a recent IPO.
+        mapping = _load_ticker_map(force_refresh=True)
+        cik = mapping.get(symbol)
+    if not cik:
+        raise ValueError(f"CIK not found for ticker {symbol!r} in SEC company_tickers.json")
+    return cik
+
+
+def fetch_sec_company_facts(cik: str) -> dict[str, Any]:
+    """Fetch the full XBRL companyfacts JSON for a CIK from SEC EDGAR."""
+    padded = str(cik).zfill(10)
+    url = _COMPANY_FACTS_URL.format(cik=padded)
+    _sec_rate_limit()
+    return _http_get_json(url)
+
+
+# Concept aliases: primary key first, then fallbacks used across filers.
+_INCOME_CONCEPTS: dict[str, list[str]] = {
+    "Revenues": [
+        "Revenues",
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "RevenueFromContractWithCustomerIncludingAssessedTax",
+        "SalesRevenueNet",
+        "SalesRevenueGoodsNet",
+        "TurnoverRevenue",
+    ],
+    "CostOfRevenue": [
+        "CostOfRevenue",
+        "CostOfGoodsAndServicesSold",
+        "CostOfGoodsSold",
+        "CostOfServices",
+    ],
+    "GrossProfit": ["GrossProfit"],
+    "ResearchAndDevelopmentExpense": [
+        "ResearchAndDevelopmentExpense",
+        "ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost",
+    ],
+    "SellingGeneralAndAdministrativeExpense": [
+        "SellingGeneralAndAdministrativeExpense",
+        "SellingAndMarketingExpense",
+        "GeneralAndAdministrativeExpense",
+    ],
+    "OperatingExpenses": [
+        "OperatingExpenses",
+        "CostsAndExpenses",
+    ],
+    "OperatingIncomeLoss": [
+        "OperatingIncomeLoss",
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+    ],
+    "InterestExpense": [
+        "InterestExpense",
+        "InterestExpenseDebt",
+        "InterestAndDebtExpense",
+    ],
+    "IncomeTaxExpenseBenefit": [
+        "IncomeTaxExpenseBenefit",
+        "IncomeTaxExpenseBenefitContinuingOperations",
+    ],
+    "NetIncomeLoss": [
+        "NetIncomeLoss",
+        "ProfitLoss",
+        "NetIncomeLossAvailableToCommonStockholdersBasic",
+    ],
+    "EarningsPerShareBasic": ["EarningsPerShareBasic"],
+    "EarningsPerShareDiluted": ["EarningsPerShareDiluted"],
+    "WeightedAverageNumberOfSharesOutstandingBasic": [
+        "WeightedAverageNumberOfSharesOutstandingBasic",
+        "WeightedAverageNumberOfShareOutstandingBasicAndDiluted",
+    ],
+    "WeightedAverageNumberOfDilutedSharesOutstanding": [
+        "WeightedAverageNumberOfDilutedSharesOutstanding",
+        "WeightedAverageNumberOfDilutedSharesOutstanding",
+    ],
+}
+
+_BALANCE_CONCEPTS: dict[str, list[str]] = {
+    "CashAndCashEquivalents": [
+        "CashAndCashEquivalentsAtCarryingValue",
+        "CashCashEquivalentsAndShortTermInvestments",
+        "Cash",
+    ],
+    "ShortTermInvestments": [
+        "ShortTermInvestments",
+        "MarketableSecuritiesCurrent",
+        "AvailableForSaleSecuritiesCurrent",
+    ],
+    "AccountsReceivable": [
+        "AccountsReceivableNetCurrent",
+        "AccountsReceivableNet",
+        "ReceivablesNetCurrent",
+    ],
+    "Inventory": [
+        "InventoryNet",
+        "InventoryFinishedGoodsNetOfReserves",
+    ],
+    "TotalCurrentAssets": ["AssetsCurrent"],
+    "PropertyPlantAndEquipment": [
+        "PropertyPlantAndEquipmentNet",
+        "PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetAfterAccumulatedDepreciationAndAmortization",
+    ],
+    "Goodwill": ["Goodwill"],
+    "IntangibleAssets": [
+        "IntangibleAssetsNetExcludingGoodwill",
+        "FiniteLivedIntangibleAssetsNet",
+    ],
+    "TotalAssets": ["Assets"],
+    "AccountsPayable": [
+        "AccountsPayableCurrent",
+        "AccountsPayableAndAccruedLiabilitiesCurrent",
+    ],
+    "ShortTermDebt": [
+        "ShortTermBorrowings",
+        "LongTermDebtCurrent",
+        "DebtCurrent",
+        "CommercialPaper",
+    ],
+    "TotalCurrentLiabilities": ["LiabilitiesCurrent"],
+    "LongTermDebt": [
+        "LongTermDebtNoncurrent",
+        "LongTermDebt",
+        "LongTermDebtAndCapitalLeaseObligations",
+    ],
+    "TotalLiabilities": [
+        "Liabilities",
+        "LiabilitiesAndStockholdersEquity",
+    ],
+    "StockholdersEquity": [
+        "StockholdersEquity",
+        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+        "PartnersCapital",
+    ],
+    "SharesOutstanding": [
+        "CommonStockSharesOutstanding",
+        "EntityCommonStockSharesOutstanding",
+        "WeightedAverageNumberOfSharesOutstandingBasic",
+    ],
+}
+
+_CASHFLOW_CONCEPTS: dict[str, list[str]] = {
+    "NetCashFromOperatingActivities": [
+        "NetCashProvidedByUsedInOperatingActivities",
+        "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
+    ],
+    "CapitalExpenditures": [
+        "PaymentsToAcquirePropertyPlantAndEquipment",
+        "PaymentsToAcquireProductiveAssets",
+        "CapitalExpendituresIncurredButNotYetPaid",
+    ],
+    "NetCashFromInvestingActivities": [
+        "NetCashProvidedByUsedInInvestingActivities",
+        "NetCashProvidedByUsedInInvestingActivitiesContinuingOperations",
+    ],
+    "DividendsPaid": [
+        "PaymentsOfDividends",
+        "PaymentsOfDividendsCommonStock",
+        "PaymentsOfOrdinaryDividends",
+    ],
+    "StockRepurchases": [
+        "PaymentsForRepurchaseOfCommonStock",
+        "PaymentsForRepurchaseOfEquity",
+    ],
+    "DebtIssuance": [
+        "ProceedsFromIssuanceOfLongTermDebt",
+        "ProceedsFromDebtNetOfIssuanceCosts",
+        "ProceedsFromIssuanceOfDebt",
+    ],
+    "DebtRepayment": [
+        "RepaymentsOfLongTermDebt",
+        "RepaymentsOfDebt",
+        "RepaymentsOfLongTermDebtAndCapitalSecurities",
+    ],
+    "NetCashFromFinancingActivities": [
+        "NetCashProvidedByUsedInFinancingActivities",
+        "NetCashProvidedByUsedInFinancingActivitiesContinuingOperations",
+    ],
+}
+
+
+def _usd_facts_for_concept(facts: dict, concept_names: list[str]) -> list[dict]:
+    """Return USD (or unit) observations merged across concept aliases.
+
+    Filers often migrate tags over time (e.g. ``Revenues`` →
+    ``RevenueFromContractWithCustomerExcludingAssessedTax``). Taking only the
+    first matching alias can lock onto a stale series, so we merge all
+    aliases and let period selection pick the most recent end date.
+    """
+    us_gaap = (facts.get("facts") or {}).get("us-gaap") or {}
+    # Also check dei for entity-level share counts occasionally parked there.
+    dei = (facts.get("facts") or {}).get("dei") or {}
+    merged: list[dict] = []
+    unit_preference = ("USD", "USD/shares", "shares", "pure")
+
+    for name in concept_names:
+        node = us_gaap.get(name) or dei.get(name)
+        if not node:
+            continue
+        units = node.get("units") or {}
+        for unit_key in unit_preference:
+            series = units.get(unit_key)
+            if series:
+                for obs in series:
+                    # Tag source concept so debugging is possible without noise.
+                    item = dict(obs)
+                    item.setdefault("_concept", name)
+                    item.setdefault("_unit", unit_key)
+                    merged.append(item)
+                break  # one unit family per concept name
+    return merged
+
+
+def _pick_period(
+    series: list[dict],
+    *,
+    annual: bool,
+    rank: int = 0,
+) -> Optional[dict]:
+    """Pick the Nth most recent annual (FY 10-K) or quarterly (10-Q) point.
+
+    rank=0 → most recent, rank=1 → prior period of same type.
+    """
+    if not series:
+        return None
+
+    filtered: list[dict] = []
+    for obs in series:
+        form = (obs.get("form") or "").upper()
+        fp = (obs.get("fp") or "").upper()
+        if annual:
+            # Prefer 10-K / FY frames; also accept fp == FY without form.
+            if form in ("10-K", "10-K/A") or fp == "FY":
+                filtered.append(obs)
+        else:
+            # Quarters: 10-Q or fp in Q1–Q3 (Q4 often rolled into 10-K).
+            if form in ("10-Q", "10-Q/A") or fp in ("Q1", "Q2", "Q3", "Q4"):
+                # Skip full-year frames that sometimes appear under Q tags.
+                if fp == "FY":
+                    continue
+                filtered.append(obs)
+
+    if not filtered:
+        return None
+
+    # Sort by end date descending; break ties with filed date.
+    def _key(o: dict) -> tuple:
+        return (o.get("end") or "", o.get("filed") or "", o.get("fy") or 0)
+
+    filtered.sort(key=_key, reverse=True)
+
+    # Deduplicate by (end, fp) keeping first (most recently filed).
+    seen: set[tuple] = set()
+    unique: list[dict] = []
+    for o in filtered:
+        sig = (o.get("end"), o.get("fp"), o.get("fy"))
+        if sig in seen:
+            continue
+        seen.add(sig)
+        unique.append(o)
+
+    if rank >= len(unique):
+        return None
+    return unique[rank]
+
+
+def _null_line(note: str) -> dict[str, Any]:
+    return {"value": None, "note": note}
+
+
+def _extract_line(
+    facts: dict,
+    concept_aliases: list[str],
+    *,
+    annual: bool,
+    rank: int,
+) -> dict[str, Any]:
+    series = _usd_facts_for_concept(facts, concept_aliases)
+    if not series:
+        return _null_line(f"concept not tagged (tried: {', '.join(concept_aliases[:3])}…)")
+
+    obs = _pick_period(series, annual=annual, rank=rank)
+    if not obs:
+        kind = "annual" if annual else "quarterly"
+        which = "current" if rank == 0 else "prior"
+        return _null_line(f"no {which} {kind} observation found")
+
+    return {
+        "value": obs.get("val"),
+        "end": obs.get("end"),
+        "fy": obs.get("fy"),
+        "fp": obs.get("fp"),
+        "form": obs.get("form"),
+        "filed": obs.get("filed"),
+        "frame": obs.get("frame"),
+        "note": None,
+    }
+
+
+def _extract_statement_block(
+    facts: dict,
+    concept_map: dict[str, list[str]],
+) -> dict[str, Any]:
+    """Build current/prior annual + quarterly dicts for a statement family."""
+    block: dict[str, Any] = {
+        "current_annual": {},
+        "prior_annual": {},
+        "current_quarter": {},
+        "prior_quarter": {},
+    }
+    for label, aliases in concept_map.items():
+        block["current_annual"][label] = _extract_line(
+            facts, aliases, annual=True, rank=0
+        )
+        block["prior_annual"][label] = _extract_line(
+            facts, aliases, annual=True, rank=1
+        )
+        block["current_quarter"][label] = _extract_line(
+            facts, aliases, annual=False, rank=0
+        )
+        block["prior_quarter"][label] = _extract_line(
+            facts, aliases, annual=False, rank=1
+        )
+    return block
+
+
+def _compute_fcf(cash_flow: dict[str, Any]) -> None:
+    """Add FreeCashFlow = Operating CF − CapEx for each period sub-block."""
+    for period_key in (
+        "current_annual",
+        "prior_annual",
+        "current_quarter",
+        "prior_quarter",
+    ):
+        period = cash_flow.get(period_key) or {}
+        ocf = (period.get("NetCashFromOperatingActivities") or {}).get("value")
+        capex = (period.get("CapitalExpenditures") or {}).get("value")
+        if ocf is None or capex is None:
+            period["FreeCashFlow"] = _null_line(
+                "cannot compute FCF — missing Operating CF and/or CapEx"
+            )
+        else:
+            # CapEx is usually reported as a positive payment; FCF = OCF − |CapEx|
+            period["FreeCashFlow"] = {
+                "value": float(ocf) - abs(float(capex)),
+                "end": (period.get("NetCashFromOperatingActivities") or {}).get("end"),
+                "fy": (period.get("NetCashFromOperatingActivities") or {}).get("fy"),
+                "fp": (period.get("NetCashFromOperatingActivities") or {}).get("fp"),
+                "form": (period.get("NetCashFromOperatingActivities") or {}).get("form"),
+                "filed": (period.get("NetCashFromOperatingActivities") or {}).get("filed"),
+                "note": "computed as NetCashFromOperatingActivities − |CapitalExpenditures|",
+            }
+        cash_flow[period_key] = period
+
+
+def extract_statements_from_company_facts(facts: dict) -> dict[str, Any]:
+    """Parse raw companyfacts JSON into income / balance / cash-flow dicts.
+
+    Missing concepts are explicitly null with a note — never silently omitted.
+    """
+    entity = facts.get("entityName")
+    cik = facts.get("cik")
+
+    income = _extract_statement_block(facts, _INCOME_CONCEPTS)
+    # Friendly aliases the agents expect
+    for period_key in list(income.keys()):
+        p = income[period_key]
+        if "IncomeTaxExpenseBenefit" in p and "IncomeTaxExpense" not in p:
+            p["IncomeTaxExpense"] = p["IncomeTaxExpenseBenefit"]
+        if "EarningsPerShareBasic" in p:
+            p["EPS_Basic"] = p["EarningsPerShareBasic"]
+        if "EarningsPerShareDiluted" in p:
+            p["EPS_Diluted"] = p["EarningsPerShareDiluted"]
+        if "WeightedAverageNumberOfSharesOutstandingBasic" in p:
+            p["WeightedAverageSharesBasic"] = p[
+                "WeightedAverageNumberOfSharesOutstandingBasic"
+            ]
+        if "WeightedAverageNumberOfDilutedSharesOutstanding" in p:
+            p["WeightedAverageSharesDiluted"] = p[
+                "WeightedAverageNumberOfDilutedSharesOutstanding"
+            ]
+        if "ResearchAndDevelopmentExpense" in p:
+            p["RD_Expense"] = p["ResearchAndDevelopmentExpense"]
+        if "SellingGeneralAndAdministrativeExpense" in p:
+            p["SGA_Expense"] = p["SellingGeneralAndAdministrativeExpense"]
+
+    balance = _extract_statement_block(facts, _BALANCE_CONCEPTS)
+    cash_flow = _extract_statement_block(facts, _CASHFLOW_CONCEPTS)
+    _compute_fcf(cash_flow)
+
+    return {
+        "entity_name": entity,
+        "cik": str(cik).zfill(10) if cik is not None else None,
+        "income_statement": income,
+        "balance_sheet": balance,
+        "cash_flow_statement": cash_flow,
+        "incomplete": False,
+        "error": None,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Live market (price only — no pre-baked ratios)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def fetch_live_market_snapshot(ticker: str) -> dict[str, Any]:
+    """Pull live price + market cap via yfinance. No derived valuation ratios."""
     if not ticker:
         return {"error": "No ticker provided."}
 
@@ -152,68 +651,33 @@ def fetch_ticker_fundamentals(ticker: str) -> dict[str, Any]:
 
         t = yf.Ticker(symbol)
         info = t.info or {}
-        # Fast path for price if .info is sparse
         price = info.get("currentPrice") or info.get("regularMarketPrice")
         if price is None:
             hist = t.history(period="5d")
             if hist is not None and not hist.empty:
                 price = float(hist["Close"].iloc[-1])
 
-        def _g(*keys, default=None):
-            for k in keys:
-                v = info.get(k)
-                if v is not None:
-                    return v
-            return default
-
         return {
             "ticker": symbol,
             "as_of_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "name": _g("longName", "shortName"),
-            "sector": _g("sector"),
-            "industry": _g("industry"),
-            "currency": _g("currency"),
+            "name": info.get("longName") or info.get("shortName"),
+            "sector": info.get("sector"),
+            "industry": info.get("industry"),
+            "currency": info.get("currency"),
             "price": price,
-            "market_cap": _g("marketCap"),
-            "enterprise_value": _g("enterpriseValue"),
-            "trailing_pe": _g("trailingPE"),
-            "forward_pe": _g("forwardPE"),
-            "peg_ratio": _g("pegRatio"),
-            "price_to_book": _g("priceToBook"),
-            "price_to_sales": _g("priceToSalesTrailing12Months"),
-            "ev_to_ebitda": _g("enterpriseToEbitda"),
-            "profit_margin": _g("profitMargins"),
-            "operating_margin": _g("operatingMargins"),
-            "gross_margin": _g("grossMargins"),
-            "revenue_ttm": _g("totalRevenue"),
-            "ebitda": _g("ebitda"),
-            "net_income_ttm": _g("netIncomeToCommon"),
-            "eps_ttm": _g("trailingEps"),
-            "eps_forward": _g("forwardEps"),
-            "free_cash_flow": _g("freeCashflow"),
-            "operating_cash_flow": _g("operatingCashflow"),
-            "total_cash": _g("totalCash"),
-            "total_debt": _g("totalDebt"),
-            "debt_to_equity": _g("debtToEquity"),
-            "current_ratio": _g("currentRatio"),
-            "return_on_equity": _g("returnOnEquity"),
-            "return_on_assets": _g("returnOnAssets"),
-            "revenue_growth": _g("revenueGrowth"),
-            "earnings_growth": _g("earningsGrowth"),
-            "dividend_yield": _g("dividendYield"),
-            "52w_high": _g("fiftyTwoWeekHigh"),
-            "52w_low": _g("fiftyTwoWeekLow"),
-            "beta": _g("beta"),
-            "shares_outstanding": _g("sharesOutstanding"),
-            "float_shares": _g("floatShares"),
-            "short_ratio": _g("shortRatio"),
-            "target_mean_price": _g("targetMeanPrice"),
-            "recommendation": _g("recommendationKey"),
+            "market_cap": info.get("marketCap"),
+            "shares_outstanding": info.get("sharesOutstanding"),
+            "fifty_two_week_high": info.get("fiftyTwoWeekHigh"),
+            "fifty_two_week_low": info.get("fiftyTwoWeekLow"),
             "error": None,
         }
     except Exception as exc:
         return {"ticker": symbol, "error": f"yfinance fetch failed: {exc}"}
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Orchestrated gather for data_gatherer_node
+# ─────────────────────────────────────────────────────────────────────────────
 
 def gather_live_research_context(
     *,
@@ -221,39 +685,106 @@ def gather_live_research_context(
     sector: str,
     user_query: str,
 ) -> dict[str, Any]:
-    """Bundle live market data + web research for the data-gatherer node.
+    """Bundle SEC statements + live price + narrative Tavily research.
 
-    Returns a dict with:
-      - fundamentals: yfinance payload (or empty if no ticker)
-      - web_research: formatted multi-search text
-      - queries_run: list of search queries used
+    Returns:
+      - income_statement / balance_sheet / cash_flow_statement
+      - live_market (price/mcap only)
+      - web_research (formatted multi-search text)
+      - queries_run, gathered_at_utc, statements_incomplete, statements_error
     """
+    empty_stmt: dict[str, Any] = {
+        "current_annual": {},
+        "prior_annual": {},
+        "current_quarter": {},
+        "prior_quarter": {},
+    }
+
+    income_statement = dict(empty_stmt)
+    balance_sheet = dict(empty_stmt)
+    cash_flow_statement = dict(empty_stmt)
+    statements_incomplete = True
+    statements_error: Optional[str] = None
+    entity_name = None
+    cik = None
+
+    live_market: dict[str, Any] = {"error": "No ticker provided."}
+    if ticker:
+        live_market = fetch_live_market_snapshot(ticker)
+        try:
+            cik = get_cik_for_ticker(ticker)
+            facts = fetch_sec_company_facts(cik)
+            parsed = extract_statements_from_company_facts(facts)
+            income_statement = parsed["income_statement"]
+            balance_sheet = parsed["balance_sheet"]
+            cash_flow_statement = parsed["cash_flow_statement"]
+            entity_name = parsed.get("entity_name")
+            statements_incomplete = False
+            statements_error = None
+        except urllib.error.HTTPError as exc:
+            statements_error = f"SEC EDGAR HTTP error: {exc.code} {exc.reason}"
+            statements_incomplete = True
+        except Exception as exc:
+            statements_error = f"SEC statement pipeline failed: {exc}"
+            statements_incomplete = True
+
+    # Narrative only — things XBRL tags cannot provide.
     queries: list[str] = []
     if ticker:
         t = ticker.strip().upper()
         queries.extend(
             [
-                f"{t} stock latest earnings financial results valuation",
-                f"{t} 10-K 10-Q SEC filing risk factors latest",
-                f"{t} news analyst outlook risks {sector}",
+                f"{t} latest earnings call takeaways guidance changes",
+                f"{t} analyst commentary outlook risks litigation regulatory",
+                f"{t} management discussion MD&A themes strategy {sector}",
             ]
         )
     queries.extend(
         [
-            f"{sector} sector outlook valuation trends latest",
-            f"{sector} macroeconomic rates inflation impact {user_query}",
+            f"{sector} sector macro rates inflation policy impact {user_query}",
         ]
     )
-    # Cap to avoid burning Tavily quota on every run
     queries = queries[:5]
-
-    fundamentals = (
-        fetch_ticker_fundamentals(ticker) if ticker else {"error": "No ticker (screener path)."}
-    )
     web_research = multi_search(queries, max_results=5, topic="finance")
 
     return {
-        "fundamentals": fundamentals,
+        "entity_name": entity_name,
+        "cik": cik,
+        "income_statement": income_statement,
+        "balance_sheet": balance_sheet,
+        "cash_flow_statement": cash_flow_statement,
+        "live_market": live_market,
+        "web_research": web_research,
+        "queries_run": queries,
+        "statements_incomplete": statements_incomplete,
+        "statements_error": statements_error,
+        "gathered_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+
+
+def gather_business_overview_context(
+    *,
+    ticker: Optional[str],
+    sector: str,
+    user_query: str,
+) -> dict[str, Any]:
+    """Tavily research focused on 10-K Item 1 Business narrative."""
+    if ticker:
+        t = ticker.strip().upper()
+        queries = [
+            f"{t} 10-K Item 1 Business description products segments",
+            f"{t} company overview revenue streams geographic footprint",
+            f"{t} competitive position history M&A strategy management priorities",
+            f"{t} {sector} business model how it makes money",
+        ]
+    else:
+        queries = [
+            f"{sector} leading companies business models overview",
+            f"{sector} {user_query}",
+        ]
+    queries = queries[:4]
+    web_research = multi_search(queries, max_results=6, topic="finance")
+    return {
         "web_research": web_research,
         "queries_run": queries,
         "gathered_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),

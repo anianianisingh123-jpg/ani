@@ -4,8 +4,14 @@ Wires the agent nodes from agents.py into a LangGraph StateGraph over
 ResearchState. Two pipelines share one graph, selected by the `mode`
 input at the entry point:
 
-    entry ──(mode == 'screener')──> screener ────────────────────────> END
-      └───(mode == 'deep_dive')──> data_gatherer ─> bull ─> bear ─> synthesis ─> END
+    entry ──(mode == 'screener')──> screener ──────────────────────────────> END
+
+    entry ──(mode == 'deep_dive')──> deep_dive_start
+              ├─> data_gatherer ──────────┐
+              └─> business_overview ──────┼─> bull_agent ──────────────────┐
+                                          ├─> bear_agent ──────────────────┤
+                                          ├─> fundamental_valuation ───────┼─> synthesis ─> END
+                                          └─> relative_valuation ──────────┘
 
 Usage:
     from mas_sector_system.main import app
@@ -14,9 +20,16 @@ Usage:
         "sector": "Semiconductors",
         "mode": "deep_dive",
         "user_query": "Is NVDA still a buy after the run-up?",
-        # remaining fields start empty and are filled by the nodes
-        "raw_financials": {}, "sec_filing_summary": "", "macro_context": "",
-        "bull_thesis": "", "bear_thesis": "", "red_team_critique": "",
+        "business_overview": "",
+        "income_statement": {},
+        "balance_sheet": {},
+        "cash_flow_statement": {},
+        "sec_filing_summary": "",
+        "macro_context": "",
+        "bull_thesis": "",
+        "bear_thesis": "",
+        "fundamental_valuation": "",
+        "relative_valuation": "",
         "final_memo": "",
     })
     print(result["final_memo"])
@@ -28,18 +41,17 @@ from .agents import (
     _run,
     bear_agent_node,
     bull_agent_node,
+    business_overview_node,
     data_gatherer_node,
+    fundamental_valuation_node,
+    relative_valuation_node,
     synthesis_node,
 )
 from .state import ResearchState
 from .tools import multi_search
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Screener node
-#
-# The screener path surveys the whole sector instead of dissecting a single
-# name, so it skips the adversarial debate entirely. It first pulls live
-# Tavily research on the sector, then ranks candidates from that evidence.
+# Screener node (unchanged pipeline — deep_dive rework only)
 # ─────────────────────────────────────────────────────────────────────────────
 
 SCREENER_SYSTEM_PROMPT = """\
@@ -83,7 +95,17 @@ def screener_node(state: ResearchState) -> dict:
         f"=== LIVE WEB RESEARCH (Tavily) ===\n{web}\n\n"
         "Using the live research above, run the screen and produce the ranked shortlist."
     )
+    # Screener stays on Sonnet (default) — lower individual stakes than deep-dive.
     return {"final_memo": _run(SCREENER_SYSTEM_PROMPT, user_prompt)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Deep-dive fan-out entry (passthrough so entry can branch to two nodes)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def deep_dive_start_node(state: ResearchState) -> dict:
+    """No-op entry for deep_dive so the graph can fan out in parallel."""
+    return {}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -91,12 +113,7 @@ def screener_node(state: ResearchState) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def route_by_mode(state: ResearchState) -> str:
-    """Entry-point router: pick the pipeline based on the `mode` input.
-
-    Returns the key LangGraph uses to look up the target node in the
-    conditional-entry mapping below. Raising on an unknown mode keeps a bad
-    input from silently running the wrong (and expensive) pipeline.
-    """
+    """Entry-point router: pick the pipeline based on the `mode` input."""
     mode = state["mode"]
     if mode == "screener":
         return "screener"
@@ -113,31 +130,45 @@ def build_graph():
     """Assemble and compile the research graph."""
     workflow = StateGraph(ResearchState)
 
-    # Register every node the router can reach.
+    # Register every node the router / edges can reach.
     workflow.add_node("screener", screener_node)
+    workflow.add_node("deep_dive_start", deep_dive_start_node)
     workflow.add_node("data_gatherer", data_gatherer_node)
+    workflow.add_node("business_overview", business_overview_node)
     workflow.add_node("bull_agent", bull_agent_node)
     workflow.add_node("bear_agent", bear_agent_node)
+    workflow.add_node("fundamental_valuation", fundamental_valuation_node)
+    workflow.add_node("relative_valuation", relative_valuation_node)
     workflow.add_node("synthesis", synthesis_node)
 
-    # Conditional entry point: the graph starts by calling route_by_mode on
-    # the initial state, then jumps to whichever node its return value maps to.
+    # Conditional entry: screener path vs deep-dive fan-out start.
     workflow.set_conditional_entry_point(
         route_by_mode,
         {
-            "screener": "screener",        # broad sweep, no debate
-            "deep_dive": "data_gatherer",  # full adversarial pipeline
+            "screener": "screener",
+            "deep_dive": "deep_dive_start",
         },
     )
 
-    # Deep-dive assembly line: gather data, argue both sides, then have the
-    # senior writer synthesize the debate into the final memo.
-    workflow.add_edge("data_gatherer", "bull_agent")
-    workflow.add_edge("bull_agent", "bear_agent")
-    workflow.add_edge("bear_agent", "synthesis")
-    workflow.add_edge("synthesis", END)
+    # Parallel foundation: statements + business narrative (independent).
+    workflow.add_edge("deep_dive_start", "data_gatherer")
+    workflow.add_edge("deep_dive_start", "business_overview")
 
-    # The screener report is terminal — no debate stage on this path.
+    # Fan-out: both foundation nodes feed all four analysis branches.
+    # LangGraph joins on multi-parent nodes — each analysis waits for both.
+    analysis_nodes = (
+        "bull_agent",
+        "bear_agent",
+        "fundamental_valuation",
+        "relative_valuation",
+    )
+    for node in analysis_nodes:
+        workflow.add_edge("data_gatherer", node)
+        workflow.add_edge("business_overview", node)
+        # Fan-in: synthesis waits for all four analysis branches.
+        workflow.add_edge(node, "synthesis")
+
+    workflow.add_edge("synthesis", END)
     workflow.add_edge("screener", END)
 
     return workflow.compile()
