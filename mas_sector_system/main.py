@@ -14,8 +14,8 @@ input at the entry point:
                                           └─> relative_valuation ──────────┘
                                                 → style_pass → docx_export → END
 
-Usage:
-    from mas_sector_system.main import app, run_deep_dive
+Usage (library):
+    from mas_sector_system.main import app, run_deep_dive, run_screener
     result = run_deep_dive(
         ticker="NVDA",
         sector="Semiconductors",
@@ -23,10 +23,21 @@ Usage:
     )
     print(result["styled_memo"])
     # result["final_memo"] is the unstyled audit copy
+
+Usage (CLI — only the three inputs; worker fields default empty):
+    python -m mas_sector_system.main \\
+        --ticker NVDA --sector Semiconductors \\
+        --query "Is NVDA still a buy after the run-up?"
+    python -m mas_sector_system.main \\
+        --mode screener --sector Financials \\
+        --query "Rank high-conviction bank names"
+    python -m mas_sector_system.main --print-graph
 """
 
 from __future__ import annotations
 
+import argparse
+import sys
 from typing import Any, Optional
 
 from langgraph.graph import END, StateGraph
@@ -217,6 +228,9 @@ def run_deep_dive(
 ) -> dict[str, Any]:
     """Convenience entry: run deep_dive, style pass, and docx export.
 
+    Only ticker / sector / user_query are required; every worker and output
+    field is initialized to its empty default via empty_state().
+
     Returns the full result state. Prints the saved .docx path (via the
     export node). final_memo is unstyled audit copy; styled_memo is the
     reader-facing memo that was exported.
@@ -231,6 +245,98 @@ def run_deep_dive(
     )
 
 
+def run_screener(
+    *,
+    sector: str,
+    user_query: str,
+    ticker: Optional[str] = None,
+) -> dict[str, Any]:
+    """Convenience entry: run the sector screener pipeline.
+
+    Only sector / user_query are required (ticker is optional and usually
+    omitted). Worker fields are filled with empty defaults automatically.
+    """
+    return app.invoke(
+        empty_state(
+            ticker=ticker,
+            sector=sector,
+            mode="screener",
+            user_query=user_query,
+        )
+    )
+
+
+def _build_cli_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python -m mas_sector_system.main",
+        description=(
+            "Run the multi-agent research graph. Pass only ticker, sector, "
+            "and query — all other ResearchState fields default to empty."
+        ),
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("deep_dive", "screener"),
+        default="deep_dive",
+        help="Pipeline to run (default: deep_dive).",
+    )
+    parser.add_argument(
+        "--ticker",
+        default=None,
+        help="Ticker symbol (required for deep_dive; optional for screener).",
+    )
+    parser.add_argument(
+        "--sector",
+        default=None,
+        help="Market sector (e.g. Semiconductors, Financials).",
+    )
+    parser.add_argument(
+        "--query",
+        dest="user_query",
+        default=None,
+        help="Natural-language research request.",
+    )
+    parser.add_argument(
+        "--print-graph",
+        action="store_true",
+        help="Print the LangGraph Mermaid topology and exit (no LLM calls).",
+    )
+    return parser
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    """CLI entry point. Returns a process exit code."""
+    parser = _build_cli_parser()
+    args = parser.parse_args(argv)
+
+    if args.print_graph:
+        print(app.get_graph().draw_mermaid())
+        return 0
+
+    if not args.sector or not args.user_query:
+        parser.error("--sector and --query are required (unless --print-graph).")
+
+    if args.mode == "deep_dive":
+        if not args.ticker:
+            parser.error("--ticker is required when --mode deep_dive.")
+        result = run_deep_dive(
+            ticker=args.ticker,
+            sector=args.sector,
+            user_query=args.user_query,
+        )
+        # Prefer the reader-facing styled memo; fall back to raw synthesis.
+        output = result.get("styled_memo") or result.get("final_memo") or ""
+    else:
+        result = run_screener(
+            sector=args.sector,
+            user_query=args.user_query,
+            ticker=args.ticker,
+        )
+        output = result.get("final_memo") or ""
+
+    print(output)
+    return 0
+
+
 if __name__ == "__main__":
-    # Smoke test: print the graph topology without calling any LLM.
-    print(app.get_graph().draw_mermaid())
+    sys.exit(main())
