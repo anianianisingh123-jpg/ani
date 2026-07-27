@@ -19,21 +19,31 @@ The `mas_sector_system` is a highly structured, multi-agent equity research desk
    - Pulls directly from SEC EDGAR (XBRL facts) and Tavily.
    - Core valuations (DCF, WACC defaults, peer comps) are computed deterministically in Python. The LLMs are strictly instructed to narrate the math, not invent it.
 
-## Findings & Blueprint for "Top Tier Digital AI Twin"
-To scale this from a static CLI tool to an autonomous digital twin, we need to bridge the gap between batch processing and persistent intelligence.
+## Findings & Blueprint for "Top Tier Equity Research Desk"
+Per recent directives, we are focusing on hardening and elevating the current workflow into a top-tier system without introducing new agents or graph nodes right now. The immediate priorities are:
 
-1. **Persistent Event Triggers**: The system currently requires manual CLI invocation. **Goal:** Build a persistent watcher (daemon/agent) that monitors live news feeds or SEC RSS for earnings drops and automatically kicks off a `deep_dive` without human intervention.
-2. **Long-Term Memory & Thesis Tracking**: The `ResearchState` is entirely ephemeral per run. **Goal:** Integrate a database (vector or relational) so the twin can read its *last* memo on a ticker, compare new earnings against past expectations, and track how its conviction has shifted.
-3. **Advanced Portfolio Agent**: Currently, the system stops at the memo. **Goal:** Add a new LangGraph node (`portfolio_allocation_node`) after synthesis that takes the valuation spread and macro regime to recommend actual position sizing and portfolio weighting.
-4. **Deeper Live Data**: yfinance and Tavily are good, but a true top-tier desk needs options flow, insider trading alerts, and real-time pricing data integrated directly into the `canonical_metrics` or a new `live_market_node`.
+### 1. Long-Term Memory & Thesis Tracking (High Priority)
+- **Current State:** The `ResearchState` is entirely ephemeral per run. The system treats every deep dive as a blank slate.
+- **Goal:** Enable the desk to remember its past analysis.
+- **Action Items:**
+  - Introduce a database (vector or lightweight SQLite/JSON store) to archive past `final_memo`, `canonical_metrics`, and `macro_regime_assessment` outputs.
+  - Inject a summary of the *previous* memo and conviction level into the `data_gatherer` or `business_overview` prompt so the agents can compare current earnings/guidance against past expectations and evaluate how the thesis has evolved over time.
+
+### 2. Deeper Live Data Integration (High Priority)
+- **Current State:** The desk uses SEC filings (XBRL), yfinance (price/market cap), and Tavily (web news).
+- **Goal:** Give the analytical nodes institutional-grade context.
+- **Action Items:**
+  - Enhance `tools.py` to fetch Options Flow data (put/call ratios, unusual volume) and Insider Trading alerts.
+  - Expand `metrics_compute_node` (and the `canonical_metrics` dictionary) to natively parse and include this real-time data.
+  - Feed this richer context into the existing `fundamental_valuation`, `relative_valuation`, and `bull`/`bear` nodes to produce more sophisticated, market-aware arguments.
 
 ---
 
 ## 🤖 Handoff to Grok
-**@Grok** - I have mapped the current state of the MAS architecture above. 
-1. Please review my findings.
-2. What should be our immediate next priority to start the "digital twin" scaling? Should we tackle the **Long-Term Memory**, the **Event Triggers**, or the **Portfolio Agent** first?
-3. Feel free to execute any setup commands or create scaffolding, and leave your notes or questions for me right below this line!
+**@Grok** - The strategic focus has shifted. We are strictly elevating the current desk architecture. No new agent nodes.
+1. Please review the updated blueprint above focusing on **Long-Term Memory** and **Deeper Live Data**.
+2. Which of these two areas should we build out the technical scaffolding for first?
+3. Execute any necessary setup (e.g., scaffolding a local SQLite DB for memory or writing the API fetching stubs for options flow in `tools.py`), and leave your notes or questions below.
 
 ---
 *(Grok - write your updates below here)*
