@@ -9,11 +9,12 @@ input at the entry point:
     entry ──(mode == 'deep_dive')──> deep_dive_start
               ├─> data_gatherer ──────────────┐
               ├─> business_overview ──────────┤
-              ├─> macro_regime ───────────────┼─> bull_agent ──────────────────┐
-              └─> management_track_record ─┐  │  bear_agent ──────────────────┤
-                                           └─> capital_allocation ─┘          ├─> fundamental ─┼─> synthesis
-                                                                              └─> relative ────┘
-                                                → style_pass → docx_export → END
+              ├─> macro_regime ───────────────┼─> bull / bear / fundamental / relative
+              └─> management_track_record ─┐  │
+                                           └─> capital_allocation ─┘
+                → synthesis → qc → style_pass → qc_style_check → docx_export → END
+                              │ FAIL                          │ DRIFT
+                              └─> qc_halt → END               └─> qc_style_halt → END
 
 Usage (library):
     from mas_sector_system.main import app, run_deep_dive, run_screener
@@ -53,6 +54,10 @@ from .agents import (
     fundamental_valuation_node,
     macro_regime_node,
     management_track_record_node,
+    qc_halt_node,
+    qc_node,
+    qc_style_check_node,
+    qc_style_halt_node,
     relative_valuation_node,
     style_pass_node,
     synthesis_node,
@@ -133,6 +138,20 @@ def route_by_mode(state: ResearchState) -> str:
     raise ValueError(f"Unknown mode: {mode!r} (expected 'screener' or 'deep_dive')")
 
 
+def route_after_qc(state: ResearchState) -> str:
+    """After substantive QC: FAIL hard-stops; otherwise continue to style."""
+    if (state.get("qc_status") or "").upper() == "FAIL":
+        return "qc_halt"
+    return "style_pass"
+
+
+def route_after_qc_style(state: ResearchState) -> str:
+    """After style QC: substance drift hard-stops; CLEAN proceeds to export."""
+    if (state.get("qc_style_status") or "").upper() == "DRIFT_DETECTED":
+        return "qc_style_halt"
+    return "docx_export"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Graph assembly
 # ─────────────────────────────────────────────────────────────────────────────
@@ -154,7 +173,11 @@ def build_graph():
     workflow.add_node("fundamental_valuation", fundamental_valuation_node)
     workflow.add_node("relative_valuation", relative_valuation_node)
     workflow.add_node("synthesis", synthesis_node)
+    workflow.add_node("qc", qc_node)
+    workflow.add_node("qc_halt", qc_halt_node)
     workflow.add_node("style_pass", style_pass_node)
+    workflow.add_node("qc_style_check", qc_style_check_node)
+    workflow.add_node("qc_style_halt", qc_style_halt_node)
     workflow.add_node("docx_export", docx_export_node)
 
     # Conditional entry: screener path vs deep-dive fan-out start.
@@ -196,9 +219,27 @@ def build_graph():
         # Fan-in: synthesis waits for all four analysis branches.
         workflow.add_edge(node, "synthesis")
 
-    # Synthesis (judgment) → style pass (voice only) → docx export → END
-    workflow.add_edge("synthesis", "style_pass")
-    workflow.add_edge("style_pass", "docx_export")
+    # Synthesis → QC (substantive) → style → QC style → docx (or hard stop).
+    workflow.add_edge("synthesis", "qc")
+    workflow.add_conditional_edges(
+        "qc",
+        route_after_qc,
+        {
+            "style_pass": "style_pass",
+            "qc_halt": "qc_halt",
+        },
+    )
+    workflow.add_edge("qc_halt", END)
+    workflow.add_edge("style_pass", "qc_style_check")
+    workflow.add_conditional_edges(
+        "qc_style_check",
+        route_after_qc_style,
+        {
+            "docx_export": "docx_export",
+            "qc_style_halt": "qc_style_halt",
+        },
+    )
+    workflow.add_edge("qc_style_halt", END)
     workflow.add_edge("docx_export", END)
 
     # Screener report is terminal (no style pass on this path).
@@ -239,6 +280,10 @@ def empty_state(
         "relative_valuation": "",
         "final_memo": "",
         "styled_memo": "",
+        "qc_report": "",
+        "qc_status": "",
+        "qc_style_status": "",
+        "qc_style_report": "",
     }
 
 

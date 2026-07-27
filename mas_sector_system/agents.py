@@ -8,9 +8,10 @@ Deep-dive fan-out (wired in main.py):
 
     entry ──┬─> data_gatherer ──────────────┐
             ├─> business_overview ──────────┤
-            ├─> macro_regime ───────────────┼─> bull / bear / fundamental / relative ─> synthesis
+            ├─> macro_regime ───────────────┼─> bull / bear / fundamental / relative
             └─> management_track_record ─┐  │
                                          └─> capital_allocation ─┘
+              → synthesis → qc → style_pass → qc_style_check → docx_export
 """
 
 from __future__ import annotations
@@ -1092,26 +1093,13 @@ def _field_status(state: ResearchState) -> dict[str, int]:
     return {k: len((state.get(k) or "").strip()) for k in keys}
 
 
-def synthesis_node(state: ResearchState) -> dict:
-    """Synthesize overview + regime + management + capital + debate + valuations.
-
-    Writes only final_memo (raw judgment). Style is a separate downstream node.
-
-    Pre-synthesis gate (P0): log field lengths and warn if critical valuation
-    or debate fields are empty. Retries for empty fields happen inside each
-    analysis node; by this point we only surface remaining gaps honestly.
-    """
-    status = _field_status(state)
-    print(f"[synthesis:gate] field_chars={status}", flush=True)
-    weak = [k for k, n in status.items() if n < MIN_USEFUL_CHARS]
-    if weak:
-        print(
-            f"[synthesis:gate] WARNING weak/empty upstream fields: {weak} "
-            f"— memo will flag gaps rather than invent content",
-            flush=True,
-        )
-
-    user_prompt = (
+def _build_synthesis_user_prompt(
+    state: ResearchState,
+    *,
+    qc_correction: Optional[str] = None,
+) -> str:
+    """Build the synthesis user packet; optional QC report for one retry."""
+    base = (
         f"Target: {state.get('ticker') or state['sector']}\n"
         f"Sector: {state['sector']}\n"
         f"User request: {state['user_query']}\n\n"
@@ -1131,10 +1119,40 @@ def synthesis_node(state: ResearchState) -> dict:
         "explicitly — do not invent DCF, peer multiples, rate/fiscal figures, "
         "or management biography to fill the gap."
     )
+    if qc_correction and qc_correction.strip():
+        base += (
+            "\n\n=== QC REPORT (prior synthesis FAILED institutional review) ===\n"
+            f"{qc_correction.strip()}\n\n"
+            "Rewrite the memo to correct every CRITICAL and MAJOR finding above. "
+            "Do not invent new numbers. Prefer disclosing a gap over fabricating "
+            "a figure. Preserve a clear recommendation once integrity is restored."
+        )
+    return base
+
+
+def synthesis_node(state: ResearchState) -> dict:
+    """Synthesize overview + regime + management + capital + debate + valuations.
+
+    Writes only final_memo (raw judgment). Style is a separate downstream node.
+
+    Pre-synthesis gate (P0): log field lengths and warn if critical valuation
+    or debate fields are empty. Retries for empty fields happen inside each
+    analysis node; by this point we only surface remaining gaps honestly.
+    """
+    status = _field_status(state)
+    print(f"[synthesis:gate] field_chars={status}", flush=True)
+    weak = [k for k, n in status.items() if n < MIN_USEFUL_CHARS]
+    if weak:
+        print(
+            f"[synthesis:gate] WARNING weak/empty upstream fields: {weak} "
+            f"— memo will flag gaps rather than invent content",
+            flush=True,
+        )
+
     return {
         "final_memo": _run(
             SYNTHESIS_SYSTEM_PROMPT,
-            user_prompt,
+            _build_synthesis_user_prompt(state),
             model=OPUS_MODEL,
             max_tokens=MAX_TOKENS_MEMO,
             label="synthesis",
@@ -1201,3 +1219,426 @@ def style_pass_node(state: ResearchState) -> dict:
         print("[style_pass] empty — falling back to final_memo", flush=True)
         styled = raw
     return {"styled_memo": styled}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8. QC / Verification — institutional review (verify only; never silent edit)
+# ─────────────────────────────────────────────────────────────────────────────
+
+QC_SYSTEM_PROMPT = """\
+You are the senior review analyst. Your job is verification, not improvement. You are the last
+substantive check before this memo becomes a document someone acts on. Assume it will be read
+by someone allocating real capital, and that any error in it is your responsibility to catch.
+
+You will receive: the synthesized memo, and the complete raw outputs of every upstream agent
+that fed it (business overview, financial statements, macro/regime assessment, management
+assessment, capital allocation assessment, bull thesis, bear thesis, fundamental valuation,
+relative valuation).
+
+Audit against all seven categories below. Be exhaustive. A missed error is a worse outcome than
+a false flag.
+
+1. NUMERICAL TRACEABILITY
+Every figure in the memo must trace to a specific upstream source. For each number: does it
+appear in the upstream data, and does it match exactly? Flag any figure that appears in the
+memo but not upstream, any figure that differs from its source, and any figure presented as
+disclosed fact that was actually derived or estimated upstream.
+
+2. ARITHMETIC AND UNIT INTEGRITY
+Recompute every calculation the memo performs — growth rates, margins, multiples, per-share
+figures, implied upside. Check unit consistency obsessively: millions vs. billions, quarterly
+vs. annual, basis points vs. percent, per-share vs. absolute. Check that annualized figures
+are labeled as annualized. Unit errors are the single most common failure mode in this system's
+history and must be treated as high-severity.
+
+3. INTERNAL CONSISTENCY
+Does any section contradict another? Common failure patterns: margins described as expanding
+in one section and contracting in another; a risk described as near-term in one place and
+long-horizon in another; a recommendation inconsistent with the valuation conclusion; a
+confidence level stated in the cover block that doesn't match the hedging in the body; a price
+target inconsistent with the scenario table.
+
+4. CLAIM PROVENANCE
+Every substantive analytical claim in the memo must originate in an upstream agent's output.
+Synthesis is forbidden from introducing new claims. Flag anything asserted in the memo that no
+upstream agent actually said. Distinguish clearly between: (a) claims properly sourced upstream,
+(b) legitimate synthesis-level reasoning that combines two upstream claims, and (c) genuinely
+novel assertions with no upstream basis — only (c) is a violation.
+
+5. UPSTREAM COMPLETENESS AND HONEST GAP REPORTING
+Check which upstream fields were populated and which were empty or truncated. If any agent
+returned nothing or was cut off, the memo MUST disclose that gap explicitly. Flag as a
+high-severity failure any case where an upstream field was empty but the memo reads as though
+complete analysis was performed. Conversely, verify that any gap the memo does disclose is a
+real gap — the memo should not claim missing data that actually arrived.
+
+6. CONFIDENCE CALIBRATION
+Does stated confidence match evidentiary strength? Flag: conclusions stated as settled fact
+that rest on inference; historical analogies asserted without a stated causal mechanism or
+disanalogy; a price target presented with false precision when the underlying model was
+self-flagged as low-confidence; hedged upstream findings that became unhedged in the memo.
+Also flag the reverse — a well-evidenced finding buried under excessive hedging.
+
+7. RECOMMENDATION INTEGRITY
+Does the stated rating follow from the evidence assembled? Does the memo state what would
+change the view, and are those triggers specific and monitorable rather than vague? Is position
+sizing or conviction language consistent with the actual strength and completeness of the
+analysis? If the analysis has material gaps, does the conviction level reflect that?
+
+SEVERITY — assign to every finding:
+- CRITICAL: fabricated or unsourced figure; arithmetic/unit error; undisclosed missing upstream
+  input; recommendation contradicting its own evidence. Any CRITICAL finding = FAIL.
+- MAJOR: internal contradiction; unsourced substantive claim; materially miscalibrated
+  confidence. Multiple MAJOR findings = FAIL; one or two = PASS_WITH_FLAGS.
+- MINOR: imprecise wording, weak sourcing on a non-load-bearing claim, formatting inconsistency.
+  MINOR findings alone = PASS_WITH_FLAGS.
+
+OUTPUT FORMAT:
+Line 1: STATUS: PASS | PASS_WITH_FLAGS | FAIL
+Then, for each finding: severity, category number, the exact quoted text from the memo, the
+specific problem, and the upstream source that contradicts it or the absence of any source.
+Then: a coverage note stating which upstream fields were populated and which were empty.
+Then: one paragraph of overall assessment.
+
+If you find no issues, say so plainly and state STATUS: PASS. Do not manufacture findings to
+appear thorough. But do not pass a memo you have real doubts about — the cost of a false flag
+is a few minutes of the reader's time; the cost of a missed error is a bad capital allocation
+decision.
+"""
+
+QC_STYLE_SYSTEM_PROMPT = """\
+You are verifying that a style/voice rewrite did not alter substance. You will receive two
+versions of the same memo: the pre-style version and the post-style version.
+
+Your only question: did anything substantive change?
+
+Check specifically:
+- Rating, price target, implied upside, time horizon — must be identical
+- Every numerical figure — must be identical
+- Every conclusion and its direction
+- Every disclosed gap or caveat — must still be present and equally prominent
+- Every risk and monitoring trigger — must still be present
+- Confidence and hedging language — a hedged claim must not have become unhedged
+
+Rewording, reordering, changed section headers, and altered sentence structure are expected and
+fine. Changed meaning is not.
+
+OUTPUT:
+Line 1: STYLE_STATUS: CLEAN | DRIFT_DETECTED
+If DRIFT_DETECTED, list each change: what the pre-style version said, what the post-style
+version says, and why the change is substantive rather than stylistic.
+"""
+
+
+def _is_field_populated(value: Any, *, min_chars: int = 1) -> bool:
+    """True when a field has usable content (min_chars default: any non-empty)."""
+    if value is None:
+        return False
+    if isinstance(value, dict):
+        return bool(value)
+    if isinstance(value, str):
+        return len(value.strip()) >= min_chars
+    return bool(value)
+
+
+def _upstream_coverage(state: ResearchState) -> tuple[list[str], list[str], str]:
+    """Return (populated, empty, coverage_note) for run-level console health."""
+    fields: list[tuple[str, Any]] = [
+        ("business_overview", state.get("business_overview")),
+        ("income_statement", state.get("income_statement")),
+        ("balance_sheet", state.get("balance_sheet")),
+        ("cash_flow_statement", state.get("cash_flow_statement")),
+        ("sec_filing_summary", state.get("sec_filing_summary")),
+        ("macro_context", state.get("macro_context")),
+        ("macro_regime_assessment", state.get("macro_regime_assessment")),
+        ("management_assessment", state.get("management_assessment")),
+        ("capital_allocation_assessment", state.get("capital_allocation_assessment")),
+        ("bull_thesis", state.get("bull_thesis")),
+        ("bear_thesis", state.get("bear_thesis")),
+        ("fundamental_valuation", state.get("fundamental_valuation")),
+        ("relative_valuation", state.get("relative_valuation")),
+        ("final_memo", state.get("final_memo")),
+    ]
+    populated = [k for k, v in fields if _is_field_populated(v)]
+    empty = [k for k, v in fields if not _is_field_populated(v)]
+    weak = [
+        k
+        for k, v in fields
+        if isinstance(v, str)
+        and _is_field_populated(v)
+        and not _is_field_populated(v, min_chars=MIN_USEFUL_CHARS)
+    ]
+    note = (
+        f"populated ({len(populated)}): {', '.join(populated) or 'none'}; "
+        f"empty ({len(empty)}): {', '.join(empty) or 'none'}"
+    )
+    if weak:
+        note += f"; short/weak (<{MIN_USEFUL_CHARS} chars): {', '.join(weak)}"
+    return populated, empty, note
+
+
+def _severity_counts(report: str) -> dict[str, int]:
+    """Count severity labels in a QC report (best-effort, for console health)."""
+    counts = {"CRITICAL": 0, "MAJOR": 0, "MINOR": 0}
+    for line in (report or "").splitlines():
+        # Skip rubric definitions and the STATUS line itself.
+        stripped = line.strip()
+        if not stripped or stripped.upper().startswith("STATUS"):
+            continue
+        if re.match(r"(?i)^-?\s*CRITICAL:\s*fabricated", stripped):
+            continue
+        if re.match(r"(?i)^-?\s*MAJOR:\s*internal", stripped):
+            continue
+        if re.match(r"(?i)^-?\s*MINOR:\s*imprecise", stripped):
+            continue
+        # One severity per line; prefer FINDING / bullet / em-dash labels.
+        for sev in ("CRITICAL", "MAJOR", "MINOR"):
+            if re.search(rf"(?i)\b{sev}\b", line):
+                counts[sev] += 1
+                break
+    return counts
+
+
+def _parse_qc_status(report: str) -> str:
+    """Extract STATUS: PASS | PASS_WITH_FLAGS | FAIL from QC report line 1-ish."""
+    text = report or ""
+    for line in text.splitlines()[:15]:
+        m = re.search(
+            r"STATUS\s*:\s*(PASS_WITH_FLAGS|PASS|FAIL)\b",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if m:
+            return m.group(1).upper()
+    upper = text.upper()
+    if re.search(r"\bSTATUS\s*:\s*PASS_WITH_FLAGS\b", upper):
+        return "PASS_WITH_FLAGS"
+    if re.search(r"\bSTATUS\s*:\s*FAIL\b", upper):
+        return "FAIL"
+    if re.search(r"\bSTATUS\s*:\s*PASS\b", upper):
+        return "PASS"
+    # Conservative default if the model omitted the status line.
+    if "CRITICAL" in upper:
+        return "FAIL"
+    if "MAJOR" in upper or "MINOR" in upper:
+        return "PASS_WITH_FLAGS"
+    return "PASS_WITH_FLAGS"
+
+
+def _parse_style_status(report: str) -> str:
+    """Extract STYLE_STATUS: CLEAN | DRIFT_DETECTED."""
+    text = report or ""
+    for line in text.splitlines()[:15]:
+        m = re.search(
+            r"STYLE_STATUS\s*:\s*(CLEAN|DRIFT_DETECTED)\b",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if m:
+            return m.group(1).upper()
+    upper = text.upper()
+    if "DRIFT_DETECTED" in upper:
+        return "DRIFT_DETECTED"
+    if re.search(r"\bCLEAN\b", upper):
+        return "CLEAN"
+    return "DRIFT_DETECTED"
+
+
+def _print_qc_console(
+    *,
+    status: str,
+    report: str,
+    coverage_note: str,
+    label: str = "qc",
+) -> None:
+    """Always-on run-level health signal (status + severity counts + coverage)."""
+    counts = _severity_counts(report)
+    print(
+        f"[{label}] status={status} "
+        f"CRITICAL={counts['CRITICAL']} MAJOR={counts['MAJOR']} MINOR={counts['MINOR']}",
+        flush=True,
+    )
+    print(f"[{label}] coverage: {coverage_note}", flush=True)
+    if status == "FAIL":
+        print(f"[{label}] === FULL QC REPORT (FAIL) ===", flush=True)
+        print(report or "(empty report)", flush=True)
+        print(f"[{label}] === END QC REPORT ===", flush=True)
+
+
+def _build_qc_user_prompt(state: ResearchState) -> str:
+    """Packet for qc_node: memo + every upstream source of truth."""
+    return (
+        f"Target: {state.get('ticker') or state['sector']}\n"
+        f"Sector: {state['sector']}\n"
+        f"User request: {state['user_query']}\n\n"
+        f"=== SYNTHESIZED MEMO (final_memo) ===\n"
+        f"{state.get('final_memo') or '(empty)'}\n\n"
+        f"=== BUSINESS OVERVIEW ===\n{state.get('business_overview') or 'None provided.'}\n\n"
+        f"{_json_block('INCOME STATEMENT', state.get('income_statement') or {})}\n\n"
+        f"{_json_block('BALANCE SHEET', state.get('balance_sheet') or {})}\n\n"
+        f"{_json_block('CASH FLOW STATEMENT', state.get('cash_flow_statement') or {})}\n\n"
+        f"=== SEC FILING SUMMARY ===\n{state.get('sec_filing_summary') or 'None provided.'}\n\n"
+        f"=== MACRO CONTEXT ===\n{state.get('macro_context') or 'None provided.'}\n\n"
+        f"=== MACRO REGIME ASSESSMENT ===\n"
+        f"{state.get('macro_regime_assessment') or 'None provided.'}\n\n"
+        f"=== MANAGEMENT ASSESSMENT ===\n"
+        f"{state.get('management_assessment') or 'None provided.'}\n\n"
+        f"=== CAPITAL ALLOCATION ASSESSMENT ===\n"
+        f"{state.get('capital_allocation_assessment') or 'None provided.'}\n\n"
+        f"=== BULL THESIS ===\n{state.get('bull_thesis') or 'None provided.'}\n\n"
+        f"=== BEAR THESIS ===\n{state.get('bear_thesis') or 'None provided.'}\n\n"
+        f"=== FUNDAMENTAL VALUATION ===\n"
+        f"{state.get('fundamental_valuation') or 'None provided.'}\n\n"
+        f"=== RELATIVE VALUATION ===\n"
+        f"{state.get('relative_valuation') or 'None provided.'}\n\n"
+        "Audit the synthesized memo against all upstream sources. "
+        "Line 1 must be STATUS: PASS | PASS_WITH_FLAGS | FAIL."
+    )
+
+
+def _run_qc_audit(state: ResearchState, *, label: str = "qc") -> tuple[str, str, str]:
+    """Run Opus QC once. Returns (report, status, coverage_note)."""
+    _, _, coverage_note = _upstream_coverage(state)
+    report = _run(
+        QC_SYSTEM_PROMPT,
+        _build_qc_user_prompt(state),
+        model=OPUS_MODEL,
+        max_tokens=MAX_TOKENS_MEMO,
+        label=label,
+    )
+    status = _parse_qc_status(report)
+    _print_qc_console(
+        status=status,
+        report=report,
+        coverage_note=coverage_note,
+        label=label,
+    )
+    return report, status, coverage_note
+
+
+def qc_node(state: ResearchState) -> dict:
+    """Full institutional audit of final_memo vs every upstream agent.
+
+    Writes: qc_report, qc_status. Never silently edits the memo.
+
+    On FAIL: retry synthesis once with the QC report as correction
+    instructions, then re-audit. If still FAIL, status stays FAIL and
+    the graph hard-stops before style/export.
+    """
+    report, status, _coverage = _run_qc_audit(state, label="qc")
+    updates: dict[str, Any] = {
+        "qc_report": report,
+        "qc_status": status,
+    }
+
+    if status != "FAIL":
+        return updates
+
+    print(
+        "[qc] FAIL on first pass — retrying synthesis once with QC report "
+        "as correction instructions",
+        flush=True,
+    )
+    corrected = _run(
+        SYNTHESIS_SYSTEM_PROMPT,
+        _build_synthesis_user_prompt(state, qc_correction=report),
+        model=OPUS_MODEL,
+        max_tokens=MAX_TOKENS_MEMO,
+        label="synthesis_qc_retry",
+    )
+    if not (corrected or "").strip():
+        print(
+            "[qc] synthesis retry returned empty — keeping original memo; status FAIL",
+            flush=True,
+        )
+        print(
+            "[qc] HARD STOP: material integrity failure after empty retry. "
+            "No docx will be exported.",
+            flush=True,
+        )
+        return updates
+
+    updates["final_memo"] = corrected
+    # Re-audit against the corrected memo with the same upstream packet.
+    retry_state: dict[str, Any] = dict(state)
+    retry_state["final_memo"] = corrected
+    report2, status2, _ = _run_qc_audit(retry_state, label="qc_retry")  # type: ignore[arg-type]
+    updates["qc_report"] = report2
+    updates["qc_status"] = status2
+
+    if status2 == "FAIL":
+        print(
+            "[qc] HARD STOP: QC FAIL after one synthesis retry. "
+            "No docx will be exported. See full report above.",
+            flush=True,
+        )
+    else:
+        print(
+            f"[qc] synthesis retry recovered to status={status2} — proceeding",
+            flush=True,
+        )
+    return updates
+
+
+def qc_style_check_node(state: ResearchState) -> dict:
+    """Narrow check: style pass must not change substance.
+
+    Writes: qc_style_report, qc_style_status (CLEAN | DRIFT_DETECTED).
+    On DRIFT_DETECTED the graph hard-stops before docx export.
+    """
+    pre = state.get("final_memo") or ""
+    post = state.get("styled_memo") or ""
+    if not pre.strip() and not post.strip():
+        report = "STYLE_STATUS: CLEAN\nBoth pre-style and post-style memos are empty."
+        print("[qc_style] status=CLEAN (empty memos)", flush=True)
+        return {"qc_style_report": report, "qc_style_status": "CLEAN"}
+
+    user_prompt = (
+        f"Target: {state.get('ticker') or state['sector']}\n"
+        f"Sector: {state['sector']}\n\n"
+        f"=== PRE-STYLE MEMO (final_memo) ===\n{pre or '(empty)'}\n\n"
+        f"=== POST-STYLE MEMO (styled_memo) ===\n{post or '(empty)'}\n\n"
+        "Did anything substantive change? Line 1 must be "
+        "STYLE_STATUS: CLEAN or STYLE_STATUS: DRIFT_DETECTED."
+    )
+    report = _run(
+        QC_STYLE_SYSTEM_PROMPT,
+        user_prompt,
+        model=SONNET_MODEL,
+        max_tokens=MAX_TOKENS_SONNET,
+        label="qc_style",
+    )
+    status = _parse_style_status(report)
+    print(f"[qc_style] status={status}", flush=True)
+    if status == "DRIFT_DETECTED":
+        print("[qc_style] === STYLE DRIFT REPORT ===", flush=True)
+        print(report or "(empty)", flush=True)
+        print("[qc_style] === END STYLE DRIFT REPORT ===", flush=True)
+        print(
+            "[qc_style] HARD STOP: substance drift in style pass. "
+            "No docx will be exported.",
+            flush=True,
+        )
+    return {
+        "qc_style_report": report,
+        "qc_style_status": status,
+    }
+
+
+def qc_halt_node(state: ResearchState) -> dict:
+    """Terminal node after QC FAIL — no export side effects."""
+    print(
+        f"[qc_halt] Run ended without export. qc_status={state.get('qc_status')!r}",
+        flush=True,
+    )
+    return {}
+
+
+def qc_style_halt_node(state: ResearchState) -> dict:
+    """Terminal node after style substance drift — no export side effects."""
+    print(
+        f"[qc_style_halt] Run ended without export. "
+        f"qc_style_status={state.get('qc_style_status')!r}",
+        flush=True,
+    )
+    return {}

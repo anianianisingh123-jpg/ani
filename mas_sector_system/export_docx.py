@@ -174,6 +174,10 @@ def docx_export_node(state: dict) -> dict:
     """LangGraph node: export styled_memo to .docx and print the path.
 
     Does not mutate memo fields — export is a side effect for the user.
+
+    On qc_status == PASS_WITH_FLAGS, appends a visible "## QC Notes" section
+    from qc_report so the reader sees the auditor's flags. QC never silently
+    rewrites the memo body.
     """
     memo = state.get("styled_memo") or ""
     ticker = state.get("ticker")
@@ -184,6 +188,27 @@ def docx_export_node(state: dict) -> dict:
         print("docx export: no styled_memo/final_memo content; skipped.")
         return {}
 
+    qc_status = (state.get("qc_status") or "").upper()
+    qc_report = (state.get("qc_report") or "").strip()
+    if qc_status == "PASS_WITH_FLAGS" and qc_report:
+        memo = (
+            memo.rstrip()
+            + "\n\n## QC Notes\n\n"
+            + "Institutional review flagged the following items "
+            "(memo body was not auto-corrected):\n\n"
+            + qc_report
+            + "\n"
+        )
+        print(
+            "docx export: appending QC Notes section (PASS_WITH_FLAGS)",
+            flush=True,
+        )
+
     path = export_styled_memo(memo, ticker=ticker)
     print(f"Saved memo: {path}")
+    print(
+        f"docx export: qc_status={qc_status or 'n/a'} "
+        f"qc_style_status={state.get('qc_style_status') or 'n/a'}",
+        flush=True,
+    )
     return {}

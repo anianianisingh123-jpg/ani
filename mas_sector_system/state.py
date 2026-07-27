@@ -124,9 +124,27 @@ class ResearchState(TypedDict):
     # ------------------------------------------------------------------
 
     # Raw investment memo from synthesis — pure judgment, unstyled.
-    # Never overwritten by the style pass; kept for audit/debug.
+    # Never overwritten by the style pass; kept permanently so QC style
+    # check can compare pre- vs post-style and so failures can be audited.
     final_memo: str
 
     # Voice-seasoned rewrite of final_memo from style_pass_node.
     # Reader-facing deliverable; substantive claims must match final_memo.
     styled_memo: str
+
+    # ------------------------------------------------------------------
+    # QC / institutional review (verification only — never silently edits)
+    # ------------------------------------------------------------------
+
+    # Full audit report from qc_node: findings by severity/category, coverage
+    # note, and overall assessment. Does not rewrite the memo.
+    qc_report: str
+
+    # PASS | PASS_WITH_FLAGS | FAIL from qc_node. FAIL hard-stops export.
+    qc_status: str
+
+    # CLEAN | DRIFT_DETECTED from qc_style_check (style substance drift).
+    qc_style_status: str
+
+    # Style-check report: empty when CLEAN; lists substantive drifts otherwise.
+    qc_style_report: str

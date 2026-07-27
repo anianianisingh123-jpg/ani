@@ -11,7 +11,8 @@ The system operates in two distinct modes managed by a Supervisor Router:
 - Foundation: `business_overview`, `income_statement`, `balance_sheet`, `cash_flow_statement`, `sec_filing_summary`, `macro_context`, `macro_regime_assessment`, `management_assessment`, `capital_allocation_assessment`
 - Adversarial Debate: `bull_thesis`, `bear_thesis`
 - Valuation: `fundamental_valuation` (Python DCF + narrative), `relative_valuation` (yfinance peer comps + narrative)
-- Final Output: `final_memo` (raw synthesis), `styled_memo` (light style pass)
+- Final Output: `final_memo` (raw synthesis, preserved permanently), `styled_memo` (light style pass)
+- QC / Review: `qc_report`, `qc_status` (`PASS` | `PASS_WITH_FLAGS` | `FAIL`), `qc_style_report`, `qc_style_status` (`CLEAN` | `DRIFT_DETECTED`)
 
 ## 3. Execution Pipeline Topology (`main.py` & `agents.py`)
 - Screener Branch: entry → `screener` → END
@@ -21,10 +22,12 @@ The system operates in two distinct modes managed by a Supervisor Router:
 entry → deep_dive_start
           ├─> data_gatherer ──────────────┐
           ├─> business_overview ──────────┤
-          ├─> macro_regime ───────────────┼─> bull_agent ──────────────┐
-          └─> management_track_record ─┐  │  bear_agent ──────────────┤
-                                       └─> capital_allocation ─┘      ├─> fundamental ─┼─> synthesis → style_pass → docx → END
-                                                                      └─> relative ────┘
+          ├─> macro_regime ───────────────┼─> bull / bear / fundamental / relative
+          └─> management_track_record ─┐  │
+                                       └─> capital_allocation ─┘
+              → synthesis → qc → style_pass → qc_style_check → docx_export → END
+                            │ FAIL                          │ DRIFT
+                            └─> qc_halt → END               └─> qc_style_halt → END
 ```
 
 Notes:
@@ -32,7 +35,10 @@ Notes:
 - `macro_regime` runs its **own** Tavily search (independent of `data_gatherer`) and writes `macro_regime_assessment` using a three-lens framework: debt-cycle positioning → reflexivity → sector-specific cycle, closing with TAILWIND / HEADWIND / NEUTRAL + confidence.
 - `management_track_record` runs its **own** Tavily search in parallel at entry and writes `management_assessment` (people/leadership only — not cash deployment).
 - `capital_allocation` waits for `data_gatherer` + `management_track_record`, scores five uses of cash from statement numbers, and writes `capital_allocation_assessment` (with alignment cross-check vs management).
-- `macro_context` remains a short digest from `data_gatherer`; structured reads live in the dedicated assessment fields. Downstream agents and synthesis consume them.
+- **QC never silently edits the memo.** It only reports.
+  - `qc_node` (Opus): full audit of `final_memo` vs all upstream agents. Console always prints status, severity counts, and upstream coverage.
+  - **PASS** → style pass. **PASS_WITH_FLAGS** → style pass; QC Notes appended to the docx. **FAIL** → one synthesis retry with the QC report as correction instructions, then re-QC; if still FAIL, hard stop (no docx).
+  - `qc_style_check` (Sonnet): compares pre-style `final_memo` vs post-style `styled_memo`. **CLEAN** → export. **DRIFT_DETECTED** → hard stop (no docx).
 - Valuation math is **deterministic** (`valuation_engine.py`): multi-stage FCF DCF + yfinance peer multiples. LLM agents narrate those outputs.
 - LLM calls disable extended thinking by default and retry once on empty / truncated text.
 
@@ -46,9 +52,9 @@ When an agent node runs, it may use `state["sector"]` for valuation defaults (WA
 | Role | Nodes | Model |
 |------|--------|--------|
 | Heavy foundation | `data_gatherer` | Claude Opus (`claude-opus-5`) |
-| Analytical writers | `business_overview`, `macro_regime`, `management_track_record`, `capital_allocation`, `bull`, `bear`, `fundamental`, `relative`, `screener`, `style_pass` | Claude Sonnet (`claude-sonnet-5`) |
-| Senior writer | `synthesis` | Claude Opus (`claude-opus-5`) |
-| Router | entry / `route_by_mode` | Deterministic code — no LLM |
+| Analytical writers | `business_overview`, `macro_regime`, `management_track_record`, `capital_allocation`, `bull`, `bear`, `fundamental`, `relative`, `screener`, `style_pass`, `qc_style_check` | Claude Sonnet (`claude-sonnet-5`) |
+| Senior writer / gate | `synthesis`, `qc` | Claude Opus (`claude-opus-5`) |
+| Router | entry / `route_by_mode` / QC routers | Deterministic code — no LLM |
 
 **Historical note:** An earlier CLAUDE.md revision mapped workers to Claude Haiku 4.5 and included a Sonnet/Opus red-team critic. That mapping was from a pre–SEC/deep-dive rework compliance pass and is **not** current. Do not silently downgrade bull/bear/overview to Haiku without an explicit product decision. Red team was deliberately removed.
 
