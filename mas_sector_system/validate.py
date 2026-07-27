@@ -314,9 +314,12 @@ def validate_inputs(state: dict[str, Any]) -> dict[str, Any]:
         )
 
     # ── Search relevance ─────────────────────────────────────────────────
+    # macro_context is often a *sector/macro* digest (Fed, rates, inflation) from
+    # data_gatherer — it need not name the ticker. That is WARN, not FAIL.
+    # macro_regime_assessment is the company-tethered macro write-up.
     macro = state.get("macro_context") or ""
     sec = state.get("sec_filing_summary") or ""
-    # Only fail macro when ticker is set and digest is non-trivial but off-topic
+    regime = state.get("macro_regime_assessment") or ""
     if ticker and macro and len(macro) > 200:
         ok = check_search_relevance(
             macro,
@@ -327,12 +330,10 @@ def validate_inputs(state: dict[str, Any]) -> dict[str, Any]:
         if not ok:
             msg = (
                 f"macro_context has no mention of ticker={ticker!r} — "
-                "treating narrative macro field as failed retrieval"
+                "often sector-level only; proceed with WARN (do not hard-stop)"
             )
-            _check(checks, name="macro_relevance", status="FAIL", detail=msg)
-            failures.append(msg)
-            # Clear poison for downstream if we soft-handle? Spec says FAIL field.
-            # Hard FAIL status will halt; also record cleared note.
+            _check(checks, name="macro_relevance", status="WARN", detail=msg)
+            warnings.append(msg)
         else:
             _check(checks, name="macro_relevance", status="PASS", detail="ticker present")
     else:
@@ -342,6 +343,25 @@ def validate_inputs(state: dict[str, Any]) -> dict[str, Any]:
             status="PASS",
             detail="skipped (no ticker or short macro)",
         )
+
+    # Company-tethered regime note: WARN if long and off-topic (never FAIL alone).
+    if ticker and regime and len(regime) > 400:
+        ok = check_search_relevance(
+            regime,
+            ticker=str(ticker),
+            entity_name=None,
+            label="validation.macro_regime",
+        )
+        if not ok:
+            msg = (
+                f"macro_regime_assessment has no mention of ticker={ticker!r}"
+            )
+            _check(checks, name="macro_regime_relevance", status="WARN", detail=msg)
+            warnings.append(msg)
+        else:
+            _check(
+                checks, name="macro_regime_relevance", status="PASS", detail="ticker present"
+            )
 
     if ticker and sec and len(sec) > 400:
         # Filing summary should almost always mention ticker or company

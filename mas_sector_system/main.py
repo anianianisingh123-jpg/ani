@@ -229,10 +229,9 @@ def build_graph():
     workflow.add_node("business_overview", business_overview_node)
     workflow.add_node("macro_regime", macro_regime_node)
     workflow.add_node("management_track_record", management_track_record_node)
-    # defer=True: wait for BOTH post_validation AND management. Without this,
-    # capital fires as soon as management finishes — even while validation is
-    # still running or after validation FAIL (last NVDA race).
-    workflow.add_node("capital_allocation", capital_allocation_node, defer=True)
+    # Deferred join: validation OK + management must both complete before capital.
+    workflow.add_node("capital_ready", _passthrough_barrier, defer=True)
+    workflow.add_node("capital_allocation", capital_allocation_node)
     # Deferred join barriers (see docstring) — prevent double execution.
     workflow.add_node("analysis_ready", _passthrough_barrier, defer=True)
     workflow.add_node("bull_agent", bull_agent_node)
@@ -277,9 +276,12 @@ def build_graph():
     )
     workflow.add_edge("validation_halt", END)
 
-    # Capital allocation needs validated metrics + management alignment read.
-    workflow.add_edge("post_validation", "capital_allocation")
-    workflow.add_edge("management_track_record", "capital_allocation")
+    # Capital only after validation PASS/WARN *and* management, via a single
+    # deferred join. Do NOT wire management → capital directly (that raced
+    # past validation FAIL on NVDA).
+    workflow.add_edge("post_validation", "capital_ready")
+    workflow.add_edge("management_track_record", "capital_ready")
+    workflow.add_edge("capital_ready", "capital_allocation")
 
     # Join foundation into a single deferred barrier, then fan out analysis.
     # capital_allocation already implies metrics_compute + validation + management.
