@@ -3,8 +3,9 @@
 Sources of truth:
 
   1. SEC EDGAR XBRL Company Facts — full financial statements
-  2. yfinance                       — live price / market cap only
+  2. yfinance                       — live price / market cap + free options/insider proxies
   3. Tavily web search              — narrative context SEC tags can't give
+  4. SEC Form 4 (submissions index) — free insider filing alerts (no paid vendors)
 
 These are plain Python helpers (not LangChain tool objects). Nodes call them
 before prompting the LLM so the model is grounded in fresh external data.
@@ -974,6 +975,338 @@ def fetch_live_market_snapshot(ticker: str) -> dict[str, Any]:
         }
     except Exception as exc:
         return {"ticker": symbol, "error": f"yfinance fetch failed: {exc}"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Options flow proxy (free — yfinance option chains; not paid flow vendors)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def fetch_options_flow(ticker: str, *, max_expiries: int = 4) -> dict[str, Any]:
+    """Put/call volume & open-interest ratios from yfinance option chains.
+
+    This is a **free proxy** for options positioning — not proprietary unusual
+    options flow (no Unusual Whales / paid tape). Near-dated expiries only
+    (first ``max_expiries`` listed) to bound latency.
+
+    Returns a dict with ratio fields, raw totals, notes, and error if any.
+    """
+    symbol = (ticker or "").strip().upper()
+    as_of = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    if not symbol:
+        return {
+            "ticker": None,
+            "as_of_utc": as_of,
+            "source": "yfinance_option_chain",
+            "error": "No ticker provided.",
+            "applicable": False,
+        }
+    try:
+        import yfinance as yf
+
+        t = yf.Ticker(symbol)
+        expiries = list(t.options or [])
+        if not expiries:
+            return {
+                "ticker": symbol,
+                "as_of_utc": as_of,
+                "source": "yfinance_option_chain",
+                "error": "No option expiries listed (yfinance).",
+                "applicable": False,
+                "expiries_used": [],
+            }
+
+        use = expiries[: max(1, int(max_expiries))]
+        call_vol = put_vol = 0.0
+        call_oi = put_oi = 0.0
+        n_calls = n_puts = 0
+        per_expiry: list[dict[str, Any]] = []
+
+        for exp in use:
+            try:
+                chain = t.option_chain(exp)
+            except Exception as exc:
+                per_expiry.append({"expiry": exp, "error": str(exc)})
+                continue
+            calls = getattr(chain, "calls", None)
+            puts = getattr(chain, "puts", None)
+            cv = float(calls["volume"].fillna(0).sum()) if calls is not None and "volume" in calls else 0.0
+            pv = float(puts["volume"].fillna(0).sum()) if puts is not None and "volume" in puts else 0.0
+            co = float(calls["openInterest"].fillna(0).sum()) if calls is not None and "openInterest" in calls else 0.0
+            po = float(puts["openInterest"].fillna(0).sum()) if puts is not None and "openInterest" in puts else 0.0
+            call_vol += cv
+            put_vol += pv
+            call_oi += co
+            put_oi += po
+            if calls is not None:
+                n_calls += len(calls)
+            if puts is not None:
+                n_puts += len(puts)
+            per_expiry.append(
+                {
+                    "expiry": exp,
+                    "call_volume": cv,
+                    "put_volume": pv,
+                    "call_oi": co,
+                    "put_oi": po,
+                }
+            )
+
+        total_vol = call_vol + put_vol
+        total_oi = call_oi + put_oi
+        pc_vol = (put_vol / call_vol) if call_vol > 0 else None
+        pc_oi = (put_oi / call_oi) if call_oi > 0 else None
+        # Crude "unusual" flag: high total option volume vs OI (turnover).
+        vol_to_oi = (total_vol / total_oi) if total_oi > 0 else None
+        unusual = bool(vol_to_oi is not None and vol_to_oi >= 0.5 and total_vol >= 5000)
+
+        return {
+            "ticker": symbol,
+            "as_of_utc": as_of,
+            "source": "yfinance_option_chain",
+            "applicable": total_vol > 0 or total_oi > 0,
+            "error": None,
+            "expiries_listed": expiries[:12],
+            "expiries_used": use,
+            "call_volume": call_vol,
+            "put_volume": put_vol,
+            "call_open_interest": call_oi,
+            "put_open_interest": put_oi,
+            "put_call_volume_ratio": pc_vol,
+            "put_call_oi_ratio": pc_oi,
+            "option_volume_to_oi": vol_to_oi,
+            "unusual_volume_flag": unusual,
+            "n_call_contracts": n_calls,
+            "n_put_contracts": n_puts,
+            "per_expiry": per_expiry,
+            "notes": [
+                "Free yfinance chain aggregate — not paid order-flow tape.",
+                f"Aggregated across {len(use)} nearest listed expiries.",
+                "unusual_volume_flag = volume/OI >= 0.5 and total option volume >= 5000 "
+                "(heuristic only).",
+            ],
+        }
+    except Exception as exc:
+        return {
+            "ticker": symbol,
+            "as_of_utc": as_of,
+            "source": "yfinance_option_chain",
+            "error": f"options fetch failed: {exc}",
+            "applicable": False,
+        }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Insider alerts (free — yfinance + SEC Form 4 index; no paid vendors)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _insider_from_yfinance(symbol: str) -> dict[str, Any]:
+    """Best-effort insider transaction summary via yfinance DataFrames."""
+    try:
+        import yfinance as yf
+
+        t = yf.Ticker(symbol)
+        tx = getattr(t, "insider_transactions", None)
+        if tx is None:
+            return {"source": "yfinance", "error": "insider_transactions unavailable", "rows": []}
+        # yfinance may return empty DataFrame
+        try:
+            empty = tx is None or (hasattr(tx, "empty") and tx.empty)
+        except Exception:
+            empty = True
+        if empty:
+            return {"source": "yfinance", "error": None, "rows": [], "note": "empty frame"}
+
+        rows: list[dict[str, Any]] = []
+        # Column names vary by yfinance version
+        df = tx.reset_index() if hasattr(tx, "reset_index") else tx
+        for _, r in df.head(40).iterrows():
+            rec = {str(k): (None if (hasattr(v, "isoformat") is False and v != v) else v) for k, v in r.items()}
+            # stringify timestamps
+            for k, v in list(rec.items()):
+                if hasattr(v, "isoformat"):
+                    rec[k] = v.isoformat()
+                elif hasattr(v, "item"):
+                    try:
+                        rec[k] = v.item()
+                    except Exception:
+                        rec[k] = str(v)
+            rows.append(rec)
+
+        # Open-market-ish flow only — ignore grants/awards/gifts/tax withholdings
+        # so we don't treat RSUs as "insider buying."
+        net_shares = 0.0
+        open_mkt_buys = 0.0
+        open_mkt_sells = 0.0
+        awards_gifts = 0.0
+        share_cols = ("Shares", "shares", "Change", "change")
+        text_cols = ("Text", "text", "Transaction", "transaction")
+        for rec in rows:
+            shares = None
+            for c in share_cols:
+                if c in rec and rec[c] is not None:
+                    try:
+                        shares = float(rec[c])
+                        break
+                    except (TypeError, ValueError):
+                        continue
+            if shares is None:
+                continue
+            blob = " ".join(str(rec.get(c, "")) for c in text_cols).lower()
+            if any(
+                k in blob
+                for k in (
+                    "award",
+                    "grant",
+                    "gift",
+                    "tax",
+                    "withhold",
+                    "conversion",
+                    "option exercise",
+                    "exercise of",
+                )
+            ):
+                awards_gifts += abs(shares)
+                continue
+            if any(k in blob for k in ("sale", "sell", "disposed", "dispose")):
+                open_mkt_sells += abs(shares)
+                net_shares -= abs(shares)
+            elif any(k in blob for k in ("purchase", "buy", "acquired", "acquire")):
+                open_mkt_buys += abs(shares)
+                net_shares += abs(shares)
+            # else: skip ambiguous rows
+
+        return {
+            "source": "yfinance",
+            "error": None,
+            "rows": rows[:25],
+            "row_count": len(rows),
+            "net_shares_heuristic": net_shares,
+            "open_market_buys_shares": open_mkt_buys,
+            "open_market_sells_shares": open_mkt_sells,
+            "awards_gifts_shares_excluded": awards_gifts,
+            "note": (
+                "Net shares count open-market buy/sell text only; "
+                "grants/awards/gifts/tax excluded."
+            ),
+        }
+    except Exception as exc:
+        return {"source": "yfinance", "error": str(exc), "rows": []}
+
+
+def _form4_from_sec_submissions(symbol: str, *, limit: int = 15) -> dict[str, Any]:
+    """List recent Form 4 filings from SEC submissions JSON (free EDGAR)."""
+    try:
+        cik = get_cik_for_ticker(symbol)
+    except Exception as exc:
+        return {"source": "sec_submissions", "error": f"CIK resolve failed: {exc}", "filings": []}
+    try:
+        meta = fetch_entity_metadata(cik, force_refresh=False)
+        # Re-read full submissions cache for recentFilings
+        padded = str(cik).zfill(10)
+        path = os.path.join(_SIC_CACHE_DIR, f"CIK{padded}.json")
+        if not os.path.exists(path):
+            fetch_entity_metadata(cik, force_refresh=True)
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception as exc:
+        return {"source": "sec_submissions", "error": str(exc), "filings": [], "cik": cik}
+
+    recent = (raw.get("filings") or {}).get("recent") or {}
+    forms = recent.get("form") or []
+    dates = recent.get("filingDate") or []
+    accessions = recent.get("accessionNumber") or []
+    primaries = recent.get("primaryDocument") or []
+    filings: list[dict[str, Any]] = []
+    for i, form in enumerate(forms):
+        if str(form).strip().upper() not in ("4", "4/A"):
+            continue
+        acc = accessions[i] if i < len(accessions) else ""
+        acc_nodash = str(acc).replace("-", "")
+        doc = primaries[i] if i < len(primaries) else ""
+        url = ""
+        if acc_nodash and doc:
+            url = f"https://www.sec.gov/Archives/edgar/data/{int(padded)}/{acc_nodash}/{doc}"
+        filings.append(
+            {
+                "form": form,
+                "filing_date": dates[i] if i < len(dates) else None,
+                "accession": acc,
+                "url": url,
+            }
+        )
+        if len(filings) >= limit:
+            break
+
+    return {
+        "source": "sec_submissions",
+        "error": None,
+        "cik": padded,
+        "entity_name": meta.get("name") if isinstance(meta, dict) else None,
+        "filings": filings,
+        "form4_count_recent_index": len(filings),
+    }
+
+
+def fetch_insider_alerts(ticker: str) -> dict[str, Any]:
+    """Combine free insider signals: yfinance transactions + SEC Form 4 index.
+
+    No paid vendors. Net-share figures from yfinance are **heuristic** and must
+    be labeled as such in canonical metrics / memos.
+    """
+    symbol = (ticker or "").strip().upper()
+    as_of = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    if not symbol:
+        return {
+            "ticker": None,
+            "as_of_utc": as_of,
+            "applicable": False,
+            "error": "No ticker provided.",
+        }
+
+    yf_block = _insider_from_yfinance(symbol)
+    sec_block = _form4_from_sec_submissions(symbol)
+    net = yf_block.get("net_shares_heuristic")
+    form4_n = sec_block.get("form4_count_recent_index") or 0
+    has_open_mkt = bool(
+        (yf_block.get("open_market_buys_shares") or 0)
+        or (yf_block.get("open_market_sells_shares") or 0)
+    )
+    applicable = bool(
+        (isinstance(net, (int, float)) and has_open_mkt)
+        or form4_n > 0
+    )
+    notes = [
+        "Free sources only (yfinance insider tables + SEC submissions Form 4 index).",
+        "Net share flow is a heuristic from yfinance text/sign conventions — not a Form 4 audit.",
+        "Form 4 list is presence/timing of filings, not parsed transaction dollars.",
+    ]
+    err_bits = [e for e in (yf_block.get("error"), sec_block.get("error")) if e]
+    return {
+        "ticker": symbol,
+        "as_of_utc": as_of,
+        "applicable": applicable,
+        "error": "; ".join(err_bits) if err_bits and not applicable else None,
+        "net_shares_heuristic": net if isinstance(net, (int, float)) else None,
+        "yfinance_row_count": yf_block.get("row_count") or 0,
+        "form4_recent_count": form4_n,
+        "latest_form4_date": (sec_block.get("filings") or [{}])[0].get("filing_date")
+        if sec_block.get("filings")
+        else None,
+        "notable_form4s": (sec_block.get("filings") or [])[:8],
+        "yfinance": yf_block,
+        "sec_form4": sec_block,
+        "notes": notes,
+    }
+
+
+def fetch_market_structure_packet(ticker: str) -> dict[str, Any]:
+    """Bundle options + insider free-source packets for metrics_compute."""
+    return {
+        "ticker": (ticker or "").strip().upper() or None,
+        "as_of_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "options_flow": fetch_options_flow(ticker),
+        "insider_alerts": fetch_insider_alerts(ticker),
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

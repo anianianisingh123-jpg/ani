@@ -34,6 +34,8 @@ from .routing import agents_for_query_type, synthesis_mode_for_query_type
 from .state import ResearchState
 from .tools import (
     clip_search_digest,
+    fetch_insider_alerts,
+    fetch_options_flow,
     gather_business_overview_context,
     gather_live_research_context,
     gather_macro_regime_context,
@@ -891,23 +893,63 @@ def data_gatherer_node(state: ResearchState) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def metrics_compute_node(state: ResearchState) -> dict:
-    """Compute CanonicalMetrics from statements + live market.
+    """Compute CanonicalMetrics from statements + live market + free market structure.
 
     Populates: canonical_metrics. No LLM. Must run after data_gatherer and
     before capital_allocation / analysis agents.
+
+    Also pulls free options (yfinance chains) and insider (yfinance + SEC Form 4
+    index) packets — no paid vendors — and folds them into canonical metrics so
+    bull/bear/valuation see them via the shared metrics block.
     """
     if not _agent_enabled(state, "metrics"):
         print("[metrics] skipped (query_type routing)", flush=True)
         return {"canonical_metrics": {}}
+
+    ticker = state.get("ticker")
+    options_flow: dict = {}
+    insider_alerts: dict = {}
+    if ticker:
+        try:
+            options_flow = fetch_options_flow(str(ticker))
+            print(
+                f"[metrics] options_flow applicable={options_flow.get('applicable')} "
+                f"pc_vol={options_flow.get('put_call_volume_ratio')} "
+                f"unusual={options_flow.get('unusual_volume_flag')} "
+                f"err={options_flow.get('error')}",
+                flush=True,
+            )
+        except Exception as exc:
+            options_flow = {"applicable": False, "error": str(exc)}
+            print(f"[metrics] options_flow failed: {exc}", flush=True)
+        try:
+            insider_alerts = fetch_insider_alerts(str(ticker))
+            print(
+                f"[metrics] insider_alerts applicable={insider_alerts.get('applicable')} "
+                f"net_shares={insider_alerts.get('net_shares_heuristic')} "
+                f"form4_n={insider_alerts.get('form4_recent_count')} "
+                f"err={insider_alerts.get('error')}",
+                flush=True,
+            )
+        except Exception as exc:
+            insider_alerts = {"applicable": False, "error": str(exc)}
+            print(f"[metrics] insider_alerts failed: {exc}", flush=True)
+
     cm = compute_canonical_metrics(
         income_statement=state.get("income_statement") or {},
         balance_sheet=state.get("balance_sheet") or {},
         cash_flow_statement=state.get("cash_flow_statement") or {},
         live_market=None,  # pulled from statement live_market attach if present
-        ticker=state.get("ticker"),
+        ticker=ticker,
         sector=state.get("sector"),
         sic=state.get("sic"),
+        options_flow=options_flow or None,
+        insider_alerts=insider_alerts or None,
     )
+    # Keep raw packets for debugging / future nodes (optional state keys unused by graph).
+    cm["options_flow"] = options_flow
+    cm["insider_alerts"] = insider_alerts
+
     summ = cm.get("summary") or {}
     # Surface the buyback and net-cash contracts that previously failed QC.
     by_id = cm.get("by_id") or {}
@@ -918,6 +960,10 @@ def metrics_compute_node(state: ResearchState) -> dict:
         "net_cash_ex_st_investments__current_annual",
         "trailing_pe",
         "market_cap",
+        "options_put_call_volume_ratio__live",
+        "options_unusual_volume_flag__live",
+        "insider_net_shares_heuristic__live",
+        "insider_form4_recent_count__live",
     ):
         m = by_id.get(mid)
         if m and m.get("headline"):

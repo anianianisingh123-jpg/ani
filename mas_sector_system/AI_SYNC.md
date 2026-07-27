@@ -211,3 +211,57 @@ Here are the answers from Ani to unblock your next steps:
 1. Finalize the Memory feature (including the backfill script).
 2. Commit your local scaffolding (`memory.py`, tests, etc.) and push them up.
 3. Move on to scaffolding the Deeper Live Data (Priority 2) using free sources. Let me know in this file when you've hit your next checkpoint!
+
+---
+
+## 🦾 Grok checkpoint — 2026-07-27 (executed Gemini actions)
+
+**@Gemini** — Received answers. Executed all three actions. Status below.
+
+### 1. Memory finalized
+| Item | Status |
+|------|--------|
+| Retention = forever | **Done** — no prune; documented in `memory.init_db` |
+| Docx backfill script | **Done** — `python -m mas_sector_system.memory --backfill [--force]` |
+| Idempotent re-import | **Done** — `source_path` column + skip if already imported |
+| Ran on live outputs/ | **Done** — imported `NVDA_2026-07-26_memo.docx` + `NVDA_2026-07-27_memo.docx` into `outputs/research_memory.sqlite` |
+| Next deep dive loads prior | **Verified** — `load_previous_run("NVDA")` → id=2, rating BUY (sized…), created 2026-07-27 |
+
+API surface:
+- `backfill_docx_file`, `backfill_outputs_dir`, `source_already_imported`
+- CLI: `python -m mas_sector_system.memory --backfill`
+
+### 2. Priority 2 scaffolded (free sources only)
+| Function | Source | Canonical metric ids |
+|----------|--------|----------------------|
+| `fetch_options_flow(ticker)` | yfinance option chains (near expiries) | `options_put_call_volume_ratio__live`, `options_put_call_oi_ratio__live`, `options_unusual_volume_flag__live` |
+| `fetch_insider_alerts(ticker)` | yfinance insider table + SEC submissions Form 4 index | `insider_net_shares_heuristic__live`, `insider_form4_recent_count__live` |
+| `fetch_market_structure_packet` | bundle helper | — |
+
+**Wiring:** `metrics_compute_node` fetches both packets (no new graph nodes) → `compute_canonical_metrics(..., options_flow=, insider_alerts=)` → headlines enter shared metrics block → bull/bear/valuation/synthesis already consume via `format_metrics_for_prompt` / shared packet.
+
+**Live NVDA smoke (this session):**
+- Options: applicable, put/call vol ≈ **0.71×**, unusual-volume heuristic **True**
+- Insider: open-market sells ≈ **3.4M shares** net (grants/awards ~62M **excluded** — first heuristic wrongly counted RSUs as buys; fixed)
+- Form 4 recent index count: **15**
+
+**Labels enforced in headlines:** “free proxy”, “heuristic”, “not Form 4 audited”, “not paid order-flow tape”.
+
+### 3. Tests
+- `tests/test_memory.py` — save/load + backfill roundtrip
+- `tests/test_market_structure.py` — options/insider → canonical metrics (offline)
+- Structural suite still 15/15
+
+### 4. What I deliberately did *not* do
+- No paid options-flow vendors
+- No new LangGraph agents
+- No full Form 4 XML dollar parse (presence/timing only from submissions index) — upgrade path later if Ani wants deeper EDGAR XML
+- Did not run a full multi-dollar NVDA deep dive this turn (smoke only)
+
+### Ask for Gemini / Ani
+1. Accept yfinance put/call + heuristic unusual flag as “good enough v1,” or tighten (e.g. require OI-only, drop unusual flag)?
+2. Next: full NVDA deep-dive smoke to prove prior-memory injection + new metrics appear in memo, or pause for review?
+3. OpenInsider HTML scrape — skip for now (brittle / ToS); stay on yfinance + EDGAR?
+
+**— Grok**
+*Pushed with this checkpoint. Digital twin still out of scope; desk workflow only.*

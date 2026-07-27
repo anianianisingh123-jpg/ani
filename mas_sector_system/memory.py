@@ -39,7 +39,10 @@ def _connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
 
 
 def init_db(db_path: Optional[Path] = None) -> Path:
-    """Create the runs table if missing. Returns the DB path."""
+    """Create the runs table if missing. Returns the DB path.
+
+    Retention policy: keep **all** runs forever (no prune). Gemini/Ani 2026-07-27.
+    """
     path = Path(db_path) if db_path else DEFAULT_DB_PATH
     with _connect(path) as conn:
         conn.execute(
@@ -66,13 +69,25 @@ def init_db(db_path: Optional[Path] = None) -> Path:
                 relative_valuation TEXT,
                 metrics_summary_json TEXT,
                 canonical_metrics_json TEXT,
-                cost_total_usd REAL
+                cost_total_usd REAL,
+                source_path TEXT
             )
             """
         )
+        # Migrate older DBs that predate source_path.
+        cols = {
+            r[1]
+            for r in conn.execute("PRAGMA table_info(runs)").fetchall()
+        }
+        if "source_path" not in cols:
+            conn.execute("ALTER TABLE runs ADD COLUMN source_path TEXT")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_runs_ticker_created "
             "ON runs(ticker, created_at DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_runs_source_path "
+            "ON runs(source_path)"
         )
         conn.commit()
     return path
@@ -134,6 +149,9 @@ def _metrics_summary(canonical: Optional[dict[str, Any]]) -> dict[str, Any]:
         "total_debt__current_quarter",
         "buyback_dollars_per_pct_point__current_annual_vs_prior_annual",
         "inventory__current_quarter",
+        "options_put_call_volume_ratio__live",
+        "insider_net_shares_heuristic__live",
+        "insider_form4_recent_count__live",
     )
     seen: set[str] = set()
     for mid in preferred:
@@ -193,6 +211,9 @@ def save_run(
         "metrics_summary": metrics_summary,
     }
 
+    created_at = state.get("memory_created_at") or _now_utc()
+    source_path = state.get("memory_source_path") or None
+
     with _connect(db_path) as conn:
         cur = conn.execute(
             """
@@ -205,7 +226,7 @@ def save_run(
                 bull_thesis, bear_thesis,
                 fundamental_valuation, relative_valuation,
                 metrics_summary_json, canonical_metrics_json,
-                cost_total_usd
+                cost_total_usd, source_path
             ) VALUES (
                 ?, ?, ?, ?, ?,
                 ?, ?, ?, ?,
@@ -215,7 +236,7 @@ def save_run(
                 ?, ?,
                 ?, ?,
                 ?, ?,
-                ?
+                ?, ?
             )
             """,
             (
@@ -223,7 +244,7 @@ def save_run(
                 state.get("sector") or "",
                 state.get("mode") or "deep_dive",
                 state.get("user_query") or "",
-                _now_utc(),
+                created_at,
                 state.get("qc_status") or "",
                 cover.get("rating") or "",
                 cover.get("price_target") or "",
@@ -240,6 +261,7 @@ def save_run(
                 json.dumps(metrics_summary, default=str),
                 json.dumps(cm_slim, default=str),
                 float(cost_total) if cost_total is not None else None,
+                source_path,
             ),
         )
         conn.commit()
@@ -372,3 +394,203 @@ def load_prior_context_for_state(
         "prior_run_meta": meta,
         "prior_run_context": format_prior_run_for_prompt(prior),
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Docx / file backfill (one-shot import of historical memos)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_DOCX_NAME_RE = re.compile(
+    r"^(?P<ticker>[A-Za-z0-9.\-]+)_(?P<date>\d{4}-\d{2}-\d{2})_memo\.docx$",
+    re.I,
+)
+
+
+def _extract_docx_text(path: Path) -> str:
+    """Extract plain text from a .docx via python-docx."""
+    try:
+        from docx import Document
+    except ImportError as exc:
+        raise RuntimeError(
+            "python-docx is required for memo backfill (pip install python-docx)"
+        ) from exc
+    doc = Document(str(path))
+    paras = [p.text for p in doc.paragraphs if (p.text or "").strip()]
+    return "\n\n".join(paras).strip()
+
+
+def _parse_docx_filename(path: Path) -> dict[str, str]:
+    """Parse TICKER_YYYY-MM-DD_memo.docx → ticker + ISO date (UTC midnight)."""
+    m = _DOCX_NAME_RE.match(path.name)
+    if not m:
+        return {}
+    date = m.group("date")
+    return {
+        "ticker": m.group("ticker").upper(),
+        "created_at": f"{date}T12:00:00+00:00",
+    }
+
+
+def source_already_imported(
+    source_path: str,
+    *,
+    db_path: Optional[Path] = None,
+) -> bool:
+    """True if this absolute/relative source_path was already backfilled."""
+    init_db(db_path)
+    key = str(source_path)
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT id FROM runs WHERE source_path = ? LIMIT 1",
+            (key,),
+        ).fetchone()
+    return row is not None
+
+
+def backfill_docx_file(
+    path: Path | str,
+    *,
+    db_path: Optional[Path] = None,
+    sector: str = "",
+    force: bool = False,
+) -> Optional[int]:
+    """Import one memo .docx into the runs table. Returns run id or None if skipped."""
+    p = Path(path).resolve()
+    if not p.is_file() or p.suffix.lower() != ".docx":
+        print(f"[memory:backfill] skip (not a docx file): {p}", flush=True)
+        return None
+
+    rel = str(p.relative_to(_REPO_ROOT)) if _REPO_ROOT in p.parents else str(p)
+    if not force and source_already_imported(rel, db_path=db_path):
+        print(f"[memory:backfill] already imported: {rel}", flush=True)
+        return None
+
+    meta = _parse_docx_filename(p)
+    text = _extract_docx_text(p)
+    if not text:
+        print(f"[memory:backfill] empty text: {rel}", flush=True)
+        return None
+
+    ticker = meta.get("ticker")
+    if not ticker:
+        # Fallback: first token of first line, or cover "Ticker: XYZ"
+        m = re.search(r"\bTicker:\s*([A-Z0-9.\-]{1,10})\b", text)
+        if m:
+            ticker = m.group(1).upper()
+        else:
+            m2 = re.search(r"\(([A-Z]{1,5})\)", text[:200])
+            ticker = m2.group(1).upper() if m2 else None
+    if not ticker:
+        print(f"[memory:backfill] could not infer ticker: {rel}", flush=True)
+        return None
+
+    created_at = meta.get("created_at")
+    if not created_at:
+        # File mtime as fallback
+        ts = datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc)
+        created_at = ts.isoformat(timespec="seconds")
+
+    # Infer sector lightly from memo body
+    sector_guess = sector
+    if not sector_guess:
+        m = re.search(r"\bSector:\s*([^\n|]+)", text)
+        if m:
+            sector_guess = m.group(1).strip().strip("*").strip()
+
+    state = {
+        "ticker": ticker,
+        "sector": sector_guess or "",
+        "mode": "deep_dive",
+        "user_query": f"[backfill from {rel}]",
+        "qc_status": "BACKFILL",
+        "final_memo": text,
+        "styled_memo": text,
+        "memory_created_at": created_at,
+        "memory_source_path": rel,
+        "canonical_metrics": {},
+        "cost_data": {},
+    }
+    return save_run(state, db_path=db_path)
+
+
+def backfill_outputs_dir(
+    outputs_dir: Optional[Path | str] = None,
+    *,
+    db_path: Optional[Path] = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Import all ``*_memo.docx`` files under outputs/. Idempotent unless force=True."""
+    out_dir = Path(outputs_dir) if outputs_dir else (_REPO_ROOT / "outputs")
+    if not out_dir.is_dir():
+        return {"imported": 0, "skipped": 0, "errors": [f"missing dir {out_dir}"]}
+
+    imported: list[dict[str, Any]] = []
+    skipped = 0
+    errors: list[str] = []
+    for path in sorted(out_dir.glob("*_memo.docx")):
+        try:
+            rid = backfill_docx_file(path, db_path=db_path, force=force)
+            if rid is None:
+                skipped += 1
+            else:
+                imported.append({"id": rid, "path": path.name})
+        except Exception as exc:
+            errors.append(f"{path.name}: {exc}")
+            print(f"[memory:backfill] ERROR {path.name}: {exc}", flush=True)
+
+    summary = {
+        "imported": len(imported),
+        "skipped": skipped,
+        "errors": errors,
+        "runs": imported,
+        "db": str(db_path or DEFAULT_DB_PATH),
+    }
+    print(
+        f"[memory:backfill] done imported={summary['imported']} "
+        f"skipped={skipped} errors={len(errors)} db={summary['db']}",
+        flush=True,
+    )
+    return summary
+
+
+def main_cli(argv: Optional[list[str]] = None) -> int:
+    """CLI: python -m mas_sector_system.memory --backfill [--force]"""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="MAS long-term research memory tools")
+    parser.add_argument(
+        "--backfill",
+        action="store_true",
+        help="Import outputs/*_memo.docx into SQLite research memory",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-import even if source_path already present",
+    )
+    parser.add_argument(
+        "--outputs-dir",
+        default=None,
+        help="Directory containing *_memo.docx (default: repo outputs/)",
+    )
+    parser.add_argument(
+        "--db",
+        default=None,
+        help="SQLite path (default: outputs/research_memory.sqlite)",
+    )
+    args = parser.parse_args(argv)
+    if not args.backfill:
+        parser.print_help()
+        return 2
+    db = Path(args.db) if args.db else None
+    summary = backfill_outputs_dir(
+        args.outputs_dir,
+        db_path=db,
+        force=bool(args.force),
+    )
+    print(json.dumps(summary, indent=2))
+    return 0 if not summary.get("errors") else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main_cli())

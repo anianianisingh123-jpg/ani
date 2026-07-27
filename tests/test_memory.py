@@ -97,8 +97,36 @@ def test_missing_ticker_returns_none():
         assert load_previous_run("", db_path=db) is None
 
 
+def test_backfill_docx_roundtrip():
+    from docx import Document
+    from mas_sector_system.memory import backfill_docx_file, load_previous_run
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_p = Path(tmp)
+        db = tmp_p / "mem.sqlite"
+        # Create a minimal memo docx named like production exports.
+        path = tmp_p / "NVDA_2026-07-20_memo.docx"
+        doc = Document()
+        doc.add_paragraph("NVIDIA CORPORATION (NVDA)")
+        doc.add_paragraph(
+            "Ticker: NVDA | Rating: HOLD | Price Target: $200.00 | Sector: Semiconductors"
+        )
+        doc.add_paragraph("Body of the memo for backfill testing.")
+        doc.save(str(path))
+
+        rid = backfill_docx_file(path, db_path=db)
+        assert rid is not None
+        # Idempotent second pass
+        assert backfill_docx_file(path, db_path=db) is None
+        prior = load_previous_run("NVDA", db_path=db)
+        assert prior is not None
+        assert "HOLD" in (prior.get("rating") or "")
+        assert prior.get("source_path")
+
+
 if __name__ == "__main__":
     test_save_and_load_roundtrip()
     test_no_prior_formats_cleanly()
     test_missing_ticker_returns_none()
+    test_backfill_docx_roundtrip()
     print("OK")

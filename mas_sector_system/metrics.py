@@ -1845,6 +1845,211 @@ def _market_metrics(
     return out
 
 
+def _market_structure_metrics(
+    options_flow: Optional[dict[str, Any]],
+    insider_alerts: Optional[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Canonical records for free options/insider packets (no paid vendors)."""
+    out: list[dict[str, Any]] = []
+    opt = options_flow if isinstance(options_flow, dict) else {}
+    ins = insider_alerts if isinstance(insider_alerts, dict) else {}
+    as_of = opt.get("as_of_utc") or ins.get("as_of_utc") or _now_utc()
+
+    # Options put/call volume ratio
+    pc = _safe_float(opt.get("put_call_volume_ratio"))
+    if opt.get("applicable") and pc is not None:
+        out.append(
+            _record(
+                id="options_put_call_volume_ratio__live",
+                value=pc,
+                unit="ratio",
+                basis_period=str(as_of),
+                qualifiers=[
+                    "yfinance option chain aggregate",
+                    "free proxy — not paid order-flow tape",
+                    f"expiries={','.join(opt.get('expiries_used') or [])}",
+                ],
+                staleness=[],
+                source_lines=["yfinance.option_chain.volume"],
+                computation="sum(put volume) / sum(call volume) over near expiries",
+                applicable=True,
+                headline=(
+                    f"options put/call volume ratio of {_fmt_num(pc, 2)}x "
+                    f"(yfinance chain, free proxy as of {as_of}; "
+                    f"put vol={_fmt_num(opt.get('put_volume'), 0)}, "
+                    f"call vol={_fmt_num(opt.get('call_volume'), 0)})"
+                ),
+                confidence="moderate",
+            )
+        )
+    else:
+        reason = opt.get("error") or "options chain unavailable or zero volume"
+        out.append(
+            _unavailable(
+                "options_put_call_volume_ratio__live",
+                basis_period=str(as_of),
+                reason=str(reason),
+                source_lines=["yfinance.option_chain"],
+                computation="put_vol / call_vol",
+            )
+        )
+
+    pc_oi = _safe_float(opt.get("put_call_oi_ratio"))
+    if opt.get("applicable") and pc_oi is not None:
+        out.append(
+            _record(
+                id="options_put_call_oi_ratio__live",
+                value=pc_oi,
+                unit="ratio",
+                basis_period=str(as_of),
+                qualifiers=["yfinance open interest", "free proxy"],
+                staleness=[],
+                source_lines=["yfinance.option_chain.openInterest"],
+                computation="sum(put OI) / sum(call OI)",
+                applicable=True,
+                headline=(
+                    f"options put/call open-interest ratio of {_fmt_num(pc_oi, 2)}x "
+                    f"(yfinance chain as of {as_of})"
+                ),
+                confidence="moderate",
+            )
+        )
+
+    if opt.get("unusual_volume_flag") is True:
+        vtoi = _safe_float(opt.get("option_volume_to_oi"))
+        out.append(
+            _record(
+                id="options_unusual_volume_flag__live",
+                value=1.0,
+                unit="flag",
+                basis_period=str(as_of),
+                qualifiers=[
+                    "heuristic: volume/OI >= 0.5 and total option volume >= 5000",
+                    "not a paid unusual-flow alert",
+                ],
+                staleness=[],
+                source_lines=["yfinance.option_chain"],
+                computation="volume_to_oi threshold heuristic",
+                applicable=True,
+                headline=(
+                    f"options unusual-volume FLAG raised "
+                    f"(volume/OI={_fmt_num(vtoi, 2) if vtoi is not None else 'n/a'}; "
+                    f"heuristic free proxy as of {as_of})"
+                ),
+                confidence="low",
+            )
+        )
+    elif opt.get("applicable"):
+        out.append(
+            _record(
+                id="options_unusual_volume_flag__live",
+                value=0.0,
+                unit="flag",
+                basis_period=str(as_of),
+                qualifiers=["heuristic free proxy — no flag"],
+                staleness=[],
+                source_lines=["yfinance.option_chain"],
+                computation="volume_to_oi threshold heuristic",
+                applicable=True,
+                headline=(
+                    f"options unusual-volume flag NOT raised "
+                    f"(heuristic free proxy as of {as_of})"
+                ),
+                confidence="low",
+            )
+        )
+
+    # Insider net shares (heuristic — open-market text only)
+    net = _safe_float(ins.get("net_shares_heuristic"))
+    yf_rows = int(ins.get("yfinance_row_count") or 0)
+    buys = _safe_float((ins.get("yfinance") or {}).get("open_market_buys_shares"))
+    sells = _safe_float((ins.get("yfinance") or {}).get("open_market_sells_shares"))
+    has_om = bool((buys or 0) > 0 or (sells or 0) > 0)
+    if ins.get("applicable") and net is not None and has_om:
+        direction = "net buying" if net > 0 else ("net selling" if net < 0 else "flat")
+        out.append(
+            _record(
+                id="insider_net_shares_heuristic__live",
+                value=net,
+                unit="shares",
+                basis_period=str(as_of),
+                qualifiers=[
+                    "yfinance open-market buy/sell text only",
+                    "grants/awards/gifts/tax excluded",
+                    "not a Form 4 dollar audit",
+                    direction,
+                ],
+                staleness=[],
+                source_lines=["yfinance.insider_transactions"],
+                computation="open-market buys − sells from yfinance Text field",
+                applicable=True,
+                headline=(
+                    f"insider open-market flow heuristic: {direction} of "
+                    f"{_fmt_num(abs(net), 0)} shares "
+                    f"(buys={_fmt_num(buys or 0, 0)}, sells={_fmt_num(sells or 0, 0)}; "
+                    f"yfinance {yf_rows} rows; as of {as_of}; not Form 4 audited)"
+                ),
+                confidence="low",
+            )
+        )
+    else:
+        reason = ins.get("error") or (
+            "no open-market buy/sell rows in yfinance table "
+            "(awards/gifts only or empty)"
+        )
+        out.append(
+            _unavailable(
+                "insider_net_shares_heuristic__live",
+                basis_period=str(as_of),
+                reason=str(reason),
+                source_lines=["yfinance.insider_transactions"],
+                computation="heuristic open-market net shares",
+            )
+        )
+
+    form4_n = ins.get("form4_recent_count")
+    try:
+        form4_n_i = int(form4_n) if form4_n is not None else None
+    except (TypeError, ValueError):
+        form4_n_i = None
+    if form4_n_i is not None and form4_n_i >= 0 and not ins.get("sec_form4", {}).get("error"):
+        latest = ins.get("latest_form4_date") or "n/a"
+        out.append(
+            _record(
+                id="insider_form4_recent_count__live",
+                value=float(form4_n_i),
+                unit="count",
+                basis_period=str(as_of),
+                qualifiers=[
+                    "SEC submissions recent Form 4 index",
+                    "count of filings — not transaction dollars",
+                ],
+                staleness=[],
+                source_lines=["sec.submissions.filings.recent form=4"],
+                computation="count Form 4 / 4/A in recent filings index",
+                applicable=True,
+                headline=(
+                    f"SEC Form 4 recent filings: {form4_n_i} "
+                    f"(latest filing date {latest}; free EDGAR index as of {as_of})"
+                ),
+                confidence="moderate",
+            )
+        )
+    else:
+        reason = (ins.get("sec_form4") or {}).get("error") or "Form 4 index unavailable"
+        out.append(
+            _unavailable(
+                "insider_form4_recent_count__live",
+                basis_period=str(as_of),
+                reason=str(reason),
+                source_lines=["sec.submissions"],
+                computation="count Form 4 in recent index",
+            )
+        )
+
+    return out
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Public API
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1858,8 +2063,13 @@ def compute_canonical_metrics(
     ticker: Optional[str] = None,
     sector: Optional[str] = None,
     sic: Optional[str] = None,
+    options_flow: Optional[dict] = None,
+    insider_alerts: Optional[dict] = None,
 ) -> dict[str, Any]:
     """Compute the full CanonicalMetrics object from statements + live market.
+
+    Optional free-source packets (options_flow, insider_alerts) add market-
+    structure metrics without new graph nodes.
 
     Returns a JSON-serializable dict::
 
@@ -1892,6 +2102,7 @@ def compute_canonical_metrics(
 
     metrics.extend(_cross_period_metrics(income, balance, cash_flow, metas))
     metrics.extend(_market_metrics(live, income, balance, cash_flow, metas))
+    metrics.extend(_market_structure_metrics(options_flow, insider_alerts))
 
     by_id = {m["id"]: m for m in metrics}
     headlines = [m["headline"] for m in metrics if m.get("applicable") and m.get("headline")]
@@ -1996,6 +2207,8 @@ def format_metrics_for_prompt(canonical: Optional[dict[str, Any]]) -> str:
         "enterprise_value",
         "net_cash",
         "net_debt",
+        "options_",
+        "insider_",
         "revenue_yoy",
         "fcf_yoy",
         "buyback_",

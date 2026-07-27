@@ -14,6 +14,8 @@ The system operates in two distinct modes managed by a Supervisor Router:
 - Final Output: `final_memo` (raw synthesis, preserved permanently), `styled_memo` (light format pass)
 - QC / Review: `qc_report`, `qc_status` (`PASS` | `PASS_WITH_FLAGS` | `FAIL`)
 - Cost: `cost_report` (memo appendix), `cost_data` (structured per-node figures; also appended to `outputs/cost_log.jsonl`)
+- Long-term memory (`memory.py` / SQLite `outputs/research_memory.sqlite`): `prior_run_id`, `prior_run_meta`, `prior_run_context` loaded at deep_dive start; saved on export / QC halt. Backfill: `python -m mas_sector_system.memory --backfill`. Keep all runs forever.
+- Market structure (free sources only, via `metrics_compute`): options put/call (yfinance chains), insider open-market heuristic + SEC Form 4 filing count — no paid vendors.
 
 ## 3. Execution Pipeline Topology (`main.py` & `agents.py`)
 - Screener Branch: entry → `screener` → END
