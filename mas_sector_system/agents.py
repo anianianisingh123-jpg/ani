@@ -25,20 +25,34 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from .cost import finalize_run_cost, record_llm_call
+from .metrics import (
+    CANONICAL_METRICS_SYSTEM_RULE,
+    compute_canonical_metrics,
+    format_metrics_for_prompt,
+)
+from .routing import agents_for_query_type, synthesis_mode_for_query_type
 from .state import ResearchState
 from .tools import (
+    clip_search_digest,
     gather_business_overview_context,
     gather_live_research_context,
     gather_macro_regime_context,
     gather_management_track_record_context,
     multi_search,
 )
+from .validate import format_validation_for_prompt, validate_inputs
 from .valuation_engine import (
     compute_dcf_from_state,
     fetch_peer_multiples,
     format_comps_for_prompt,
     format_dcf_for_prompt,
 )
+
+
+def _agent_enabled(state: ResearchState, key: str) -> bool:
+    """Phase 4: skip nodes not needed for this query_type."""
+    qt = state.get("query_type") or "full_underwrite"
+    return bool(agents_for_query_type(str(qt)).get(key, True))
 
 # ── Model tiering ────────────────────────────────────────────────────────────
 # Opus: highest-stakes reasoning (data foundation + final deliverable).
@@ -53,10 +67,28 @@ MAX_TOKENS_OPUS = 8000
 MAX_TOKENS_SONNET = 6000
 # Full investment memos need headroom; analysis retries use this too.
 MAX_TOKENS_MEMO = 16000
+# data_gatherer returns a large JSON object (3 statements + prose). 8k Opus
+# max_tokens truncates mid-JSON; that silently corrupts sec_filing_summary.
+# 16k was still insufficient on NVDA (full annotated statement dump); 32k
+# plus a compact-output prompt + prose-only retry is the safety stack.
+MAX_TOKENS_GATHERER = 32000
 # Retry budget when first pass returns empty / max_tokens-truncated text.
 MAX_TOKENS_RETRY = 12000
 # Minimum usable prose length — below this we treat the call as failed.
 MIN_USEFUL_CHARS = 200
+
+# Shared system prefix for bull / bear / fundamental / relative.
+# Must be byte-identical across those four calls so Anthropic's prefix cache
+# can hit on the shared research packet that follows.
+SHARED_ANALYSIS_SYSTEM_PROMPT = f"""\
+You are an analytical writer on an investment research team. You will receive a
+shared company research packet and a role-specific lens instruction for this
+call only. Follow the lens instruction. Use only the packet (and any engine
+blocks attached after it). Do not invent figures or pull stale training-data
+numbers. If a metric is missing, say so.
+
+{CANONICAL_METRICS_SYSTEM_RULE}
+"""
 
 
 def _llm(
@@ -247,38 +279,41 @@ def _run(
 
 
 def _run_with_shared_cache(
-    system_prompt: str,
     shared_data_block: str,
-    task_instruction: str,
+    role_instruction: str,
     *,
     model: str = SONNET_MODEL,
     max_tokens: Optional[int] = None,
     label: str = "cached",
     disable_thinking: bool = True,
     retry_on_empty: bool = True,
+    extra_uncached: Optional[list[str]] = None,
 ) -> str:
-    """Round trip with Anthropic prompt caching on the shared data block.
+    """Round trip with Anthropic prompt caching on the shared research packet.
 
-    bull / bear / fundamental / relative all receive the same statement +
-    overview payload; only the system lens and task instruction differ.
-    Marking the shared block with cache_control makes subsequent calls in
-    the same run hit a cheaper cached read.
+    Anthropic's cache is a *prefix* cache: tools → system → messages, and the
+    entire prefix through the cache breakpoint must match byte-for-byte.
+    Therefore:
+      - system prompt is SHARED_ANALYSIS_SYSTEM_PROMPT (identical for all four)
+      - shared_data_block is the cache breakpoint (identical research packet)
+      - role_instruction + optional extra_uncached (DCF / comps / peer color)
+        sit *after* the breakpoint so per-agent content never busts the cache
     """
+    human_blocks: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": shared_data_block,
+            "cache_control": {"type": "ephemeral"},
+        },
+    ]
+    for block in extra_uncached or []:
+        if block and str(block).strip():
+            human_blocks.append({"type": "text", "text": str(block)})
+    human_blocks.append({"type": "text", "text": role_instruction})
+
     messages = [
-        SystemMessage(content=system_prompt),
-        HumanMessage(
-            content=[
-                {
-                    "type": "text",
-                    "text": shared_data_block,
-                    "cache_control": {"type": "ephemeral"},
-                },
-                {
-                    "type": "text",
-                    "text": task_instruction,
-                },
-            ]
-        ),
+        SystemMessage(content=SHARED_ANALYSIS_SYSTEM_PROMPT),
+        HumanMessage(content=human_blocks),
     ]
     text, bits = _invoke(
         messages,
@@ -328,6 +363,14 @@ def _parse_json_blob(raw: str) -> Optional[Dict[str, Any]]:
 
 
 def _json_block(label: str, payload: Any) -> str:
+    """Format a labeled block for prompts.
+
+    Plain strings pass through unescaped (json.dumps would quote them and turn
+    newlines into literal \\n, degrading multi-paragraph prose for every
+    downstream agent). Dicts / lists / other types still go through json.dumps.
+    """
+    if isinstance(payload, str):
+        return f"=== {label} ===\n{payload}"
     return f"=== {label} ===\n{json.dumps(payload, indent=2, default=str)}"
 
 
@@ -336,12 +379,16 @@ def _shared_research_payload(state: ResearchState) -> str:
 
     Intentionally excludes debug/audit fields (_live_*, queries, timestamps)
     so they are not re-serialized into every downstream prompt.
+    Canonical metrics headlines come first so the contract is hard to miss.
     """
     return "\n\n".join(
         [
             f"Target: {state.get('ticker') or state['sector']}",
             f"Sector: {state['sector']}",
             f"User request: {state['user_query']}",
+            f"Query type: {state.get('query_type') or 'full_underwrite'}",
+            format_metrics_for_prompt(state.get("canonical_metrics")),
+            format_validation_for_prompt(state.get("validation_report")),
             _json_block("BUSINESS OVERVIEW", state.get("business_overview") or "Not provided."),
             _json_block("INCOME STATEMENT", state.get("income_statement") or {}),
             _json_block("BALANCE SHEET", state.get("balance_sheet") or {}),
@@ -405,6 +452,9 @@ def business_overview_node(state: ResearchState) -> dict:
     Populates: business_overview.
     Independent of data_gatherer — runs in parallel from the entry point.
     """
+    if not _agent_enabled(state, "business_overview"):
+        print("[business_overview] skipped (query_type routing)", flush=True)
+        return {"business_overview": ""}
     ctx = gather_business_overview_context(
         ticker=state.get("ticker"),
         sector=state["sector"],
@@ -491,6 +541,9 @@ def macro_regime_node(state: ResearchState) -> dict:
     Independent Tavily research — runs in parallel with data_gatherer and
     business_overview from the deep-dive entry point.
     """
+    if not _agent_enabled(state, "macro_regime"):
+        print("[macro_regime] skipped (query_type routing)", flush=True)
+        return {"macro_regime_assessment": ""}
     ctx = gather_macro_regime_context(
         ticker=state.get("ticker"),
         sector=state["sector"],
@@ -578,6 +631,9 @@ def management_track_record_node(state: ResearchState) -> dict:
     business_overview, and macro_regime from the deep-dive entry point.
     Does not analyze capital allocation (separate node).
     """
+    if not _agent_enabled(state, "management_track_record"):
+        print("[management_track_record] skipped (query_type routing)", flush=True)
+        return {"management_assessment": ""}
     ctx = gather_management_track_record_context(
         ticker=state.get("ticker"),
         sector=state["sector"],
@@ -627,29 +683,48 @@ Treat the SEC statement numbers as the source of truth for financials. Do NOT
 invent numbers unsupported by the provided data. If a line is null, say so.
 
 Your job:
-- Review and lightly annotate the three statements. You may nest an
-  "adjusted" / "normalized" object under a period when one-time items are
-  clearly identifiable from the narrative (tax hits, impairments, legal
-  settlements, divestiture gains). Show headline vs. adjusted with the
-  reconciling items listed. Never silently overwrite a GAAP line.
-- Compute derived metrics that agents will need (e.g. gross/operating/net
-  margins, YoY revenue growth, FCF if not already present) ONLY when the
-  inputs exist; put them under a "derived" key per period.
-- Summarize SEC filings / narrative into sec_filing_summary (risk factors,
-  MD&A, segment trends, guidance, litigation).
+- Lightly annotate the three statements. Prefer COMPACT pass-through of the
+  input structure. Nest "adjusted" / "normalized" under a period ONLY when
+  one-time items are clearly identifiable from the narrative. Never silently
+  overwrite a GAAP line. Do NOT rewrite or re-pretty-print every line with
+  long commentary — token budget is limited and truncated JSON is unusable.
+- Compute derived metrics agents need (gross/operating/net margins, YoY
+  revenue growth, FCF if not already present) ONLY when inputs exist; put
+  them under a "derived" key per period. Keep derived keys short.
+- Write sec_filing_summary (prose): risk factors, MD&A, segment trends,
+  guidance, litigation — this is the highest-priority field.
 - Write a short macro_context grounded in the search hits.
 
-Return JSON with exactly these keys:
-  "income_statement": the statement dict (pass through structure; enrich with
-    adjusted/derived as needed; include "live_market" key with the price snapshot),
-  "balance_sheet": same pattern,
-  "cash_flow_statement": same pattern,
-  "sec_filing_summary": prose string,
-  "macro_context": prose string.
+CRITICAL OUTPUT RULES:
+- Return ONE valid JSON object and nothing else (no markdown fences if you
+  can avoid them; if you fence, close the fence).
+- Emit keys in this order so a partial write still has the prose fields:
+  sec_filing_summary, macro_context, income_statement, balance_sheet,
+  cash_flow_statement.
+- Statement values may be the input objects with only small enrichment.
+  Do not invent new line items.
 
-If statements_incomplete is true, still produce the best JSON you can from
-Tavily + live price, set each statement's "incomplete": true, and explain the
-gap in sec_filing_summary. Do not crash into empty silence.
+Return JSON with exactly these keys:
+  "sec_filing_summary": prose string,
+  "macro_context": prose string,
+  "income_statement": statement dict (include "live_market" with price snapshot),
+  "balance_sheet": same pattern,
+  "cash_flow_statement": same pattern.
+
+If statements_incomplete is true, still produce valid JSON from Tavily + live
+price, set each statement's "incomplete": true, and explain the gap in
+sec_filing_summary. Do not crash into empty silence.
+"""
+
+# Fallback when the full JSON gatherer call is truncated/unparseable: only the
+# two prose fields, so downstream agents still get a real filing summary.
+DATA_GATHERER_PROSE_RETRY_PROMPT = """\
+You are a forensic financial data analyst. A prior JSON pass failed or was
+truncated. Using ONLY the data in the user message, return a SMALL valid JSON
+object with exactly these two keys (both prose strings):
+  "sec_filing_summary": risk factors, MD&A, segment trends, guidance, litigation
+  "macro_context": short macro context from the search hits
+No statement dicts. No markdown. Valid JSON only. Keep each field under ~2500 words.
 """
 
 
@@ -659,6 +734,15 @@ def data_gatherer_node(state: ResearchState) -> dict:
     Populates: income_statement, balance_sheet, cash_flow_statement,
     sec_filing_summary, macro_context.
     """
+    if not _agent_enabled(state, "data_gatherer"):
+        print("[data_gatherer] skipped (query_type routing)", flush=True)
+        return {
+            "income_statement": {},
+            "balance_sheet": {},
+            "cash_flow_statement": {},
+            "sec_filing_summary": "",
+            "macro_context": "",
+        }
     live = gather_live_research_context(
         ticker=state.get("ticker"),
         sector=state["sector"],
@@ -681,17 +765,48 @@ def data_gatherer_node(state: ResearchState) -> dict:
         f"{_json_block('CASH FLOW STATEMENT (SEC XBRL)', live['cash_flow_statement'])}\n\n"
         f"{_json_block('LIVE MARKET (price only)', live['live_market'])}\n\n"
         f"=== NARRATIVE WEB RESEARCH (Tavily) ===\n{live['web_research']}\n\n"
-        "Using ONLY the data above, produce the requested JSON."
+        "Using ONLY the data above, produce the requested JSON. "
+        "Prioritize a complete, valid JSON close over exhaustive annotations."
     )
     raw = _run(
         DATA_GATHERER_SYSTEM_PROMPT,
         user_prompt,
         model=OPUS_MODEL,
-        max_tokens=MAX_TOKENS_OPUS,
+        max_tokens=MAX_TOKENS_GATHERER,
         label="data_gatherer",
     )
 
     parsed = _parse_json_blob(raw)
+    if parsed is None:
+        print(
+            "[data_gatherer] WARNING: JSON parse failed — "
+            "retrying prose-only pass for sec_filing_summary / macro_context",
+            flush=True,
+        )
+        prose_raw = _run(
+            DATA_GATHERER_PROSE_RETRY_PROMPT,
+            user_prompt,
+            model=OPUS_MODEL,
+            max_tokens=MAX_TOKENS_MEMO,
+            label="data_gatherer_prose_retry",
+        )
+        prose_parsed = _parse_json_blob(prose_raw)
+        if prose_parsed:
+            parsed = {
+                "sec_filing_summary": prose_parsed.get("sec_filing_summary") or "",
+                "macro_context": prose_parsed.get("macro_context") or "",
+            }
+            print(
+                "[data_gatherer] prose-only retry JSON parse ok "
+                f"(summary_chars={len(str(parsed.get('sec_filing_summary') or ''))})",
+                flush=True,
+            )
+        else:
+            print(
+                "[data_gatherer] WARNING: prose-only retry also failed JSON parse — "
+                "falling back to Tavily narrative (not raw truncated JSON)",
+                flush=True,
+            )
 
     def _stmt(key: str) -> dict:
         base = live.get(key) or {}
@@ -708,17 +823,34 @@ def data_gatherer_node(state: ResearchState) -> dict:
                 out.setdefault("error", live["statements_error"])
         return out
 
-    if parsed:
-        sec_filing_summary = parsed.get("sec_filing_summary") or raw
+    if parsed and (parsed.get("sec_filing_summary") or parsed.get("macro_context")):
+        sec_filing_summary = parsed.get("sec_filing_summary") or ""
         macro_context = parsed.get("macro_context") or ""
+        # If primary parse had statements, log full success; else prose-only.
+        has_stmts = any(
+            isinstance(parsed.get(k), dict)
+            for k in ("income_statement", "balance_sheet", "cash_flow_statement")
+        )
+        print(
+            f"[data_gatherer] JSON parse ok — "
+            f"sec_filing_summary_chars={len(str(sec_filing_summary))} "
+            f"statements_from_model={has_stmts}",
+            flush=True,
+        )
     else:
-        sec_filing_summary = raw
+        # Never dump truncated raw JSON into sec_filing_summary — it poisons
+        # every downstream agent. Prefer live Tavily narrative instead.
+        sec_filing_summary = (
+            f"(data_gatherer JSON unparseable; Tavily narrative digest "
+            f"gathered {live['gathered_at_utc']} UTC)\n"
+            f"{clip_search_digest(live.get('web_research') or '', 6000)}"
+        )
         macro_context = ""
 
     if not macro_context:
         macro_context = (
             f"Live web research digest (gathered {live['gathered_at_utc']} UTC):\n"
-            f"{(live.get('web_research') or '')[:4000]}"
+            f"{clip_search_digest(live.get('web_research') or '', 4000)}"
         )
 
     # Audit fields stay in process memory only — not written to state prompts.
@@ -729,54 +861,143 @@ def data_gatherer_node(state: ResearchState) -> dict:
         "cash_flow_statement": _stmt("cash_flow_statement"),
         "sec_filing_summary": sec_filing_summary,
         "macro_context": macro_context,
+        "cik": live.get("cik"),
+        "sic": live.get("sic"),
+        "extraction_archetype": live.get("extraction_archetype") or "general",
     }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1b. Capital Allocation — numbers-driven; after gatherer + management
+# 1a. Canonical metrics — Python only; after data_gatherer
 # ─────────────────────────────────────────────────────────────────────────────
 
-CAPITAL_ALLOCATION_SYSTEM_PROMPT = """\
+def metrics_compute_node(state: ResearchState) -> dict:
+    """Compute CanonicalMetrics from statements + live market.
+
+    Populates: canonical_metrics. No LLM. Must run after data_gatherer and
+    before capital_allocation / analysis agents.
+    """
+    if not _agent_enabled(state, "metrics"):
+        print("[metrics] skipped (query_type routing)", flush=True)
+        return {"canonical_metrics": {}}
+    cm = compute_canonical_metrics(
+        income_statement=state.get("income_statement") or {},
+        balance_sheet=state.get("balance_sheet") or {},
+        cash_flow_statement=state.get("cash_flow_statement") or {},
+        live_market=None,  # pulled from statement live_market attach if present
+        ticker=state.get("ticker"),
+        sector=state.get("sector"),
+        sic=state.get("sic"),
+    )
+    summ = cm.get("summary") or {}
+    # Surface the buyback and net-cash contracts that previously failed QC.
+    by_id = cm.get("by_id") or {}
+    for mid in (
+        "buyback_dollars_per_pct_point__current_annual_vs_prior_annual",
+        "net_cash_incl_st_investments__current_quarter",
+        "net_cash_incl_st_investments__current_annual",
+        "net_cash_ex_st_investments__current_annual",
+        "trailing_pe",
+        "market_cap",
+    ):
+        m = by_id.get(mid)
+        if m and m.get("headline"):
+            print(f"[metrics] {mid}: {m['headline']}", flush=True)
+    print(
+        f"[metrics] computed {summ.get('metric_count', 0)} records "
+        f"({summ.get('applicable_with_value', 0)} applicable, "
+        f"{summ.get('unavailable', 0)} unavailable) "
+        f"ticker={cm.get('ticker')} archetype={cm.get('archetype')}",
+        flush=True,
+    )
+    return {"canonical_metrics": cm}
+
+
+def validation_gate_node(state: ResearchState) -> dict:
+    """Phase 3: pre-narration validation after metrics, before capital/analysis."""
+    if not _agent_enabled(state, "metrics") or not _agent_enabled(state, "data_gatherer"):
+        report = {
+            "status": "PASS",
+            "checks": [],
+            "warnings": [],
+            "failures": [],
+            "summary": "validation skipped (query_type does not use statements/metrics)",
+        }
+        print(f"[validation] {report['summary']}", flush=True)
+        return {"validation_report": report, "validation_status": "PASS"}
+
+    report = validate_inputs(dict(state))
+    status = report.get("status") or "PASS"
+    print(f"[validation] {report.get('summary')}", flush=True)
+    for w in report.get("warnings") or []:
+        print(f"[validation] WARN: {w}", flush=True)
+    for f in report.get("failures") or []:
+        print(f"[validation] FAIL: {f}", flush=True)
+    if status == "FAIL":
+        print(
+            "[validation] HARD STOP before analysis fan-out — "
+            "refusing to spend narrative tokens on broken inputs",
+            flush=True,
+        )
+    return {
+        "validation_report": report,
+        "validation_status": status,
+    }
+
+
+def validation_halt_node(state: ResearchState) -> dict:
+    """Terminal node when validation FAILs."""
+    report = state.get("validation_report") or {}
+    print(
+        f"[validation_halt] Run ended without analysis. "
+        f"status={report.get('status')!r} summary={report.get('summary')!r}",
+        flush=True,
+    )
+    from .cost import finalize_run_cost
+
+    return finalize_run_cost(dict(state))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1b. Capital Allocation — numbers-driven; after metrics + management
+# ─────────────────────────────────────────────────────────────────────────────
+
+CAPITAL_ALLOCATION_SYSTEM_PROMPT = f"""\
 You are the capital allocation analyst. Your job is to assess, unbiasedly and using only the
 numbers provided, how well this management team has actually deployed the company's cash over
 the periods available in the data. This is a numbers-driven track record assessment — not a
 narrative about strategy, and not a restatement of the management agent's qualitative read.
 
-FRAMEWORK — there are five uses of cash. Assess the company's historical mix and quality
-across each, using only the figures in the statements provided:
+{CANONICAL_METRICS_SYSTEM_RULE}
 
-1. REINVESTMENT IN THE CORE BUSINESS: Capex and R&D relative to revenue and relative to prior
-   periods. Where computable from the data, note return on incremental invested capital
-   (change in operating income relative to cumulative capex/R&D over the same window) as a
-   rough quality check — flag this as an approximation, not a precise ROIC calculation, since
-   the inputs available are limited.
+FRAMEWORK — there are five uses of cash. Assess the company's historical mix and quality
+across each. For every load-bearing figure (buyback spend, share-count change, dollars per
+percentage point, R&D %, capex %, payout, debt/equity, goodwill increment), quote the matching
+canonical metrics headline — do not recompute these from raw lines:
+
+1. REINVESTMENT IN THE CORE BUSINESS: Capex and R&D relative to revenue (use canonical
+   capex_pct_revenue / rd_pct_revenue headlines). Where ROIC-like approximations require
+   combining operating-income change with capex+R&D, label that combination as an approximation
+   and still quote the canonical component headlines.
 
 2. M&A: Any acquisitions visible in the cash flow statement or referenced in the filing
-   summary. Assess size relative to the balance sheet, and where evidence exists (goodwill
-   trends, disclosed integration outcomes), whether it looks value-accretive or value-
-   destructive. If no evidence exists either way, say so — do not guess at M&A quality with no
-   supporting data.
+   summary. Use canonical goodwill_increment headlines. Assess size relative to the balance
+   sheet only with canonical totals. If no evidence exists either way, say so.
 
-3. DIVIDENDS: Dividend history if present — growth rate, payout ratio relative to free cash
-   flow, and sustainability given the cash flow trend. If no dividend, state that plainly
-   rather than treating its absence as a gap.
+3. DIVIDENDS: Use canonical dividends_paid and dividend_payout_fcf headlines when present.
+   If no dividend metric, state that plainly.
 
-4. BUYBACKS: Share repurchase activity from the cash flow statement, checked against the
-   diluted share count trend — a real test of buyback quality is whether repurchases actually
-   reduced share count, or merely offset stock-based compensation dilution (a common gap
-   between "dollars spent on buybacks" and "actual per-share benefit"). Also assess, where
-   price data is available, whether repurchases appear to have been made at reasonable
-   valuations relative to the stock's own historical range, or whether the company was buying
-   aggressively at cycle highs.
+4. BUYBACKS: Use the canonical buyback_spend, share_count_change_pct, and especially
+   buyback_dollars_per_pct_point headlines for the single annual pair provided. Never sum
+   buybacks across FY + quarter. Never invent a $/pp figure.
 
-5. DEBT MANAGEMENT: Debt issuance and repayment from the cash flow and balance sheet data —
-   is leverage trending up or down, and does the pace of any debt paydown or new issuance
-   look disciplined relative to cash generation.
+5. DEBT MANAGEMENT: Use canonical total_debt, debt_to_equity, and net_cash headlines
+   (respect ex-ST vs incl-ST qualifiers in the headline).
 
 SCORING: for each of the five categories, state a brief verdict — disciplined / neutral /
-concerning — grounded in the specific numbers that justify it. Do not give a category a
-verdict if the data provided doesn't actually support one; say the data is insufficient
-instead of guessing.
+concerning — grounded in the specific canonical headlines that justify it. Do not give a
+category a verdict if the data provided doesn't actually support one; say the data is
+insufficient instead of guessing.
 
 ALIGNMENT CHECK: cross-reference against the management_assessment's compensation-alignment
 read where relevant — e.g. if buybacks are heavy but insider selling is also heavy, or if
@@ -785,31 +1006,35 @@ flag the inconsistency explicitly.
 
 OUTPUT: one short section per category above with its verdict, followed by an overall summary
 verdict on capital allocation quality and a confidence level (high / moderate / low) based on
-how complete the underlying data was. Ground every claim in the specific figures provided —
-never estimate a number that isn't in the statements or explicitly labeled as an approximation
-per the ROIC note above.
+how complete the underlying data was. Quote canonical headlines for numbers; never estimate a
+figure that is not in the canonical metrics object or the filing summary narrative.
 """
 
 
 def capital_allocation_node(state: ResearchState) -> dict:
-    """Score capital deployment from statements + management alignment.
+    """Score capital deployment from metrics + statements + management alignment.
 
     Populates: capital_allocation_assessment.
-    Depends on data_gatherer (statements + filing summary) and
-    management_track_record (alignment context). Does not re-search the web.
+    Depends on metrics_compute (canonical metrics) and management_track_record.
+    Does not re-search the web.
     """
+    if not _agent_enabled(state, "capital_allocation"):
+        print("[capital_allocation] skipped (query_type routing)", flush=True)
+        return {"capital_allocation_assessment": ""}
     user_prompt = (
         f"Ticker: {state.get('ticker') or 'N/A'}\n"
         f"Sector: {state['sector']}\n"
         f"User request: {state['user_query']}\n\n"
+        f"{format_metrics_for_prompt(state.get('canonical_metrics'))}\n\n"
         f"{_json_block('INCOME STATEMENT', state.get('income_statement') or {})}\n\n"
         f"{_json_block('BALANCE SHEET', state.get('balance_sheet') or {})}\n\n"
         f"{_json_block('CASH FLOW STATEMENT', state.get('cash_flow_statement') or {})}\n\n"
         f"{_json_block('SEC FILING SUMMARY', state.get('sec_filing_summary') or 'Not provided.')}\n\n"
         f"{_json_block('MANAGEMENT ASSESSMENT', state.get('management_assessment') or 'Not provided.')}\n\n"
         "Using ONLY the data above, apply the five-use-of-cash framework and "
-        "produce the capital allocation assessment. Cite specific statement "
-        "line items and periods. If data is insufficient for a category, say so."
+        "produce the capital allocation assessment. Quote canonical metric "
+        "headlines for every load-bearing number. If data is insufficient for "
+        "a category, say so."
     )
     return {
         "capital_allocation_assessment": _run(
@@ -856,10 +1081,13 @@ your work will be attacked by a bear analyst reading the same data.
 
 def bull_agent_node(state: ResearchState) -> dict:
     """Write the bull thesis from gathered data. Populates: bull_thesis."""
+    if not _agent_enabled(state, "bull"):
+        print("[bull] skipped (query_type routing)", flush=True)
+        return {"bull_thesis": ""}
     text = _run_with_shared_cache(
-        BULL_SYSTEM_PROMPT,
         _shared_research_payload(state),
-        "Write the bull thesis. Cite specific statement line items.",
+        BULL_SYSTEM_PROMPT
+        + "\n\nWrite the bull thesis. Cite specific statement line items.",
         model=SONNET_MODEL,
         label="bull",
     )
@@ -901,10 +1129,13 @@ so. Be ruthless but fair — a weak bear case helps no one.
 
 def bear_agent_node(state: ResearchState) -> dict:
     """Write the bear thesis from gathered data. Populates: bear_thesis."""
+    if not _agent_enabled(state, "bear"):
+        print("[bear] skipped (query_type routing)", flush=True)
+        return {"bear_thesis": ""}
     text = _run_with_shared_cache(
-        BEAR_SYSTEM_PROMPT,
         _shared_research_payload(state),
-        "Write the bear thesis. Cite specific statement line items.",
+        BEAR_SYSTEM_PROMPT
+        + "\n\nWrite the bear thesis. Cite specific statement line items.",
         model=SONNET_MODEL,
         label="bear",
     )
@@ -941,23 +1172,30 @@ invent a substitute model from training memory.
 
 def fundamental_valuation_node(state: ResearchState) -> dict:
     """Intrinsic valuation: Python DCF + LLM narrative. Populates: fundamental_valuation."""
+    if not _agent_enabled(state, "fundamental"):
+        print("[fundamental] skipped (query_type routing)", flush=True)
+        return {"fundamental_valuation": ""}
     dcf = compute_dcf_from_state(state)
     dcf_block = format_dcf_for_prompt(dcf)
     print(
         f"[valuation:dcf] ticker={state.get('ticker')} "
+        f"archetype={dcf.get('archetype')} method={dcf.get('method')} "
         f"fv={dcf.get('fair_value_per_share')} upside={dcf.get('implied_upside_vs_price')} "
         f"errors={dcf.get('errors')}",
         flush=True,
     )
 
-    shared = _shared_research_payload(state) + "\n\n" + dcf_block
+    # DCF engine block is agent-specific — place it AFTER the cache breakpoint
+    # so bull/bear/relative still share an identical cached research packet.
     text = _run_with_shared_cache(
-        FUNDAMENTAL_VALUATION_SYSTEM_PROMPT,
-        shared,
-        "Produce the fundamental valuation write-up from the engine output and packet.",
+        _shared_research_payload(state),
+        FUNDAMENTAL_VALUATION_SYSTEM_PROMPT
+        + "\n\nProduce the fundamental valuation write-up from the engine "
+        "output and packet.",
         model=SONNET_MODEL,
         label="fundamental",
         max_tokens=MAX_TOKENS_SONNET,
+        extra_uncached=[dcf_block],
     )
     # Hard fallback: never ship an empty fundamental field if the engine has numbers.
     if not (text or "").strip():
@@ -1001,19 +1239,39 @@ def relative_valuation_node(state: ResearchState) -> dict:
     Populates: relative_valuation. Optional Tavily narrative is secondary
     color only — multiples come from the structured comps engine.
     """
+    if not _agent_enabled(state, "relative"):
+        print("[relative] skipped (query_type routing)", flush=True)
+        return {"relative_valuation": ""}
     ticker = state.get("ticker") or ""
     sector = state["sector"]
+    arch = None
+    cm = state.get("canonical_metrics") or {}
+    if isinstance(cm, dict):
+        arch = cm.get("archetype")
 
     comps: dict = {}
     comps_block = ""
     if ticker:
-        comps = fetch_peer_multiples(ticker, sector=sector)
+        comps = fetch_peer_multiples(
+            ticker,
+            sector=sector,
+            subject_archetype=arch,
+            subject_sic=state.get("sic"),
+        )
         comps_block = format_comps_for_prompt(comps)
         print(
-            f"[valuation:comps] ticker={ticker} overall={comps.get('overall_vs_peers')} "
-            f"peers={comps.get('peer_list')}",
+            f"[valuation:comps] ticker={ticker} archetype={comps.get('subject_archetype')} "
+            f"overall={comps.get('overall_vs_peers')} "
+            f"peers={comps.get('peer_list')} "
+            f"excluded={len(comps.get('peer_exclusions') or [])}",
             flush=True,
         )
+        if not comps.get("relative_valuation_applicable", True):
+            print(
+                "[valuation:comps] fewer than 2 archetype-matched peers — "
+                "relative valuation not applicable",
+                flush=True,
+            )
 
     # Light narrative search (optional color) — 1 query, not 2, to save tokens.
     peer_research = ""
@@ -1024,23 +1282,25 @@ def relative_valuation_node(state: ResearchState) -> dict:
             topic="finance",
         )
 
-    shared = _shared_research_payload(state)
+    # Comps table + peer narrative are agent-specific — after the cache breakpoint.
+    extra: list[str] = []
     if comps_block:
-        shared = shared + "\n\n" + comps_block
+        extra.append(comps_block)
     if peer_research:
-        shared = (
-            shared
-            + "\n\n=== PEER NARRATIVE WEB RESEARCH (Tavily, secondary) ===\n"
+        extra.append(
+            "=== PEER NARRATIVE WEB RESEARCH (Tavily, secondary) ===\n"
             + peer_research
         )
 
     text = _run_with_shared_cache(
-        RELATIVE_VALUATION_SYSTEM_PROMPT,
-        shared,
-        "Produce the relative valuation write-up from the comps table and packet.",
+        _shared_research_payload(state),
+        RELATIVE_VALUATION_SYSTEM_PROMPT
+        + "\n\nProduce the relative valuation write-up from the comps table "
+        "and packet.",
         model=SONNET_MODEL,
         label="relative",
         max_tokens=MAX_TOKENS_SONNET,
+        extra_uncached=extra or None,
     )
     if not (text or "").strip():
         print("[valuation:comps] LLM empty — falling back to comps table only", flush=True)
@@ -1055,7 +1315,7 @@ def relative_valuation_node(state: ResearchState) -> dict:
 # 6. Synthesis — Opus tier; final deliverable
 # ─────────────────────────────────────────────────────────────────────────────
 
-SYNTHESIS_SYSTEM_PROMPT = """\
+SYNTHESIS_SYSTEM_PROMPT = f"""\
 You are the senior portfolio strategist and lead writer. You have received:
   (1) a descriptive business overview,
   (2) a macro/regime assessment (debt cycle, reflexivity, sector cycle,
@@ -1065,7 +1325,13 @@ You are the senior portfolio strategist and lead writer. You have received:
   (5) a bull thesis,
   (6) a bear thesis,
   (7) a fundamental (intrinsic) valuation, and
-  (8) a relative (comps) valuation.
+  (8) a relative (comps) valuation,
+  (9) the CANONICAL METRICS block (Python — source of truth for figures).
+
+{CANONICAL_METRICS_SYSTEM_RULE}
+If an upstream agent states a figure that contradicts a canonical metrics headline,
+prefer the canonical headline and note the discrepancy. Never invent a "corrected"
+numeric range that is not itself a canonical headline.
 
 Your job is a single decision-ready investment memo.
 
@@ -1119,10 +1385,41 @@ def _build_synthesis_user_prompt(
     qc_correction: Optional[str] = None,
 ) -> str:
     """Build the synthesis user packet; optional QC report for one retry."""
+    qt = state.get("query_type") or "full_underwrite"
+    mode = synthesis_mode_for_query_type(str(qt))
+    mode_instructions = {
+        "full_memo": (
+            "Write the final investment memo in the required full structure. "
+            "Quote canonical metric headlines verbatim for every load-bearing figure."
+        ),
+        "direct_answer": (
+            "QUERY MODE = specific_question. Answer the user_query directly and "
+            "concisely. Do NOT force a full buy/hold memo structure. Use "
+            "canonical metrics headlines when citing numbers. End with sources used."
+        ),
+        "business_brief": (
+            "QUERY MODE = business_understanding. Produce a clear business "
+            "description brief only — no valuation, no buy/sell rating."
+        ),
+        "valuation_note": (
+            "QUERY MODE = valuation_only. Produce a valuation note reconciling "
+            "fundamental and relative engines. Quote engine + canonical metrics "
+            "headlines. No full multi-section investment memo required."
+        ),
+        "risk_memo": (
+            "QUERY MODE = risk_assessment. Focus on risks, bear case, macro, and "
+            "management/governance. Explicit flip-factors. No need for a full "
+            "bull case if empty."
+        ),
+    }.get(mode, "Write the final investment memo in the required structure.")
+
     base = (
         f"Target: {state.get('ticker') or state['sector']}\n"
         f"Sector: {state['sector']}\n"
-        f"User request: {state['user_query']}\n\n"
+        f"User request: {state['user_query']}\n"
+        f"Query type: {qt} | Synthesis mode: {mode}\n\n"
+        f"{format_metrics_for_prompt(state.get('canonical_metrics'))}\n\n"
+        f"{format_validation_for_prompt(state.get('validation_report'))}\n\n"
         f"=== BUSINESS OVERVIEW ===\n{state.get('business_overview') or 'None provided.'}\n\n"
         f"=== MACRO REGIME ASSESSMENT ===\n"
         f"{state.get('macro_regime_assessment') or 'None provided.'}\n\n"
@@ -1134,18 +1431,20 @@ def _build_synthesis_user_prompt(
         f"=== BEAR THESIS ===\n{state.get('bear_thesis') or 'None provided.'}\n\n"
         f"=== FUNDAMENTAL VALUATION ===\n{state.get('fundamental_valuation') or 'None provided.'}\n\n"
         f"=== RELATIVE VALUATION ===\n{state.get('relative_valuation') or 'None provided.'}\n\n"
-        "Write the final investment memo in the required structure. "
+        f"{mode_instructions} "
         "If a section above says None provided or is clearly incomplete, say so "
         "explicitly — do not invent DCF, peer multiples, rate/fiscal figures, "
-        "or management biography to fill the gap."
+        "or management biography to fill the gap. "
+        "If validation WARNINGs are present, disclose them in the memo."
     )
     if qc_correction and qc_correction.strip():
         base += (
             "\n\n=== QC REPORT (prior synthesis FAILED institutional review) ===\n"
             f"{qc_correction.strip()}\n\n"
             "Rewrite the memo to correct every CRITICAL and MAJOR finding above. "
-            "Do not invent new numbers. Prefer disclosing a gap over fabricating "
-            "a figure. Preserve a clear recommendation once integrity is restored."
+            "Do not invent new numbers — only quote canonical metric headlines or "
+            "upstream text. Prefer disclosing a gap over fabricating a figure. "
+            "Preserve a clear recommendation once integrity is restored."
         )
     return base
 
@@ -1159,6 +1458,9 @@ def synthesis_node(state: ResearchState) -> dict:
     or debate fields are empty. Retries for empty fields happen inside each
     analysis node; by this point we only surface remaining gaps honestly.
     """
+    if not _agent_enabled(state, "synthesis"):
+        print("[synthesis] skipped (query_type routing)", flush=True)
+        return {"final_memo": ""}
     status = _field_status(state)
     print(f"[synthesis:gate] field_chars={status}", flush=True)
     weak = [k for k, n in status.items() if n < MIN_USEFUL_CHARS]
@@ -1245,24 +1547,32 @@ def style_pass_node(state: ResearchState) -> dict:
 # 8. QC / Verification — institutional review (verify only; never silent edit)
 # ─────────────────────────────────────────────────────────────────────────────
 
-QC_SYSTEM_PROMPT = """\
+QC_SYSTEM_PROMPT = f"""\
 You are the senior review analyst. Your job is verification, not improvement. You are the last
 substantive check before this memo becomes a document someone acts on. Assume it will be read
 by someone allocating real capital, and that any error in it is your responsibility to catch.
 
-You will receive: the synthesized memo, and the complete raw outputs of every upstream agent
-that fed it (business overview, financial statements, macro/regime assessment, management
-assessment, capital allocation assessment, bull thesis, bear thesis, fundamental valuation,
-relative valuation).
+You will receive: the synthesized memo, the CANONICAL METRICS block (Python source of truth
+for load-bearing figures), and the complete raw outputs of every upstream agent that fed it
+(business overview, financial statements, macro/regime assessment, management assessment,
+capital allocation assessment, bull thesis, bear thesis, fundamental valuation, relative
+valuation).
+
+{CANONICAL_METRICS_SYSTEM_RULE}
+Additionally: flag as CRITICAL any figure in the memo that contradicts a canonical metrics
+headline (value, unit, basis period, or stripped qualifier). Canonical headlines win over
+any agent's re-expression.
 
 Audit against all seven categories below. Be exhaustive. A missed error is a worse outcome than
 a false flag.
 
 1. NUMERICAL TRACEABILITY
-Every figure in the memo must trace to a specific upstream source. For each number: does it
-appear in the upstream data, and does it match exactly? Flag any figure that appears in the
-memo but not upstream, any figure that differs from its source, and any figure presented as
-disclosed fact that was actually derived or estimated upstream.
+Every figure in the memo must trace to a specific upstream source — prefer the canonical
+metrics headline when the figure is a load-bearing company metric. For each number: does it
+appear in the upstream data / canonical headlines, and does it match exactly? Flag any figure
+that appears in the memo but not upstream, any figure that differs from its source, and any
+figure presented as disclosed fact that was actually derived or estimated upstream (or that
+strips a qualifier present in the canonical headline).
 
 2. ARITHMETIC AND UNIT INTEGRITY
 Recompute every calculation the memo performs — growth rates, margins, multiples, per-share
@@ -1369,6 +1679,7 @@ def _upstream_coverage(state: ResearchState) -> tuple[list[str], list[str], str]
         ("balance_sheet", state.get("balance_sheet")),
         ("cash_flow_statement", state.get("cash_flow_statement")),
         ("sec_filing_summary", state.get("sec_filing_summary")),
+        ("canonical_metrics", state.get("canonical_metrics")),
         ("macro_context", state.get("macro_context")),
         ("macro_regime_assessment", state.get("macro_regime_assessment")),
         ("management_assessment", state.get("management_assessment")),
@@ -1420,7 +1731,11 @@ def _severity_counts(report: str) -> dict[str, int]:
 
 
 def _parse_qc_status(report: str) -> str:
-    """Extract STATUS: PASS | PASS_WITH_FLAGS | FAIL from QC report line 1-ish."""
+    """Extract STATUS: PASS | PASS_WITH_FLAGS | FAIL from QC report line 1-ish.
+
+    Fails closed: unparseable / empty reports default to FAIL so a broken QC
+    gate cannot silently ship a memo (mirrors _parse_style_status posture).
+    """
     text = report or ""
     for line in text.splitlines()[:15]:
         m = re.search(
@@ -1437,12 +1752,18 @@ def _parse_qc_status(report: str) -> str:
         return "FAIL"
     if re.search(r"\bSTATUS\s*:\s*PASS\b", upper):
         return "PASS"
-    # Conservative default if the model omitted the status line.
+    # Severity heuristics when the STATUS line is missing but findings exist.
     if "CRITICAL" in upper:
         return "FAIL"
     if "MAJOR" in upper or "MINOR" in upper:
         return "PASS_WITH_FLAGS"
-    return "PASS_WITH_FLAGS"
+    # Unparseable / empty report — fail closed (do not export).
+    print(
+        "[qc] WARNING: could not parse STATUS from QC report — "
+        "defaulting to FAIL (fail-closed)",
+        flush=True,
+    )
+    return "FAIL"
 
 
 def _parse_style_status(report: str) -> str:
@@ -1493,6 +1814,7 @@ def _build_qc_user_prompt(state: ResearchState) -> str:
         f"User request: {state['user_query']}\n\n"
         f"=== SYNTHESIZED MEMO (final_memo) ===\n"
         f"{state.get('final_memo') or '(empty)'}\n\n"
+        f"{format_metrics_for_prompt(state.get('canonical_metrics'))}\n\n"
         f"=== BUSINESS OVERVIEW ===\n{state.get('business_overview') or 'None provided.'}\n\n"
         f"{_json_block('INCOME STATEMENT', state.get('income_statement') or {})}\n\n"
         f"{_json_block('BALANCE SHEET', state.get('balance_sheet') or {})}\n\n"
@@ -1511,7 +1833,8 @@ def _build_qc_user_prompt(state: ResearchState) -> str:
         f"{state.get('fundamental_valuation') or 'None provided.'}\n\n"
         f"=== RELATIVE VALUATION ===\n"
         f"{state.get('relative_valuation') or 'None provided.'}\n\n"
-        "Audit the synthesized memo against all upstream sources. "
+        "Audit the synthesized memo against all upstream sources and canonical metrics. "
+        "Flag CRITICAL any memo figure that contradicts a canonical headline. "
         "Line 1 must be STATUS: PASS | PASS_WITH_FLAGS | FAIL."
     )
 
@@ -1545,6 +1868,9 @@ def qc_node(state: ResearchState) -> dict:
     instructions, then re-audit. If still FAIL, status stays FAIL and
     the graph hard-stops before style/export.
     """
+    if not _agent_enabled(state, "qc"):
+        print("[qc] skipped (query_type routing)", flush=True)
+        return {"qc_report": "QC skipped for this query_type.", "qc_status": "PASS"}
     report, status, _coverage = _run_qc_audit(state, label="qc")
     updates: dict[str, Any] = {
         "qc_report": report,

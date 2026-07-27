@@ -74,6 +74,25 @@ class ResearchState(TypedDict):
     # the data gatherer from Tavily + filing search.
     sec_filing_summary: str
 
+    # SEC identity (from submissions JSON during gather)
+    cik: Optional[str]
+    sic: Optional[str]
+    extraction_archetype: str
+
+    # Canonical metrics contract (metrics.py): every load-bearing figure
+    # computed in Python with provenance, qualifiers, and a verbatim headline.
+    # Populated immediately after data_gatherer; analytical agents must quote
+    # headlines rather than recomputing from raw statement lines.
+    canonical_metrics: dict
+
+    # Phase 3 validation gate output (PASS/WARN/FAIL + checks).
+    validation_report: dict
+    validation_status: str
+
+    # Phase 4 query routing.
+    query_type: str
+    routing_decision: dict
+
     # Top-down macroeconomic backdrop relevant to the sector: rates,
     # inflation, FX, commodity trends, and policy developments.
     # Written by data_gatherer_node as a short narrative digest.

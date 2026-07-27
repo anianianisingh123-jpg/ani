@@ -7,12 +7,13 @@ input at the entry point:
     entry ──(mode == 'screener')──> screener ──────────────────────────────> END
 
     entry ──(mode == 'deep_dive')──> deep_dive_start
-              ├─> data_gatherer ──────────────┐
-              ├─> business_overview ──────────┤
-              ├─> macro_regime ───────────────┼─> bull / bear / fundamental / relative
-              └─> management_track_record ─┐  │
-                                           └─> capital_allocation ─┘
-                → synthesis → qc → style_pass → qc_style_check → docx_export → END
+              ├─> data_gatherer → metrics_compute ──┐
+              ├─> business_overview ────────────────┤
+              ├─> macro_regime ─────────────────────┼─> analysis_ready (defer)
+              └─> management_track_record ──────┐   │
+                                                └─> capital_allocation ─┘
+                → bull → bear / fundamental / relative
+                → synthesis_ready (defer) → synthesis → qc → style → qc_style → docx
                               │ FAIL                          │ DRIFT
                               └─> qc_halt → END               └─> qc_style_halt → END
 
@@ -54,6 +55,7 @@ from .agents import (
     fundamental_valuation_node,
     macro_regime_node,
     management_track_record_node,
+    metrics_compute_node,
     qc_halt_node,
     qc_node,
     qc_style_check_node,
@@ -61,9 +63,12 @@ from .agents import (
     relative_valuation_node,
     style_pass_node,
     synthesis_node,
+    validation_gate_node,
+    validation_halt_node,
 )
 from .cost import begin_run, finalize_run_cost
 from .export_docx import docx_export_node
+from .routing import classify_query, log_routing_decision
 from .state import ResearchState
 from .tools import multi_search
 
@@ -133,14 +138,24 @@ def screener_node(state: ResearchState) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def deep_dive_start_node(state: ResearchState) -> dict:
-    """Entry for deep_dive: start cost tracker, then fan out in parallel."""
+    """Entry for deep_dive: start cost tracker, classify query, fan out."""
     begin_run(
         ticker=state.get("ticker"),
         sector=state.get("sector") or "",
         mode=state.get("mode") or "deep_dive",
         user_query=state.get("user_query") or "",
     )
-    return {}
+    decision = classify_query(
+        state.get("user_query") or "",
+        mode=state.get("mode"),
+        sector=state.get("sector"),
+        ticker=state.get("ticker"),
+    )
+    log_routing_decision(decision)
+    return {
+        "query_type": decision.get("query_type") or "full_underwrite",
+        "routing_decision": decision,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -171,26 +186,57 @@ def route_after_qc_style(state: ResearchState) -> str:
     return "docx_export"
 
 
+def route_after_validation(state: ResearchState) -> str:
+    """Pre-narration gate: FAIL hard-stops before capital/analysis spend."""
+    status = (state.get("validation_status") or "").upper()
+    if status == "FAIL":
+        return "validation_halt"
+    return "continue"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Graph assembly
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _passthrough_barrier(state: ResearchState) -> dict:
+    """No-op join node. State is already fully merged by LangGraph."""
+    return {}
+
+
 def build_graph():
-    """Assemble and compile the research graph."""
+    """Assemble and compile the research graph.
+
+    IMPORTANT — multi-parent fan-in + LangGraph Pregel:
+    A node with N parents that finish in *different* supersteps re-runs once
+    per wave (e.g. bull/bear/fund/relative used to fire when overview+macro
+    completed, then again when capital_allocation completed — 2× cost).
+
+    Fix: explicit single-parent barriers with ``defer=True``. The barrier
+    waits until all non-deferred upstream work is done, then runs once and
+    fans out. Analysis agents each have exactly one parent (analysis_ready);
+    synthesis has exactly one parent (synthesis_ready).
+    """
     workflow = StateGraph(ResearchState)
 
     # Register every node the router / edges can reach.
     workflow.add_node("screener", screener_node)
     workflow.add_node("deep_dive_start", deep_dive_start_node)
     workflow.add_node("data_gatherer", data_gatherer_node)
+    workflow.add_node("metrics_compute", metrics_compute_node)
+    workflow.add_node("validation_gate", validation_gate_node)
+    workflow.add_node("validation_halt", validation_halt_node)
+    workflow.add_node("post_validation", _passthrough_barrier)
     workflow.add_node("business_overview", business_overview_node)
     workflow.add_node("macro_regime", macro_regime_node)
     workflow.add_node("management_track_record", management_track_record_node)
     workflow.add_node("capital_allocation", capital_allocation_node)
+    # Deferred join barriers (see docstring) — prevent double execution.
+    workflow.add_node("analysis_ready", _passthrough_barrier, defer=True)
     workflow.add_node("bull_agent", bull_agent_node)
     workflow.add_node("bear_agent", bear_agent_node)
     workflow.add_node("fundamental_valuation", fundamental_valuation_node)
     workflow.add_node("relative_valuation", relative_valuation_node)
+    workflow.add_node("synthesis_ready", _passthrough_barrier, defer=True)
     workflow.add_node("synthesis", synthesis_node)
     workflow.add_node("qc", qc_node)
     workflow.add_node("qc_halt", qc_halt_node)
@@ -214,29 +260,47 @@ def build_graph():
     workflow.add_edge("deep_dive_start", "macro_regime")
     workflow.add_edge("deep_dive_start", "management_track_record")
 
-    # Capital allocation needs statement numbers + management alignment read.
-    workflow.add_edge("data_gatherer", "capital_allocation")
+    # Metrics contract: compute once from statements before any number-using agent.
+    workflow.add_edge("data_gatherer", "metrics_compute")
+    # Phase 3: validation gate after metrics, before capital/analysis spend.
+    workflow.add_edge("metrics_compute", "validation_gate")
+    workflow.add_conditional_edges(
+        "validation_gate",
+        route_after_validation,
+        {
+            "validation_halt": "validation_halt",
+            "continue": "post_validation",
+        },
+    )
+    workflow.add_edge("validation_halt", END)
+
+    # Capital allocation needs validated metrics + management alignment read.
+    workflow.add_edge("post_validation", "capital_allocation")
     workflow.add_edge("management_track_record", "capital_allocation")
 
-    # Analysis waits for independent foundation + capital_allocation join.
-    # capital_allocation already implies data_gatherer + management completed;
-    # management_assessment is therefore present in state before analysis runs.
-    analysis_parents = (
-        "business_overview",
-        "macro_regime",
-        "capital_allocation",
-    )
-    analysis_nodes = (
-        "bull_agent",
+    # Join foundation into a single deferred barrier, then fan out analysis.
+    # capital_allocation already implies metrics_compute + validation + management.
+    workflow.add_edge("business_overview", "analysis_ready")
+    workflow.add_edge("macro_regime", "analysis_ready")
+    workflow.add_edge("capital_allocation", "analysis_ready")
+
+    # Cache-friendly analysis order:
+    #   analysis_ready → bull (writes the shared-prefix cache)
+    #                 ↘ bear / fundamental / relative in parallel (cache reads)
+    # All four then join at synthesis_ready. Starting all four at once would
+    # race and produce four cache_w with zero cache_r (cold parallel start).
+    workflow.add_edge("analysis_ready", "bull_agent")
+    for node in (
         "bear_agent",
         "fundamental_valuation",
         "relative_valuation",
-    )
-    for node in analysis_nodes:
-        for parent in analysis_parents:
-            workflow.add_edge(parent, node)
-        # Fan-in: synthesis waits for all four analysis branches.
-        workflow.add_edge(node, "synthesis")
+    ):
+        workflow.add_edge("bull_agent", node)
+        workflow.add_edge(node, "synthesis_ready")
+    workflow.add_edge("bull_agent", "synthesis_ready")
+
+    # Single deferred join before synthesis (one parent → one run).
+    workflow.add_edge("synthesis_ready", "synthesis")
 
     # Synthesis → QC (substantive) → style → QC style → docx (or hard stop).
     workflow.add_edge("synthesis", "qc")
@@ -289,6 +353,14 @@ def empty_state(
         "balance_sheet": {},
         "cash_flow_statement": {},
         "sec_filing_summary": "",
+        "cik": None,
+        "sic": None,
+        "extraction_archetype": "general",
+        "canonical_metrics": {},
+        "validation_report": {},
+        "validation_status": "",
+        "query_type": "full_underwrite",
+        "routing_decision": {},
         "macro_context": "",
         "macro_regime_assessment": "",
         "management_assessment": "",

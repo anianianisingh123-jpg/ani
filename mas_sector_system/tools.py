@@ -34,8 +34,10 @@ load_dotenv(os.path.join(_REPO_ROOT, ".env"))
 
 _CACHE_DIR = os.path.join(_PKG_DIR, ".cache")
 _TICKERS_CACHE = os.path.join(_CACHE_DIR, "company_tickers.json")
+_SIC_CACHE_DIR = os.path.join(_CACHE_DIR, "submissions")
 _TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 _COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 
 # Conservative spacing between SEC requests (~5 req/s max; SEC limit is ~10).
 _SEC_MIN_INTERVAL_SEC = 0.25
@@ -193,6 +195,98 @@ def multi_search(queries: list[str], **kwargs: Any) -> str:
     return "\n\n".join(blocks)
 
 
+def _relevance_tokens(*, ticker: Optional[str], entity_name: Optional[str] = None) -> list[str]:
+    """Lowercased tokens used to check whether search text is on-target."""
+    tokens: list[str] = []
+    if ticker and str(ticker).strip():
+        tokens.append(str(ticker).strip().upper())
+        tokens.append(str(ticker).strip().lower())
+    if entity_name and str(entity_name).strip():
+        name = str(entity_name).strip()
+        tokens.append(name.lower())
+        # First significant word (e.g. "NVIDIA" from "NVIDIA CORP") helps
+        # when Tavily titles omit the full legal name.
+        first = name.split()[0].lower()
+        if len(first) >= 3:
+            tokens.append(first)
+    # Dedupe, preserve order.
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in tokens:
+        if t and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+def check_search_relevance(
+    text: str,
+    *,
+    ticker: Optional[str],
+    entity_name: Optional[str] = None,
+    label: str = "search",
+) -> bool:
+    """Return True if ticker/entity appears in search text; log a warning if not.
+
+    Used so a failed/irrelevant Tavily retrieval is visible at run time rather
+    than only later in the QC report. Generic macro queries (Fed, rates) may
+    legitimately omit the ticker — callers should only run this on digests that
+    were supposed to be company-anchored.
+    """
+    tokens = _relevance_tokens(ticker=ticker, entity_name=entity_name)
+    if not tokens or not (text or "").strip():
+        return True  # nothing to check
+    lower = text.lower()
+    upper = text.upper()
+    hit = False
+    for tok in tokens:
+        if tok.isupper() and len(tok) <= 5:
+            # Ticker: word-ish presence (avoid matching random substrings in URLs
+            # only — still accept any occurrence of the symbol).
+            if tok in upper:
+                hit = True
+                break
+        elif tok in lower:
+            hit = True
+            break
+    if not hit:
+        print(
+            f"[{label}] WARNING: search digest has no mention of "
+            f"ticker={ticker!r} / entity={entity_name!r} — results may be "
+            f"irrelevant (chars={len(text)})",
+            flush=True,
+        )
+    return hit
+
+
+def clip_search_digest(text: str, max_chars: int) -> str:
+    """Truncate a multi-search digest at a result boundary when possible.
+
+    Avoids the ``https://finance.y`` mid-URL cut that poisons macro_context
+    when a hard ``text[:N]`` slice lands inside an entry.
+    """
+    if not text or len(text) <= max_chars:
+        return text or ""
+    cut = text[:max_chars]
+    # Prefer breaking before a numbered result header: "\n[N] "
+    last_header = -1
+    for i, ch in enumerate(cut):
+        if ch == "\n" and i + 1 < len(cut) and cut[i + 1] == "[":
+            # rough match for "\n[12] "
+            j = i + 2
+            while j < len(cut) and cut[j].isdigit():
+                j += 1
+            if j < len(cut) and cut[j] == "]":
+                last_header = i
+    if last_header > max_chars // 2:
+        return cut[:last_header].rstrip() + "\n\n[... truncated at result boundary ...]"
+    # Fall back to last newline.
+    nl = cut.rfind("\n")
+    if nl > max_chars // 2:
+        return cut[:nl].rstrip() + "\n\n[... truncated ...]"
+    return cut.rstrip() + "…"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SEC EDGAR — CIK lookup + Company Facts
 # ─────────────────────────────────────────────────────────────────────────────
@@ -259,7 +353,50 @@ def fetch_sec_company_facts(cik: str) -> dict[str, Any]:
     return _http_get_json(url)
 
 
+def fetch_entity_metadata(cik: str, *, force_refresh: bool = False) -> dict[str, Any]:
+    """Fetch SIC / entity name from SEC submissions JSON (cached under .cache/submissions)."""
+    padded = str(cik).zfill(10)
+    os.makedirs(_SIC_CACHE_DIR, exist_ok=True)
+    path = os.path.join(_SIC_CACHE_DIR, f"CIK{padded}.json")
+    refresh = force_refresh or not os.path.exists(path)
+    if not refresh:
+        age = time.time() - os.path.getmtime(path)
+        if age > 30 * 24 * 3600:
+            refresh = True
+    if refresh:
+        _sec_rate_limit()
+        url = _SUBMISSIONS_URL.format(cik=padded)
+        try:
+            raw = _http_get_json(url)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(raw, f)
+        except Exception as exc:
+            return {"cik": padded, "sic": None, "error": str(exc)}
+    else:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+
+    sic = raw.get("sic") or raw.get("sicCode")
+    # submissions may nest tickers
+    tickers = []
+    for t in raw.get("tickers") or []:
+        if isinstance(t, str):
+            tickers.append(t.upper())
+    return {
+        "cik": padded,
+        "sic": str(sic).zfill(4) if sic is not None else None,
+        "sic_description": raw.get("sicDescription"),
+        "name": raw.get("name"),
+        "tickers": tickers,
+        "exchanges": raw.get("exchanges"),
+        "error": None,
+    }
+
+
 # Concept aliases: primary key first, then fallbacks used across filers.
+# Prefer concept_maps.GENERAL_* ; these remain as the general default import target.
+from .concept_maps import maps_for_archetype  # noqa: E402
+
 _INCOME_CONCEPTS: dict[str, list[str]] = {
     "Revenues": [
         "Revenues",
@@ -596,18 +733,11 @@ def _compute_fcf(cash_flow: dict[str, Any]) -> None:
         cash_flow[period_key] = period
 
 
-def extract_statements_from_company_facts(facts: dict) -> dict[str, Any]:
-    """Parse raw companyfacts JSON into income / balance / cash-flow dicts.
-
-    Missing concepts are explicitly null with a note — never silently omitted.
-    """
-    entity = facts.get("entityName")
-    cik = facts.get("cik")
-
-    income = _extract_statement_block(facts, _INCOME_CONCEPTS)
-    # Friendly aliases the agents expect
+def _friendly_income_aliases(income: dict[str, Any]) -> None:
     for period_key in list(income.keys()):
         p = income[period_key]
+        if not isinstance(p, dict):
+            continue
         if "IncomeTaxExpenseBenefit" in p and "IncomeTaxExpense" not in p:
             p["IncomeTaxExpense"] = p["IncomeTaxExpenseBenefit"]
         if "EarningsPerShareBasic" in p:
@@ -627,9 +757,153 @@ def extract_statements_from_company_facts(facts: dict) -> dict[str, Any]:
         if "SellingGeneralAndAdministrativeExpense" in p:
             p["SGA_Expense"] = p["SellingGeneralAndAdministrativeExpense"]
 
-    balance = _extract_statement_block(facts, _BALANCE_CONCEPTS)
-    cash_flow = _extract_statement_block(facts, _CASHFLOW_CONCEPTS)
+
+def _cell_val(cell: Any) -> Optional[float]:
+    if isinstance(cell, dict) and cell.get("value") is not None:
+        try:
+            return float(cell["value"])
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _derive_archetype_lines(
+    income: dict[str, Any],
+    balance: dict[str, Any],
+    cash_flow: dict[str, Any],
+    archetype: str,
+) -> dict[str, Any]:
+    """Post-extract derived lines (NII, bank revenues, NAREIT FFO, etc.)."""
+    notes: list[str] = []
+    arch = archetype or "general"
+
+    for pk in ("current_annual", "prior_annual", "current_quarter", "prior_quarter"):
+        inc = income.get(pk) if isinstance(income.get(pk), dict) else {}
+        bal = balance.get(pk) if isinstance(balance.get(pk), dict) else {}
+        cf = cash_flow.get(pk) if isinstance(cash_flow.get(pk), dict) else {}
+
+        if arch == "bank_lender":
+            ii = _cell_val(inc.get("InterestIncome"))
+            ie = _cell_val(inc.get("InterestExpenseBank") or inc.get("InterestExpense"))
+            nii_tag = _cell_val(inc.get("NetInterestIncome"))
+            if nii_tag is None and ii is not None and ie is not None:
+                # NII = interest income − interest expense
+                template = inc.get("InterestIncome") or {}
+                inc["NetInterestIncome"] = {
+                    "value": ii - abs(ie),
+                    "end": template.get("end"),
+                    "fy": template.get("fy"),
+                    "fp": template.get("fp"),
+                    "form": template.get("form"),
+                    "filed": template.get("filed"),
+                    "note": "derived: InterestIncome − |InterestExpense|",
+                }
+                notes.append(f"{pk}: derived NetInterestIncome")
+            nii = _cell_val(inc.get("NetInterestIncome"))
+            nonii = _cell_val(inc.get("NoninterestIncome"))
+            # Synthetic Revenues for metrics that expect it
+            if nii is not None or nonii is not None:
+                total = (nii or 0.0) + (nonii or 0.0)
+                template = (
+                    inc.get("NetInterestIncome")
+                    or inc.get("InterestIncome")
+                    or inc.get("NoninterestIncome")
+                    or {}
+                )
+                if _cell_val(inc.get("Revenues")) is None or arch == "bank_lender":
+                    inc["Revenues"] = {
+                        "value": total,
+                        "end": template.get("end"),
+                        "fy": template.get("fy"),
+                        "fp": template.get("fp"),
+                        "form": template.get("form"),
+                        "filed": template.get("filed"),
+                        "note": "derived bank revenues: NII + NoninterestIncome",
+                    }
+                    notes.append(f"{pk}: derived bank Revenues = NII + NoninterestIncome")
+
+        if arch == "insurance":
+            prem = _cell_val(inc.get("PremiumsEarned"))
+            inv = _cell_val(inc.get("NetInvestmentIncome"))
+            if prem is not None or inv is not None:
+                total = (prem or 0.0) + (inv or 0.0)
+                template = inc.get("PremiumsEarned") or inc.get("NetInvestmentIncome") or {}
+                if _cell_val(inc.get("Revenues")) is None:
+                    inc["Revenues"] = {
+                        "value": total,
+                        "end": template.get("end"),
+                        "fy": template.get("fy"),
+                        "fp": template.get("fp"),
+                        "form": template.get("form"),
+                        "filed": template.get("filed"),
+                        "note": "derived insurer revenues: PremiumsEarned + NetInvestmentIncome",
+                    }
+                    notes.append(f"{pk}: derived insurance Revenues")
+            # Combined ratio components when present
+            claims = _cell_val(inc.get("PolicyholderBenefits"))
+            if prem and prem != 0 and claims is not None:
+                # loss ratio only (expense ratio needs underwriting expense)
+                inc["LossRatio"] = {
+                    "value": abs(claims) / prem,
+                    "note": "derived: |PolicyholderBenefits| / PremiumsEarned",
+                    "end": (inc.get("PremiumsEarned") or {}).get("end"),
+                    "fy": (inc.get("PremiumsEarned") or {}).get("fy"),
+                    "fp": (inc.get("PremiumsEarned") or {}).get("fp"),
+                    "form": (inc.get("PremiumsEarned") or {}).get("form"),
+                    "filed": (inc.get("PremiumsEarned") or {}).get("filed"),
+                }
+
+        if arch in ("equity_reit", "reit_real_estate"):
+            # NAREIT FFO ≈ NI + RE depreciation − gains on property sales
+            ni = _cell_val(inc.get("NetIncomeLoss"))
+            da = _cell_val(inc.get("DepreciationRealEstate")) or _cell_val(
+                cf.get("DepreciationRealEstateCF")
+            )
+            gain = _cell_val(inc.get("GainOnSaleOfRealEstate"))
+            if ni is not None and da is not None:
+                ffo = ni + abs(da) - (gain or 0.0)
+                template = inc.get("NetIncomeLoss") or {}
+                inc["FFO"] = {
+                    "value": ffo,
+                    "end": template.get("end"),
+                    "fy": template.get("fy"),
+                    "fp": template.get("fp"),
+                    "form": template.get("form"),
+                    "filed": template.get("filed"),
+                    "note": (
+                        "derived NAREIT-style FFO ≈ NI + |RE D&A| − property gains "
+                        "(approximate; confirm vs company supplement)"
+                    ),
+                }
+                notes.append(f"{pk}: derived FFO from NI + D&A − gains")
+
+        income[pk] = inc
+        balance[pk] = bal
+        cash_flow[pk] = cf
+
+    return {"derived_notes": notes}
+
+
+def extract_statements_from_company_facts(
+    facts: dict,
+    *,
+    archetype: str = "general",
+) -> dict[str, Any]:
+    """Parse raw companyfacts JSON into income / balance / cash-flow dicts.
+
+    Uses archetype-specific XBRL concept maps so banks/REITs/insurers resolve
+    core lines. Missing concepts are explicitly null with a note.
+    """
+    entity = facts.get("entityName")
+    cik = facts.get("cik")
+    maps = maps_for_archetype(archetype)
+
+    income = _extract_statement_block(facts, maps["income"])
+    _friendly_income_aliases(income)
+    balance = _extract_statement_block(facts, maps["balance"])
+    cash_flow = _extract_statement_block(facts, maps["cashflow"])
     _compute_fcf(cash_flow)
+    derived = _derive_archetype_lines(income, balance, cash_flow, archetype)
 
     return {
         "entity_name": entity,
@@ -637,6 +911,8 @@ def extract_statements_from_company_facts(facts: dict) -> dict[str, Any]:
         "income_statement": income,
         "balance_sheet": balance,
         "cash_flow_statement": cash_flow,
+        "extraction_archetype": archetype,
+        "derived_notes": derived.get("derived_notes") or [],
         "incomplete": False,
         "error": None,
     }
@@ -713,18 +989,73 @@ def gather_live_research_context(
     statements_error: Optional[str] = None
     entity_name = None
     cik = None
+    sic = None
+    sic_description = None
+    extraction_archetype = "general"
+    archetype_classification: dict[str, Any] = {}
+    derived_notes: list[str] = []
 
     live_market: dict[str, Any] = {"error": "No ticker provided."}
     if ticker:
         live_market = fetch_live_market_snapshot(ticker)
         try:
+            from .archetype import HARD_ARCHETYPES, classify_archetype
+
             cik = get_cik_for_ticker(ticker)
+            meta = fetch_entity_metadata(cik)
+            sic = meta.get("sic")
+            sic_description = meta.get("sic_description")
+            if meta.get("name"):
+                entity_name = meta.get("name")
+
+            # Preliminary classify from SIC + ticker + sector (before full extract).
+            prelim = classify_archetype(
+                ticker=ticker,
+                sector=sector,
+                sic=sic,
+                industry=live_market.get("industry") or sic_description,
+            )
+            extraction_archetype = prelim.get("archetype") or "general"
+
             facts = fetch_sec_company_facts(cik)
-            parsed = extract_statements_from_company_facts(facts)
+            parsed = extract_statements_from_company_facts(
+                facts, archetype=extraction_archetype
+            )
+            # Refine archetype with full statements; re-extract if hard type flips.
+            refined = classify_archetype(
+                ticker=ticker,
+                sector=sector,
+                sic=sic,
+                industry=live_market.get("industry") or sic_description,
+                income_statement=parsed["income_statement"],
+                balance_sheet=parsed["balance_sheet"],
+                cash_flow_statement=parsed["cash_flow_statement"],
+            )
+            archetype_classification = refined
+            final_arch = refined.get("archetype") or extraction_archetype
+            if (
+                final_arch != extraction_archetype
+                and (
+                    final_arch in HARD_ARCHETYPES
+                    or extraction_archetype in HARD_ARCHETYPES
+                )
+            ):
+                print(
+                    f"[extract] re-extract with archetype {extraction_archetype} → {final_arch}",
+                    flush=True,
+                )
+                parsed = extract_statements_from_company_facts(
+                    facts, archetype=final_arch
+                )
+                extraction_archetype = final_arch
+            else:
+                extraction_archetype = final_arch
+
             income_statement = parsed["income_statement"]
             balance_sheet = parsed["balance_sheet"]
             cash_flow_statement = parsed["cash_flow_statement"]
-            entity_name = parsed.get("entity_name")
+            entity_name = parsed.get("entity_name") or entity_name
+            derived_notes = list(parsed.get("derived_notes") or [])
             statements_incomplete = False
             statements_error = None
         except urllib.error.HTTPError as exc:
@@ -735,27 +1066,42 @@ def gather_live_research_context(
             statements_incomplete = True
 
     # Narrative only — things XBRL tags cannot provide.
+    # Every query is ticker-anchored when a ticker is present so Tavily does
+    # not return arbitrary finance names (CULP / AT&T / Jack in the Box style misses).
     queries: list[str] = []
     if ticker:
         t = ticker.strip().upper()
+        name_hint = f"{entity_name} " if entity_name else ""
         queries.extend(
             [
-                f"{t} latest earnings call takeaways guidance changes",
-                f"{t} analyst commentary outlook risks litigation regulatory",
-                f"{t} management discussion MD&A themes strategy {sector}",
+                f"{t} {name_hint}latest earnings call takeaways guidance changes",
+                f"{t} {name_hint}analyst commentary outlook risks litigation regulatory",
+                f"{t} {name_hint}management discussion MD&A themes strategy {sector}",
+                f"{t} {name_hint}{sector} macro rates inflation policy impact",
             ]
         )
-    queries.extend(
-        [
-            f"{sector} sector macro rates inflation policy impact {user_query}",
-        ]
-    )
+    else:
+        queries.append(
+            f"{sector} sector macro rates inflation policy impact {user_query}"
+        )
     queries = queries[:5]
     web_research = multi_search(queries, max_results=5, topic="finance")
+    if ticker:
+        check_search_relevance(
+            web_research,
+            ticker=ticker,
+            entity_name=entity_name,
+            label="data_gatherer.search",
+        )
 
     return {
         "entity_name": entity_name,
         "cik": cik,
+        "sic": sic,
+        "sic_description": sic_description,
+        "extraction_archetype": extraction_archetype,
+        "archetype_classification": archetype_classification,
+        "derived_notes": derived_notes,
         "income_statement": income_statement,
         "balance_sheet": balance_sheet,
         "cash_flow_statement": cash_flow_statement,
@@ -766,6 +1112,65 @@ def gather_live_research_context(
         "statements_error": statements_error,
         "gathered_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
+
+
+def peers_by_sic_proximity(
+    sic: str,
+    *,
+    subject: Optional[str] = None,
+    limit: int = 12,
+) -> list[str]:
+    """Return tickers with same 4-digit SIC, else same 3-digit prefix.
+
+    Uses cached submissions under ``.cache/submissions/`` plus a small static
+    SIC→ticker seed for common US filers (no full EDGAR crawl).
+    """
+    from .archetype import TICKER_ARCHETYPE
+
+    target = str(sic).zfill(4)[:4]
+    prefix3 = target[:3]
+    subj = (subject or "").strip().upper()
+    found4: list[str] = []
+    found3: list[str] = []
+
+    # Scan submissions cache
+    if os.path.isdir(_SIC_CACHE_DIR):
+        for name in os.listdir(_SIC_CACHE_DIR):
+            if not name.startswith("CIK") or not name.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(_SIC_CACHE_DIR, name), "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+            except Exception:
+                continue
+            s = raw.get("sic") or raw.get("sicCode")
+            if s is None:
+                continue
+            s4 = str(s).zfill(4)[:4]
+            for t in raw.get("tickers") or []:
+                if not isinstance(t, str):
+                    continue
+                tu = t.upper()
+                if tu == subj:
+                    continue
+                if s4 == target:
+                    found4.append(tu)
+                elif s4.startswith(prefix3):
+                    found3.append(tu)
+
+    # Static seed: known tickers — fetch SIC if cached only (don't network here)
+    seed = list(TICKER_ARCHETYPE.keys())
+    for tu in seed:
+        if tu == subj:
+            continue
+        # best-effort: if we ever cached their CIK submissions
+        # skip network; already covered by cache scan
+
+    ordered = []
+    for t in found4 + found3:
+        if t not in ordered:
+            ordered.append(t)
+    return ordered[:limit]
 
 
 def gather_business_overview_context(
@@ -808,22 +1213,40 @@ def gather_macro_regime_context(
     Independent of data_gatherer — focused queries for rates, inflation,
     fiscal/debt levels, central-bank posture, and sector-specific cycles.
     """
+    # Keep 1–2 true top-down macro queries, then force ticker/sector anchors so
+    # the digest is not a random grab-bag of unrelated equities.
     queries: list[str] = [
         "US Federal Reserve policy rate inflation CPI latest decision outlook",
         "US government debt GDP fiscal deficit Treasury yields current levels",
-        f"{sector} sector cycle outlook capex inventory demand rates sensitivity",
     ]
     if ticker:
         t = ticker.strip().upper()
-        queries.append(
-            f"{t} {sector} macro sensitivity rates credit cycle demand outlook"
+        queries.extend(
+            [
+                f"{t} {sector} macro sensitivity rates credit cycle demand outlook",
+                f"{t} {sector} sector cycle capex inventory AI demand rates",
+                f"{t} {user_query} macro regime rates inflation",
+            ]
         )
-        queries.append(f"{t} {user_query} macro regime rates inflation")
     else:
-        queries.append(f"{sector} {user_query} macro rates inflation policy")
+        queries.extend(
+            [
+                f"{sector} sector cycle outlook capex inventory demand rates sensitivity",
+                f"{sector} {user_query} macro rates inflation policy",
+            ]
+        )
 
     queries = queries[:5]
     web_research = multi_search(queries, max_results=5, topic="finance")
+    # Only flag when a ticker was requested: pure macro queries legitimately
+    # omit company names, but the company-anchored rows should bring them in.
+    if ticker:
+        check_search_relevance(
+            web_research,
+            ticker=ticker,
+            entity_name=None,
+            label="macro_regime.search",
+        )
     return {
         "web_research": web_research,
         "queries_run": queries,
