@@ -76,7 +76,14 @@ class ResearchState(TypedDict):
 
     # Top-down macroeconomic backdrop relevant to the sector: rates,
     # inflation, FX, commodity trends, and policy developments.
+    # Written by data_gatherer_node as a short narrative digest.
     macro_context: str
+
+    # Structured macro/cycle positioning assessment from macro_regime_node:
+    # debt-cycle lens, reflexivity check, sector-cycle position, and an
+    # explicit TAILWIND / HEADWIND / NEUTRAL verdict for this company.
+    # Independent Tavily research — not derived from data_gatherer.
+    macro_regime_assessment: str
 
     # ------------------------------------------------------------------
     # Adversarial debate fields (populated by the debate agents)

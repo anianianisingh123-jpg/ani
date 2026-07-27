@@ -789,3 +789,37 @@ def gather_business_overview_context(
         "queries_run": queries,
         "gathered_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
+
+
+def gather_macro_regime_context(
+    *,
+    ticker: Optional[str],
+    sector: str,
+    user_query: str,
+) -> dict[str, Any]:
+    """Tavily research for debt-cycle / reflexivity / sector-cycle positioning.
+
+    Independent of data_gatherer — focused queries for rates, inflation,
+    fiscal/debt levels, central-bank posture, and sector-specific cycles.
+    """
+    queries: list[str] = [
+        "US Federal Reserve policy rate inflation CPI latest decision outlook",
+        "US government debt GDP fiscal deficit Treasury yields current levels",
+        f"{sector} sector cycle outlook capex inventory demand rates sensitivity",
+    ]
+    if ticker:
+        t = ticker.strip().upper()
+        queries.append(
+            f"{t} {sector} macro sensitivity rates credit cycle demand outlook"
+        )
+        queries.append(f"{t} {user_query} macro regime rates inflation")
+    else:
+        queries.append(f"{sector} {user_query} macro rates inflation policy")
+
+    queries = queries[:5]
+    web_research = multi_search(queries, max_results=5, topic="finance")
+    return {
+        "web_research": web_research,
+        "queries_run": queries,
+        "gathered_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }

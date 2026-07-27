@@ -7,7 +7,8 @@ produced). LangGraph merges these updates into the state as the graph runs.
 Deep-dive fan-out (wired in main.py):
 
     entry ──┬─> data_gatherer ──────────┐
-            └─> business_overview ──────┼─> bull / bear / fundamental / relative ─> synthesis
+            ├─> business_overview ──────┼─> bull / bear / fundamental / relative ─> synthesis
+            └─> macro_regime ───────────┘
 """
 
 from __future__ import annotations
@@ -23,24 +24,156 @@ from .state import ResearchState
 from .tools import (
     gather_business_overview_context,
     gather_live_research_context,
+    gather_macro_regime_context,
     multi_search,
+)
+from .valuation_engine import (
+    compute_dcf_from_state,
+    fetch_peer_multiples,
+    format_comps_for_prompt,
+    format_dcf_for_prompt,
 )
 
 # ── Model tiering ────────────────────────────────────────────────────────────
 # Opus: highest-stakes reasoning (data foundation + final deliverable).
 # Sonnet: bounded analytical writing over already-clean data.
+# NOTE: CLAUDE.md historically listed Haiku for workers; that was leftover
+# from an earlier compliance pass. Current architecture intentionally keeps
+# Sonnet/Opus here — do not silently downgrade without an explicit decision.
 OPUS_MODEL = "claude-opus-5"
 SONNET_MODEL = "claude-sonnet-5"
 
 MAX_TOKENS_OPUS = 8000
-MAX_TOKENS_SONNET = 4000
+MAX_TOKENS_SONNET = 6000
+# Full investment memos need headroom; analysis retries use this too.
+MAX_TOKENS_MEMO = 16000
+# Retry budget when first pass returns empty / max_tokens-truncated text.
+MAX_TOKENS_RETRY = 12000
+# Minimum usable prose length — below this we treat the call as failed.
+MIN_USEFUL_CHARS = 200
 
 
-def _llm(model: str = SONNET_MODEL, max_tokens: Optional[int] = None) -> ChatAnthropic:
-    """Build a chat model. ChatAnthropic reads ANTHROPIC_API_KEY from the env."""
+def _llm(
+    model: str = SONNET_MODEL,
+    max_tokens: Optional[int] = None,
+    *,
+    disable_thinking: bool = True,
+) -> ChatAnthropic:
+    """Build a chat model. ChatAnthropic reads ANTHROPIC_API_KEY from the env.
+
+    Thinking is disabled by default. Claude Sonnet/Opus adaptive thinking can
+    consume the entire max_tokens budget as thinking tokens and return zero
+    visible text (the NVDA DCF/comps failure mode).
+    """
     if max_tokens is None:
         max_tokens = MAX_TOKENS_OPUS if model == OPUS_MODEL else MAX_TOKENS_SONNET
-    return ChatAnthropic(model=model, max_tokens=max_tokens)
+    kwargs: Dict[str, Any] = {"model": model, "max_tokens": max_tokens}
+    if disable_thinking:
+        kwargs["thinking"] = {"type": "disabled"}
+    return ChatAnthropic(**kwargs)
+
+
+def _message_text(response: Any) -> str:
+    """Extract plain text from a LangChain / Anthropic AIMessage.
+
+    Claude models with extended thinking (or tool use) return `content` as a
+    *list* of blocks, e.g.::
+
+        [
+          {"type": "thinking", "thinking": "...", "signature": "..."},
+          {"type": "text", "text": "# NVIDIA ..."},
+        ]
+
+    Calling ``str(response.content)`` dumps the raw list (including huge
+    thinking signatures) into final_memo / styled_memo — which is exactly what
+    broke the NVDA docx export. Always pull only the text blocks.
+    """
+    content = getattr(response, "content", response)
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+                continue
+            if not isinstance(block, dict):
+                # Some SDKs return typed objects (e.g. TextBlock)
+                text = getattr(block, "text", None)
+                btype = getattr(block, "type", None)
+                if text and (btype in (None, "text") or not btype):
+                    parts.append(str(text))
+                continue
+            btype = block.get("type")
+            # Prefer explicit text blocks; skip thinking / tool_use / redacted.
+            if btype == "text" and block.get("text"):
+                parts.append(str(block["text"]))
+            elif btype is None and block.get("text"):
+                parts.append(str(block["text"]))
+        return "\n".join(parts).strip()
+    return str(content)
+
+
+def _usage_bits(response: Any) -> dict[str, Any]:
+    """Pull stop_reason / token counts from an AIMessage for logging."""
+    md = getattr(response, "response_metadata", None) or {}
+    usage = md.get("usage") or {}
+    details = usage.get("output_tokens_details") or {}
+    um = getattr(response, "usage_metadata", None) or {}
+    return {
+        "model": md.get("model") or md.get("model_name"),
+        "stop_reason": md.get("stop_reason"),
+        "input_tokens": usage.get("input_tokens") or um.get("input_tokens"),
+        "output_tokens": usage.get("output_tokens") or um.get("output_tokens"),
+        "thinking_tokens": details.get("thinking_tokens") or 0,
+        "cache_read": usage.get("cache_read_input_tokens") or 0,
+        "cache_create": usage.get("cache_creation_input_tokens") or 0,
+    }
+
+
+def _log_llm(label: str, bits: dict[str, Any], text_len: int, *, attempt: int = 1) -> None:
+    print(
+        f"[llm:{label}] attempt={attempt} model={bits.get('model')} "
+        f"stop={bits.get('stop_reason')} "
+        f"in={bits.get('input_tokens')} out={bits.get('output_tokens')} "
+        f"think={bits.get('thinking_tokens')} "
+        f"cache_r={bits.get('cache_read')} cache_w={bits.get('cache_create')} "
+        f"text_chars={text_len}",
+        flush=True,
+    )
+
+
+def _is_weak_output(text: str, stop_reason: Optional[str]) -> bool:
+    """True if we should retry: empty, tiny, or hard-truncated mid-memo."""
+    if not text or not text.strip():
+        return True
+    if len(text.strip()) < MIN_USEFUL_CHARS:
+        return True
+    # max_tokens with very short text almost always means thinking ate the budget
+    # (or output was cut before any useful prose).
+    if stop_reason == "max_tokens" and len(text.strip()) < 1500:
+        return True
+    return False
+
+
+def _invoke(
+    messages: list,
+    *,
+    model: str,
+    max_tokens: Optional[int],
+    disable_thinking: bool,
+    label: str,
+    attempt: int,
+) -> tuple[str, dict[str, Any]]:
+    response = _llm(
+        model, max_tokens=max_tokens, disable_thinking=disable_thinking
+    ).invoke(messages)
+    text = _message_text(response)
+    bits = _usage_bits(response)
+    _log_llm(label, bits, len(text), attempt=attempt)
+    return text, bits
 
 
 def _run(
@@ -49,12 +182,44 @@ def _run(
     *,
     model: str = SONNET_MODEL,
     max_tokens: Optional[int] = None,
+    label: str = "run",
+    disable_thinking: bool = True,
+    retry_on_empty: bool = True,
 ) -> str:
-    """One system + user round trip, returning the text response."""
-    response = _llm(model, max_tokens=max_tokens).invoke(
-        [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
+    """One system + user round trip, returning the text response.
+
+    Retries once with a higher token budget if the first pass is empty or
+    clearly truncated (P0 empty-output gate).
+    """
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_prompt),
+    ]
+    text, bits = _invoke(
+        messages,
+        model=model,
+        max_tokens=max_tokens,
+        disable_thinking=disable_thinking,
+        label=label,
+        attempt=1,
     )
-    return response.content if isinstance(response.content, str) else str(response.content)
+    if retry_on_empty and _is_weak_output(text, bits.get("stop_reason")):
+        print(
+            f"[llm:{label}] weak output — retrying with max_tokens={MAX_TOKENS_RETRY}, "
+            f"thinking disabled",
+            flush=True,
+        )
+        text2, bits2 = _invoke(
+            messages,
+            model=model,
+            max_tokens=MAX_TOKENS_RETRY,
+            disable_thinking=True,
+            label=label,
+            attempt=2,
+        )
+        if not _is_weak_output(text2, bits2.get("stop_reason")) or len(text2) > len(text):
+            return text2
+    return text
 
 
 def _run_with_shared_cache(
@@ -64,6 +229,9 @@ def _run_with_shared_cache(
     *,
     model: str = SONNET_MODEL,
     max_tokens: Optional[int] = None,
+    label: str = "cached",
+    disable_thinking: bool = True,
+    retry_on_empty: bool = True,
 ) -> str:
     """Round trip with Anthropic prompt caching on the shared data block.
 
@@ -72,25 +240,47 @@ def _run_with_shared_cache(
     Marking the shared block with cache_control makes subsequent calls in
     the same run hit a cheaper cached read.
     """
-    response = _llm(model, max_tokens=max_tokens).invoke(
-        [
-            SystemMessage(content=system_prompt),
-            HumanMessage(
-                content=[
-                    {
-                        "type": "text",
-                        "text": shared_data_block,
-                        "cache_control": {"type": "ephemeral"},
-                    },
-                    {
-                        "type": "text",
-                        "text": task_instruction,
-                    },
-                ]
-            ),
-        ]
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(
+            content=[
+                {
+                    "type": "text",
+                    "text": shared_data_block,
+                    "cache_control": {"type": "ephemeral"},
+                },
+                {
+                    "type": "text",
+                    "text": task_instruction,
+                },
+            ]
+        ),
+    ]
+    text, bits = _invoke(
+        messages,
+        model=model,
+        max_tokens=max_tokens,
+        disable_thinking=disable_thinking,
+        label=label,
+        attempt=1,
     )
-    return response.content if isinstance(response.content, str) else str(response.content)
+    if retry_on_empty and _is_weak_output(text, bits.get("stop_reason")):
+        print(
+            f"[llm:{label}] weak output — retrying with max_tokens={MAX_TOKENS_RETRY}, "
+            f"thinking disabled",
+            flush=True,
+        )
+        text2, bits2 = _invoke(
+            messages,
+            model=model,
+            max_tokens=MAX_TOKENS_RETRY,
+            disable_thinking=True,
+            label=label,
+            attempt=2,
+        )
+        if not _is_weak_output(text2, bits2.get("stop_reason")) or len(text2) > len(text):
+            return text2
+    return text
 
 
 def _parse_json_blob(raw: str) -> Optional[Dict[str, Any]]:
@@ -134,6 +324,10 @@ def _shared_research_payload(state: ResearchState) -> str:
             _json_block("CASH FLOW STATEMENT", state.get("cash_flow_statement") or {}),
             _json_block("SEC FILING SUMMARY", state.get("sec_filing_summary") or "Not provided."),
             _json_block("MACRO CONTEXT", state.get("macro_context") or "Not provided."),
+            _json_block(
+                "MACRO REGIME ASSESSMENT",
+                state.get("macro_regime_assessment") or "Not provided.",
+            ),
         ]
     )
 
@@ -198,6 +392,96 @@ def business_overview_node(state: ResearchState) -> dict:
             BUSINESS_OVERVIEW_SYSTEM_PROMPT,
             user_prompt,
             model=SONNET_MODEL,
+            label="business_overview",
+        )
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 0b. Macro / Regime — cycle positioning; parallel with overview + gatherer
+# ─────────────────────────────────────────────────────────────────────────────
+
+MACRO_REGIME_SYSTEM_PROMPT = """\
+You are the macro and cycle-positioning analyst. Your job is to assess whether the current
+macro and cycle backdrop is a tailwind, headwind, or neutral for this specific company —
+using a defined analytical framework, not generic commentary.
+
+FRAMEWORK — apply these three lenses in order:
+
+1. DEBT CYCLE POSITIONING (primary lens). Using retrieved current data on rates, inflation,
+   government debt levels, and central bank posture, assess where the relevant economy sits in
+   the short-term debt cycle (expansion / late-expansion / contraction / early-recovery) and,
+   where evidence supports it, the long-term debt cycle (early / mid / late-stage deleveraging
+   dynamics). Ground this in actual current data — current rate levels, current inflation
+   prints, current fiscal deficit figures — not in a general theory asserted without evidence.
+
+2. REFLEXIVITY CHECK (secondary lens). Ask whether there is a self-reinforcing loop currently
+   operating for or against this name or sector — e.g. rising asset prices enabling more
+   borrowing/investment that further supports prices, or the reverse. State explicitly if no
+   clear reflexive loop is identifiable rather than manufacturing one.
+
+3. SECTOR-SPECIFIC CYCLE POSITION (tertiary lens). Separate from the broad macro cycle, assess
+   where THIS sector specifically sits in its own cycle (e.g. a capex buildout cycle, an
+   inventory cycle, a regulatory cycle) — a sector can be a bright spot in a weak macro
+   environment or vice versa, and the two should not be conflated.
+
+CRITICAL DISCIPLINE — calibrate confidence to actual evidentiary strength:
+- If you draw a historical analogy (e.g. comparing current conditions to a prior cycle,
+  a prior policy era, a prior geopolitical event), you MUST state explicitly: (a) what the
+  parallel is, (b) what the actual causal mechanism connecting then to now is claimed to be,
+  and (c) at least one way the current situation differs from the historical analog that could
+  break the parallel. Never assert a historical analogy as settled fact. A compelling analogy
+  is a hypothesis, not a proof — treat it as such in your own language ("this rhymes with X,
+  though Y is a real disanalogy" rather than "this is exactly what happened in X").
+- Distinguish clearly between what is directly evidenced in the retrieved data (cite it) and
+  what is your own interpretive judgment (label it as such, e.g. "my read is..." rather than
+  presenting inference as fact).
+- If the retrieved data doesn't clearly support a directional call, say so. A genuine "neutral,
+  mixed signals" verdict is more useful and more honest than a forced tailwind/headwind call.
+
+OUTPUT:
+- State the debt-cycle positioning verdict, the reflexivity read, and the sector-cycle read as
+  three short, separate sections.
+- Close with an explicit verdict: TAILWIND / HEADWIND / NEUTRAL for this specific company,
+  one sentence stating the single factor that would most change this read, and a confidence
+  level (high / moderate / low) tied to how much of the above was directly evidenced versus
+  inferred.
+
+Ground every claim in the data you retrieved. Do not invent rate levels, inflation figures, or
+fiscal data — if you cannot find current figures, say so explicitly rather than estimating.
+"""
+
+
+def macro_regime_node(state: ResearchState) -> dict:
+    """Assess macro/cycle positioning for this company.
+
+    Populates: macro_regime_assessment.
+    Independent Tavily research — runs in parallel with data_gatherer and
+    business_overview from the deep-dive entry point.
+    """
+    ctx = gather_macro_regime_context(
+        ticker=state.get("ticker"),
+        sector=state["sector"],
+        user_query=state["user_query"],
+    )
+    user_prompt = (
+        f"Ticker: {state.get('ticker') or 'N/A'}\n"
+        f"Sector: {state['sector']}\n"
+        f"User request: {state['user_query']}\n"
+        f"Research gathered at (UTC): {ctx['gathered_at_utc']}\n"
+        f"Search queries run: {json.dumps(ctx['queries_run'])}\n\n"
+        f"=== LIVE WEB RESEARCH (Tavily — Macro / cycle) ===\n"
+        f"{ctx['web_research']}\n\n"
+        "Using ONLY the research above, apply the three-lens framework and "
+        "produce the macro/regime assessment. If a rate, inflation, debt, or "
+        "fiscal figure is not in the research, say so — do not invent it."
+    )
+    return {
+        "macro_regime_assessment": _run(
+            MACRO_REGIME_SYSTEM_PROMPT,
+            user_prompt,
+            model=SONNET_MODEL,
+            label="macro_regime",
         )
     }
 
@@ -284,6 +568,7 @@ def data_gatherer_node(state: ResearchState) -> dict:
         user_prompt,
         model=OPUS_MODEL,
         max_tokens=MAX_TOKENS_OPUS,
+        label="data_gatherer",
     )
 
     parsed = _parse_json_blob(raw)
@@ -334,12 +619,16 @@ def data_gatherer_node(state: ResearchState) -> dict:
 BULL_SYSTEM_PROMPT = """\
 You are the bull analyst on an investment research team. Using only the LIVE
 data provided (business overview + SEC financial statements + filing summary
-+ macro context), write the strongest good-faith case FOR the investment.
++ macro context + macro regime assessment), write the strongest good-faith
+case FOR the investment.
 
 Focus on:
 - Upside the market may be underpricing: optionality, product cycles, pricing
   power, sector tailwinds — grounded in the business overview's segment/
   geography/competitive-position picture.
+- Where the macro regime assessment is TAILWIND or sector-cycle supportive,
+  weave that in with evidence; if it is HEADWIND or NEUTRAL, do not invent
+  macro support — lean on company-specific fundamentals instead.
 - Margin expansion or operating leverage visible in the income statement
   (cite specific line items and periods, e.g. "operating margin expanded from
   X% to Y% on OperatingIncomeLoss / Revenues").
@@ -361,6 +650,7 @@ def bull_agent_node(state: ResearchState) -> dict:
         _shared_research_payload(state),
         "Write the bull thesis. Cite specific statement line items.",
         model=SONNET_MODEL,
+        label="bull",
     )
     return {"bull_thesis": text}
 
@@ -372,8 +662,8 @@ def bull_agent_node(state: ResearchState) -> dict:
 BEAR_SYSTEM_PROMPT = """\
 You are the red team: the bear analyst whose job is to find every reason this
 investment could fail. Using only the LIVE data provided (business overview +
-SEC financial statements + filing summary + macro context), write the
-strongest good-faith case AGAINST the investment.
+SEC financial statements + filing summary + macro context + macro regime
+assessment), write the strongest good-faith case AGAINST the investment.
 
 Hunt specifically for:
 - Accounting red flags visible in the statements: revenue recognition stress,
@@ -381,6 +671,9 @@ Hunt specifically for:
   adjusted gaps.
 - Debt walls and balance-sheet pressure: maturities, leverage, covenant risk,
   off-balance-sheet obligations if disclosed in the filing summary.
+- Macro / cycle headwinds from the regime assessment (debt-cycle position,
+  reflexive loops turning negative, late-sector-cycle risk) when evidenced —
+  do not invent macro doom if the assessment is TAILWIND or NEUTRAL.
 - Business-model risks from the overview: customer concentration, secular
   decline, competitive erosion, geography concentration.
 - Cash-flow deterioration (operating CF, FCF, buybacks funded by debt).
@@ -398,6 +691,7 @@ def bear_agent_node(state: ResearchState) -> dict:
         _shared_research_payload(state),
         "Write the bear thesis. Cite specific statement line items.",
         model=SONNET_MODEL,
+        label="bear",
     )
     return {"bear_thesis": text}
 
@@ -407,44 +701,56 @@ def bear_agent_node(state: ResearchState) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 FUNDAMENTAL_VALUATION_SYSTEM_PROMPT = """\
-You are a fundamental valuation analyst. Using only the LIVE data provided
-(business overview + SEC statements + filing summary + macro context + live
-price if present under statements), estimate intrinsic value.
+You are a fundamental valuation analyst. A DETERMINISTIC Python DCF engine has
+already computed the base-case intrinsic value from SEC free-cash-flow history
+and sector-default WACC / terminal growth. That engine block is the source of
+truth for the math — you narrate and interpret it; you do not replace its
+fair-value numbers with invented ones.
 
-STEP 1 — classify the business-model archetype BEFORE choosing a method.
-State the archetype and why in ONE sentence, then run the matching method(s):
+Write-up structure:
+1. ARCHETYPE — one sentence classifying the business model and whether FCF DCF
+   is the right primary method (flag banks/REITs/insurers if DCF is a poor fit).
+2. ENGINE BASE CASE — restate fair value / share, range, implied upside vs live
+   price, WACC, g_high, g_terminal, and base FCF. Quote the engine figures.
+3. KEY SWING ASSUMPTIONS — what would most change the estimate (growth fade,
+   WACC, margin mean-reversion). Qualitative sensitivities are fine; do not
+   fabricate a second full DCF with made-up cash flows.
+4. EPV / CROSS-CHECK — use the engine's EPV and trailing P/E if present.
+5. CONFIDENCE & GAPS — engine confidence, warnings, and any missing inputs.
 
-| Archetype | Signal | Right fundamental method |
-|---|---|---|
-| Bank / lender | Financials sector; BS dominated by loans/deposits; leverage is the model | DDM or excess-return-on-equity (book + PV of (ROE − r_e)×equity). Standard FCF DCF is INVALID — interest is operating. |
-| REIT / real estate | Real estate sector; heavy PP&E; rent revenue | FFO/AFFO-based valuation (not NI); NAV with property-level cap rates. |
-| Asset-heavy industrial / utility / energy | High PP&E/revenue; capital-intensive | DCF with normalized mid-cycle margins; split maintenance vs growth capex; NAV/replacement-cost sanity check. |
-| Insurance | Insurance sector; float/reserves on BS | Embedded value or P/B-vs-ROE excess return (bank-like). |
-| Software / SaaS | High gross margin; low PP&E; subscription | DCF OK but allow negative near-term FCF if growth-stage; rule-of-40; longer high-growth explicit period before fade. |
-| Mature dividend-payer / consumer staple | Low growth; stable payout; low capex | DDM or steady-state FCF DCF; note if they diverge and why. |
-| Cyclical / commodity producer | Margins swing with commodity/macro cycle | Normalize earnings across a full cycle; DCF or EPV off normalized base — do not extrapolate peak/trough. |
-| Pre-profit / early-stage growth | Negative/near-zero NI; high revenue growth | Scenario path-to-profitability DCF with unit economics; avoid false-precision point estimates. |
-
-Then:
-- Build the chosen model from the company's own statement history (FCF, ROE,
-  growth rates, etc.). Show explicit assumptions (discount rate / cost of
-  equity, growth/fade path, projection period).
-- Cross-check with a second simpler method where reasonable (e.g. EPV beside DCF).
-- State a fair-value estimate (or range), confidence level, and the key swing
-  assumption that would most change the estimate.
-- This is INTRINSIC value — independent of what peers currently trade at.
-  Do not invent numbers missing from the packet; mark gaps explicitly.
+This is INTRINSIC value — independent of peer multiples (that is the relative
+agent's job). If the engine reported errors, explain them and stop — do not
+invent a substitute model from training memory.
 """
 
 
 def fundamental_valuation_node(state: ResearchState) -> dict:
-    """Intrinsic valuation by archetype. Populates: fundamental_valuation."""
+    """Intrinsic valuation: Python DCF + LLM narrative. Populates: fundamental_valuation."""
+    dcf = compute_dcf_from_state(state)
+    dcf_block = format_dcf_for_prompt(dcf)
+    print(
+        f"[valuation:dcf] ticker={state.get('ticker')} "
+        f"fv={dcf.get('fair_value_per_share')} upside={dcf.get('implied_upside_vs_price')} "
+        f"errors={dcf.get('errors')}",
+        flush=True,
+    )
+
+    shared = _shared_research_payload(state) + "\n\n" + dcf_block
     text = _run_with_shared_cache(
         FUNDAMENTAL_VALUATION_SYSTEM_PROMPT,
-        _shared_research_payload(state),
-        "Classify the archetype, then produce the fundamental valuation write-up.",
+        shared,
+        "Produce the fundamental valuation write-up from the engine output and packet.",
         model=SONNET_MODEL,
+        label="fundamental",
+        max_tokens=MAX_TOKENS_SONNET,
     )
+    # Hard fallback: never ship an empty fundamental field if the engine has numbers.
+    if not (text or "").strip():
+        print("[valuation:dcf] LLM empty — falling back to engine block only", flush=True)
+        text = (
+            "## Fundamental valuation (engine only — narrative model failed)\n\n"
+            + dcf_block
+        )
     return {"fundamental_valuation": text}
 
 
@@ -453,72 +759,80 @@ def fundamental_valuation_node(state: ResearchState) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 RELATIVE_VALUATION_SYSTEM_PROMPT = """\
-You are a relative valuation analyst. Using the LIVE company data provided
-plus any peer multiples supplied in the user message, assess whether the
-stock is cheap/fair/rich *relative to peers and its own history*.
+You are a relative valuation analyst. A DETERMINISTIC peer-comps table has
+already been pulled from yfinance for the subject and a sector peer set.
+That table is the source of truth for trading multiples — you narrate it;
+you do not invent peer P/Es or EV/EBITDAs from training memory.
 
-STEP 1 — classify the business-model archetype BEFORE choosing multiples.
-State the archetype and multiple(s) selected and why in ONE sentence:
+Write-up structure:
+1. ARCHETYPE — one sentence on which multiples are appropriate and why.
+2. SUBJECT MULTIPLES — restate the subject's trailing/forward P/E, EV/EBITDA,
+   P/S (as available) from the comps table.
+3. PEER COMPARISON — name the peers, cite peer medians, and state whether the
+   stock screens cheap / fair / rich on each key multiple.
+4. JUSTIFIED PREMIUM/DISCOUNT — using growth, margins, and business quality
+   from the company packet (not invented peer numbers), argue whether any
+   premium or discount is deserved.
+5. CONCLUSION — overall cheap / fair / rich vs peers. Explicitly state this
+   says NOTHING about intrinsic value (that is the fundamental agent's job).
 
-| Archetype | Right relative multiple(s) | Why |
-|---|---|---|
-| Bank / lender | P/B vs ROE (or P/TBV), P/E | EV/EBITDA is meaningless — debt is inventory. |
-| REIT / real estate | P/FFO or P/AFFO, not P/E | NI distorted by heavy D&A. |
-| Asset-heavy industrial / utility | EV/EBITDA, EV/Invested Capital | Normalizes capital structure & D&A policy. |
-| Insurance | P/B vs ROE | Book value and ROE matter more than earnings multiples. |
-| Software / SaaS | EV/Revenue or EV/ARR (if unprofitable); EV/EBITDA if mature | P/E useless if reinvestment drives near-zero NI. |
-| Mature dividend-payer / consumer staple | P/E, EV/EBITDA, dividend yield vs peers | Standard multiples work. |
-| Cyclical / commodity producer | EV/EBITDA on mid-cycle / normalized earnings | Trailing P/E distorted at peaks/troughs. |
-| Pre-profit / early-stage growth | EV/Revenue, EV/Gross Profit | No earnings to multiple; growth-adjust where possible. |
-
-Then:
-- Use the subject company's live price / market cap / shares and statement
-  data to compute or infer its current trading multiple(s).
-- Compare to 2–4 named direct competitors that share the SAME archetype.
-  Comping across archetypes (e.g. bank vs software EV/EBITDA) is a hard
-  error — if peer data is mixed, flag it explicitly rather than averaging.
-- Compare to the stock's own historical multiple range if available.
-- Conclude cheap / fair / rich relative to peers and history.
-- Explicitly state this says NOTHING about intrinsic value (that is the
-  fundamental agent's job).
-- Ground claims in provided data; do not invent peer multiples from memory
-  when they are absent — say the data is missing.
+If a multiple is n/a in the table, say so — do not fill it from memory.
 """
 
 
 def relative_valuation_node(state: ResearchState) -> dict:
-    """Comps / multiples valuation. Populates: relative_valuation.
+    """Comps / multiples: yfinance peer table + LLM narrative.
 
-    May run a focused Tavily peer search — the only analysis node allowed
-    independent search, because peer multiples are not in the gatherer packet.
+    Populates: relative_valuation. Optional Tavily narrative is secondary
+    color only — multiples come from the structured comps engine.
     """
     ticker = state.get("ticker") or ""
     sector = state["sector"]
+
+    comps: dict = {}
+    comps_block = ""
+    if ticker:
+        comps = fetch_peer_multiples(ticker, sector=sector)
+        comps_block = format_comps_for_prompt(comps)
+        print(
+            f"[valuation:comps] ticker={ticker} overall={comps.get('overall_vs_peers')} "
+            f"peers={comps.get('peer_list')}",
+            flush=True,
+        )
+
+    # Light narrative search (optional color) — 1 query, not 2, to save tokens.
     peer_research = ""
     if ticker:
         peer_research = multi_search(
-            [
-                f"{ticker} valuation multiples peers competitors {sector}",
-                f"{ticker} vs peers EV/EBITDA P/E P/B P/S FFO trading multiples",
-            ],
-            max_results=5,
+            [f"{ticker} vs peers valuation multiples {sector} AMD competitors"],
+            max_results=4,
             topic="finance",
         )
 
     shared = _shared_research_payload(state)
+    if comps_block:
+        shared = shared + "\n\n" + comps_block
     if peer_research:
         shared = (
             shared
-            + "\n\n=== PEER / MULTIPLES WEB RESEARCH (Tavily) ===\n"
+            + "\n\n=== PEER NARRATIVE WEB RESEARCH (Tavily, secondary) ===\n"
             + peer_research
         )
 
     text = _run_with_shared_cache(
         RELATIVE_VALUATION_SYSTEM_PROMPT,
         shared,
-        "Classify the archetype, then produce the relative valuation write-up.",
+        "Produce the relative valuation write-up from the comps table and packet.",
         model=SONNET_MODEL,
+        label="relative",
+        max_tokens=MAX_TOKENS_SONNET,
     )
+    if not (text or "").strip():
+        print("[valuation:comps] LLM empty — falling back to comps table only", flush=True)
+        text = (
+            "## Relative valuation (comps table only — narrative model failed)\n\n"
+            + (comps_block or "No peer comps available.")
+        )
     return {"relative_valuation": text}
 
 
@@ -529,10 +843,12 @@ def relative_valuation_node(state: ResearchState) -> dict:
 SYNTHESIS_SYSTEM_PROMPT = """\
 You are the senior portfolio strategist and lead writer. You have received:
   (1) a descriptive business overview,
-  (2) a bull thesis,
-  (3) a bear thesis,
-  (4) a fundamental (intrinsic) valuation, and
-  (5) a relative (comps) valuation.
+  (2) a macro/regime assessment (debt cycle, reflexivity, sector cycle,
+      TAILWIND / HEADWIND / NEUTRAL verdict),
+  (3) a bull thesis,
+  (4) a bear thesis,
+  (5) a fundamental (intrinsic) valuation, and
+  (6) a relative (comps) valuation.
 
 Your job is a single decision-ready investment memo.
 
@@ -542,13 +858,17 @@ Structure (in this order):
    company understands what it does before any argument about the stock.
 2. RECOMMENDATION — take an explicit stance (buy / hold / avoid or equivalent).
    No hedging that avoids a position. State what evidence would change it.
-3. KEY DEBATE POINTS — weigh bull vs bear against the valuation picture, not
+3. MACRO / CYCLE POSITIONING — briefly state how the regime assessment (and
+   its confidence) informs the stance; do not invent rates or fiscal data
+   beyond what upstream agents provided.
+4. KEY DEBATE POINTS — weigh bull vs bear against the valuation picture, not
    just against each other. Where does the bear case land a blow? Where does
    the bull case survive contact?
-4. VALUATION RECONCILIATION — explicitly reconcile disagreement between
+5. VALUATION RECONCILIATION — explicitly reconcile disagreement between
    fundamental and relative calls (e.g. "DCF says overvalued, but cheap vs
    peers — which matters more here and why").
-5. RISKS AND MONITORING TRIGGERS — what to watch next.
+6. RISKS AND MONITORING TRIGGERS — what to watch next (include the regime
+   assessment's key flip-factor when present).
 
 Rules:
 - Build the stance strictly from the data assembled upstream. No outside
@@ -558,122 +878,99 @@ Rules:
 """
 
 
+def _field_status(state: ResearchState) -> dict[str, int]:
+    """Char lengths of critical upstream fields for the synthesis gate log."""
+    keys = (
+        "business_overview",
+        "macro_regime_assessment",
+        "bull_thesis",
+        "bear_thesis",
+        "fundamental_valuation",
+        "relative_valuation",
+    )
+    return {k: len((state.get(k) or "").strip()) for k in keys}
+
+
 def synthesis_node(state: ResearchState) -> dict:
-    """Synthesize overview + debate + valuations into the final memo.
+    """Synthesize overview + regime + debate + valuations into the final memo.
 
     Writes only final_memo (raw judgment). Style is a separate downstream node.
+
+    Pre-synthesis gate (P0): log field lengths and warn if critical valuation
+    or debate fields are empty. Retries for empty fields happen inside each
+    analysis node; by this point we only surface remaining gaps honestly.
     """
+    status = _field_status(state)
+    print(f"[synthesis:gate] field_chars={status}", flush=True)
+    weak = [k for k, n in status.items() if n < MIN_USEFUL_CHARS]
+    if weak:
+        print(
+            f"[synthesis:gate] WARNING weak/empty upstream fields: {weak} "
+            f"— memo will flag gaps rather than invent content",
+            flush=True,
+        )
+
     user_prompt = (
         f"Target: {state.get('ticker') or state['sector']}\n"
         f"Sector: {state['sector']}\n"
         f"User request: {state['user_query']}\n\n"
         f"=== BUSINESS OVERVIEW ===\n{state.get('business_overview') or 'None provided.'}\n\n"
+        f"=== MACRO REGIME ASSESSMENT ===\n"
+        f"{state.get('macro_regime_assessment') or 'None provided.'}\n\n"
         f"=== BULL THESIS ===\n{state.get('bull_thesis') or 'None provided.'}\n\n"
         f"=== BEAR THESIS ===\n{state.get('bear_thesis') or 'None provided.'}\n\n"
         f"=== FUNDAMENTAL VALUATION ===\n{state.get('fundamental_valuation') or 'None provided.'}\n\n"
         f"=== RELATIVE VALUATION ===\n{state.get('relative_valuation') or 'None provided.'}\n\n"
-        "Write the final investment memo in the required structure."
+        "Write the final investment memo in the required structure. "
+        "If a section above says None provided or is clearly incomplete, say so "
+        "explicitly — do not invent DCF, peer multiples, or rate/fiscal figures "
+        "to fill the gap."
     )
     return {
         "final_memo": _run(
             SYNTHESIS_SYSTEM_PROMPT,
             user_prompt,
             model=OPUS_MODEL,
-            max_tokens=MAX_TOKENS_OPUS,
+            max_tokens=MAX_TOKENS_MEMO,
+            label="synthesis",
         )
     }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 7. Style pass — Sonnet tier; voice only, no new judgment
+# 7. Style pass — Sonnet tier; light touch (cover / headers / closing only)
 # ─────────────────────────────────────────────────────────────────────────────
 
 STYLE_PASS_SYSTEM_PROMPT = """\
-You are a writing-style pass. You will be given a completed, fully-reasoned investment memo.
-Your ONLY job is to rewrite it so the prose matches a specific voice — you are not permitted
-to change any conclusion, number, stance, or substantive claim. Think of this as seasoning,
-not cooking: the analysis underneath must come out exactly as it went in.
+You are a light writing-style pass on a completed investment memo.
+
+SCOPE — rewrite ONLY these parts (leave the analytical body prose essentially intact):
+1. COVER BLOCK at the top: Ticker / Rating (Buy-Hold-Avoid) / Price Target /
+   Implied Upside / Time Horizon. Add this block if missing; sharpen if present.
+2. SECTION HEADERS: plain, phrase-based titles (e.g. "Understanding the Business",
+   "Variant Perception", "The Asymmetry", "Risks"). Rename headers for voice;
+   do not delete sections.
+3. CLOSING: ensure a binary framing sentence ("Either X or Y. Very little middle
+   ground.") and a conditional recommendation ("If you believe X… If you think Y…").
+   Rewrite only the final 1–3 paragraphs if needed to land that shape.
 
 HARD CONSTRAINTS:
-- Do not alter the recommendation, price target, any figure, any valuation conclusion, or the
-  overall stance. If the input says "Buy" it must still say "Buy" when you're done.
-- Do not add new claims, evidence, or reasoning that wasn't in the original. Do not remove
-  substantive content — every conclusion and every piece of supporting evidence in the input
-  must still be present in the output.
-- You may reorganize section names, sentence structure, paragraph breaks, and phrasing freely
-  to match the voice below. You may not reorganize which conclusions go with which evidence.
+- Do NOT rewrite the full body paragraph-by-paragraph. Body analysis stays as-is
+  except for light header renames and the cover/closing edits above.
+- Do not alter the recommendation, price target, any figure, any valuation
+  conclusion, or the overall stance.
+- Do not add new claims, evidence, or numbers. Do not remove substantive content.
+- No corporate hedge-language, no exclamation points, no "in conclusion".
 
-VOICE TO MATCH:
-
-WRITING STYLE — match this voice throughout the memo. This is extracted from the writer's own
-published investment memos (SpaceX, NVIDIA, two Salesforce pieces) plus broader essays — follow
-it closely, it maps directly onto this exact task.
-
-STRUCTURE — use this shape, adapting section names to fit the specific analysis:
-
-1. Cover block up front, before any prose: Ticker / Rating (Buy-Hold-Avoid) / Price Target /
-   Implied Upside / Time Horizon. State the call before justifying it.
-2. "Understanding the Business" section — this is where the business overview agent's content
-   goes, under this literal header or a close variant.
-3. Open the analytical body with a specific comparative anomaly stated as a concrete number gap
-   — a real, checkable discrepancy, not a vague framing sentence. Pattern: "X is up 7% YTD
-   while [benchmark] is up 76% YTD."
-4. Include a "Variant Perception" or "Where the Market Is Right" section — name it explicitly.
-   State the consensus/bear view plainly and concede what it gets right before pivoting to the
-   contrarian read. This is a labeled section, not just a paragraph buried in the middle.
-5. A scenario table for the valuation reconciliation: Bear Case / Base Case / Bull Case, each
-   with an explicit multiple and resulting price, not a vague range.
-6. A risk section that addresses each risk by name in its own short paragraph, closing each one
-   with a direct verdict on whether it's a near-term threat or a longer-horizon concern.
-7. Close with a binary framing sentence — "Either X or Y. Very little middle ground." — then
-   land the conditional recommendation immediately after it (see CLOSING below).
-
-BODY:
-- Short, declarative sentences. Starting a sentence with "And" or "But" is fine and used
-  deliberately as a rhythm device.
-- Land data immediately after the claim it supports, with no hedging qualifiers in between —
-  "revenue grew 40% year over year," not "it's worth noting that revenue appears to have grown
-  by approximately 40%."
-- Open a section by knocking down the naive read before giving the real one when relevant:
-  "Most people think X. They're not." / "Everyone talks about X like it's about Y. It isn't."
-  Use this especially when correcting a common misconception the market/bear case holds.
-- When a metric or ratio is introduced as evidence (PEG, EV/EBITDA, whatever the fundamental/
-  relative valuation agents used), briefly teach what it means in one plain sentence before
-  using it — don't assume the reader already knows.
-- Close each major section with a short, standalone verdict sentence that compresses that
-  section's takeaway. Example: "This is strictly a price gap, not a growth one." One line, no
-  hedging.
-- Use a recurring metaphor or analogy to make unfamiliar mechanics concrete, and return to it
-  more than once rather than using it only where it's first introduced — e.g. "railroad
-  economics" reappearing later in the same piece to reinforce the point.
-- Use first-person conviction markers sparingly but directly — "I think," "I would recommend"
-  — rather than passive hedged phrasing.
-- If there's a real limitation or gap in the analysis, admit it once, briefly, in a single
-  clause — then keep going with the argument anyway. Don't dwell on caveats.
-
-CLOSING:
-- Land a binary framing sentence just before the final recommendation — "This is either the
-  most important company of the next 50 years or the most expensive lesson in execution risk
-  ever written. There is very little middle ground." Sets up stakes before the ask.
-- Then end with a conditional decision framework handed to the reader, not just a flat verdict.
-  Pattern: "If you believe X, I would not buy. If you think Y, I would buy, because on a
-  growth-adjusted basis it screens cheaply." This ties the recommendation explicitly to the
-  variant view that would flip it.
-- No corporate hedge-language, no exclamation points, no forced enthusiasm, no "in conclusion"
-  or "it is worth noting that" transitions. Say the thing directly.
-- Plain, phrase-based section headers (e.g. "The Lag Versus Peers: A Valuation Opportunity,"
-  "The Asymmetry," "Understanding the Business," "Variant Perception"), no nested subheadings.
-  Short paragraphs, 2-4 sentences typical.
-
-Rewrite the memo now, section by section, preserving every substantive claim while adjusting
-only how it's said.
+Output the full memo (cover + body with updated headers + closing), not a diff.
 """
 
 
 def style_pass_node(state: ResearchState) -> dict:
-    """Voice rewrite of final_memo → styled_memo. No new judgment.
+    """Light voice pass on final_memo → styled_memo.
 
-    Model: Sonnet. Reads only final_memo; leaves final_memo untouched.
+    Only seasons cover block, section headers, and closing — not a full
+    body rewrite (token-efficient; keeps synthesis judgment intact).
     """
     raw = state.get("final_memo") or ""
     if not raw.strip():
@@ -682,14 +979,20 @@ def style_pass_node(state: ResearchState) -> dict:
     user_prompt = (
         f"Target: {state.get('ticker') or state['sector']}\n"
         f"Sector: {state['sector']}\n\n"
-        f"=== FINAL MEMO (do not change conclusions or numbers) ===\n{raw}\n\n"
-        "Rewrite for voice only. Preserve every substantive claim."
+        f"=== FINAL MEMO ===\n{raw}\n\n"
+        "Apply the light style pass: cover block, headers, and closing only. "
+        "Preserve every number and conclusion."
     )
-    return {
-        "styled_memo": _run(
-            STYLE_PASS_SYSTEM_PROMPT,
-            user_prompt,
-            model=SONNET_MODEL,
-            max_tokens=MAX_TOKENS_OPUS,  # full memo rewrite can be long
-        )
-    }
+    # Cap below full-memo rewrite budget: body is mostly copied, not regenerated.
+    styled = _run(
+        STYLE_PASS_SYSTEM_PROMPT,
+        user_prompt,
+        model=SONNET_MODEL,
+        max_tokens=MAX_TOKENS_MEMO,
+        label="style_pass",
+    )
+    # If style pass fails empty, ship the raw synthesis rather than a blank docx.
+    if not (styled or "").strip():
+        print("[style_pass] empty — falling back to final_memo", flush=True)
+        styled = raw
+    return {"styled_memo": styled}
