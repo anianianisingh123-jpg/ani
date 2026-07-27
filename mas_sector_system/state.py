@@ -93,6 +93,20 @@ class ResearchState(TypedDict):
     query_type: str
     routing_decision: dict
 
+    # ------------------------------------------------------------------
+    # Long-term desk memory (loaded at deep_dive entry; no new graph nodes)
+    # ------------------------------------------------------------------
+
+    # SQLite row id of the most recent prior run for this ticker (if any).
+    prior_run_id: Optional[int]
+
+    # Compact meta: created_at, rating, price_target, qc_status, etc.
+    prior_run_meta: dict
+
+    # Bounded prompt block injected into foundation agents so the desk can
+    # track thesis changes vs its own last memo / metrics.
+    prior_run_context: str
+
     # Top-down macroeconomic backdrop relevant to the sector: rates,
     # inflation, FX, commodity trends, and policy developments.
     # Written by data_gatherer_node as a short narrative digest.

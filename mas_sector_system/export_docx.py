@@ -217,5 +217,12 @@ def docx_export_node(state: dict) -> dict:
         f"docx export: qc_status={qc_status or 'n/a'}",
         flush=True,
     )
+    # Archive this run for long-term thesis memory (next deep dive on ticker).
+    try:
+        from .memory import save_run
+
+        save_run({**dict(state), **cost_update})
+    except Exception as exc:
+        print(f"[memory] save_run failed (non-fatal): {exc}", flush=True)
     # Return cost fields so state retains the structured report.
     return cost_update

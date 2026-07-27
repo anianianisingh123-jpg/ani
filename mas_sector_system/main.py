@@ -70,6 +70,7 @@ from .agents import (
 )
 from .cost import begin_run, finalize_run_cost
 from .export_docx import docx_export_node
+from .memory import load_prior_context_for_state
 from .routing import classify_query, log_routing_decision
 from .state import ResearchState
 from .tools import multi_search
@@ -140,7 +141,7 @@ def screener_node(state: ResearchState) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def deep_dive_start_node(state: ResearchState) -> dict:
-    """Entry for deep_dive: start cost tracker, classify query, fan out."""
+    """Entry for deep_dive: start cost tracker, load prior memory, classify, fan out."""
     begin_run(
         ticker=state.get("ticker"),
         sector=state.get("sector") or "",
@@ -154,9 +155,15 @@ def deep_dive_start_node(state: ResearchState) -> dict:
         ticker=state.get("ticker"),
     )
     log_routing_decision(decision)
+    # Long-term memory: inject last desk memo/metrics for this ticker (no new node).
+    memory = load_prior_context_for_state(
+        ticker=state.get("ticker"),
+        mode=state.get("mode") or "deep_dive",
+    )
     return {
         "query_type": decision.get("query_type") or "full_underwrite",
         "routing_decision": decision,
+        **memory,
     }
 
 
@@ -346,6 +353,9 @@ def empty_state(
         "validation_status": "",
         "query_type": "full_underwrite",
         "routing_decision": {},
+        "prior_run_id": None,
+        "prior_run_meta": {},
+        "prior_run_context": "",
         "macro_context": "",
         "macro_regime_assessment": "",
         "management_assessment": "",

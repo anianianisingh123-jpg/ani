@@ -470,14 +470,18 @@ def business_overview_node(state: ResearchState) -> dict:
         sector=state["sector"],
         user_query=state["user_query"],
     )
+    prior = (state.get("prior_run_context") or "").strip()
     user_prompt = (
         f"Ticker: {state.get('ticker') or 'N/A'}\n"
         f"Sector: {state['sector']}\n"
         f"User request: {state['user_query']}\n"
         f"Research gathered at (UTC): {ctx['gathered_at_utc']}\n\n"
+        f"{prior}\n\n"
         f"=== LIVE WEB RESEARCH (Tavily — Business narrative) ===\n"
         f"{ctx['web_research']}\n\n"
-        "Using ONLY the research above, write the business overview."
+        "Using ONLY the research above, write the business overview. "
+        "If PRIOR DESK MEMORY is present, note in one short clause any material "
+        "business-model change vs the prior run — do not rewrite the prior memo."
     )
     return {
         "business_overview": _run(
@@ -759,6 +763,7 @@ def data_gatherer_node(state: ResearchState) -> dict:
         user_query=state["user_query"],
     )
 
+    prior = (state.get("prior_run_context") or "").strip()
     user_prompt = (
         f"Mode: {state['mode']}\n"
         f"Sector: {state['sector']}\n"
@@ -770,13 +775,17 @@ def data_gatherer_node(state: ResearchState) -> dict:
         f"statements_incomplete: {live['statements_incomplete']}\n"
         f"statements_error: {live.get('statements_error')}\n"
         f"Search queries run: {json.dumps(live['queries_run'])}\n\n"
+        f"{prior}\n\n"
         f"{_json_block('INCOME STATEMENT (SEC XBRL)', live['income_statement'])}\n\n"
         f"{_json_block('BALANCE SHEET (SEC XBRL)', live['balance_sheet'])}\n\n"
         f"{_json_block('CASH FLOW STATEMENT (SEC XBRL)', live['cash_flow_statement'])}\n\n"
         f"{_json_block('LIVE MARKET (price only)', live['live_market'])}\n\n"
         f"=== NARRATIVE WEB RESEARCH (Tavily) ===\n{live['web_research']}\n\n"
         "Using ONLY the data above, produce the requested JSON. "
-        "Prioritize a complete, valid JSON close over exhaustive annotations."
+        "Prioritize a complete, valid JSON close over exhaustive annotations. "
+        "If PRIOR DESK MEMORY is present, mention in sec_filing_summary any clear "
+        "delta vs prior period expectations the desk already underwrote — "
+        "do not invent deltas not supported by live SEC/web data."
     )
     raw = _run(
         DATA_GATHERER_SYSTEM_PROMPT,
@@ -1466,11 +1475,16 @@ def _build_synthesis_user_prompt(
         f"=== BEAR THESIS ===\n{state.get('bear_thesis') or 'None provided.'}\n\n"
         f"=== FUNDAMENTAL VALUATION ===\n{state.get('fundamental_valuation') or 'None provided.'}\n\n"
         f"=== RELATIVE VALUATION ===\n{state.get('relative_valuation') or 'None provided.'}\n\n"
+        f"{(state.get('prior_run_context') or '').strip()}\n\n"
         f"{mode_instructions} "
         "If a section above says None provided or is clearly incomplete, say so "
         "explicitly — do not invent DCF, peer multiples, rate/fiscal figures, "
         "or management biography to fill the gap. "
-        "If validation WARNINGs are present, disclose them in the memo."
+        "If validation WARNINGs are present, disclose them in the memo. "
+        "If PRIOR DESK MEMORY is present, include a short 'Thesis evolution' note: "
+        "what the desk believed last time (rating/PT if available), what changed in "
+        "the numbers or narrative, and whether conviction rose or fell — grounded "
+        "only in prior memory + current upstream packets."
     )
     if qc_correction and qc_correction.strip():
         base += (
@@ -2029,14 +2043,29 @@ def qc_halt_node(state: ResearchState) -> dict:
         f"[qc_halt] Run ended without export. qc_status={state.get('qc_status')!r}",
         flush=True,
     )
-    return finalize_run_cost(dict(state))
+    cost_update = finalize_run_cost(dict(state))
+    # Still archive failed-QC memos so the next run knows what almost shipped.
+    try:
+        from .memory import save_run
+
+        save_run({**dict(state), **cost_update})
+    except Exception as exc:
+        print(f"[memory] save_run failed (non-fatal): {exc}", flush=True)
+    return cost_update
 
 
 def qc_style_halt_node(state: ResearchState) -> dict:
-    """Terminal node after style substance drift — no export; still emit cost."""
+    """Legacy terminal (style QC removed from graph) — cost + optional memory."""
     print(
         f"[qc_style_halt] Run ended without export. "
         f"qc_style_status={state.get('qc_style_status')!r}",
         flush=True,
     )
-    return finalize_run_cost(dict(state))
+    cost_update = finalize_run_cost(dict(state))
+    try:
+        from .memory import save_run
+
+        save_run({**dict(state), **cost_update})
+    except Exception as exc:
+        print(f"[memory] save_run failed (non-fatal): {exc}", flush=True)
+    return cost_update
