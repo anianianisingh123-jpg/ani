@@ -18,11 +18,13 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any, Dict, Optional
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from .cost import finalize_run_cost, record_llm_call
 from .state import ResearchState
 from .tools import (
     gather_business_overview_context,
@@ -171,12 +173,30 @@ def _invoke(
     label: str,
     attempt: int,
 ) -> tuple[str, dict[str, Any]]:
+    t0 = time.monotonic()
     response = _llm(
         model, max_tokens=max_tokens, disable_thinking=disable_thinking
     ).invoke(messages)
+    duration_s = time.monotonic() - t0
     text = _message_text(response)
     bits = _usage_bits(response)
+    # Prefer the requested model slug when response metadata is empty/odd.
+    used_model = bits.get("model") or model
+    bits["model"] = used_model
     _log_llm(label, bits, len(text), attempt=attempt)
+    record_llm_call(
+        node=label,
+        model=used_model,
+        input_tokens=int(bits.get("input_tokens") or 0),
+        output_tokens=int(bits.get("output_tokens") or 0),
+        cache_create=int(bits.get("cache_create") or 0),
+        cache_read=int(bits.get("cache_read") or 0),
+        thinking_tokens=int(bits.get("thinking_tokens") or 0),
+        stop_reason=bits.get("stop_reason"),
+        duration_s=duration_s,
+        attempt=attempt,
+        text_chars=len(text),
+    )
     return text, bits
 
 
@@ -1626,19 +1646,19 @@ def qc_style_check_node(state: ResearchState) -> dict:
 
 
 def qc_halt_node(state: ResearchState) -> dict:
-    """Terminal node after QC FAIL — no export side effects."""
+    """Terminal node after QC FAIL — no export; still emit cost accounting."""
     print(
         f"[qc_halt] Run ended without export. qc_status={state.get('qc_status')!r}",
         flush=True,
     )
-    return {}
+    return finalize_run_cost(dict(state))
 
 
 def qc_style_halt_node(state: ResearchState) -> dict:
-    """Terminal node after style substance drift — no export side effects."""
+    """Terminal node after style substance drift — no export; still emit cost."""
     print(
         f"[qc_style_halt] Run ended without export. "
         f"qc_style_status={state.get('qc_style_status')!r}",
         flush=True,
     )
-    return {}
+    return finalize_run_cost(dict(state))

@@ -173,12 +173,14 @@ def export_styled_memo(
 def docx_export_node(state: dict) -> dict:
     """LangGraph node: export styled_memo to .docx and print the path.
 
-    Does not mutate memo fields — export is a side effect for the user.
+    Side effects: write .docx; finalize cost accounting (console + JSONL).
 
     On qc_status == PASS_WITH_FLAGS, appends a visible "## QC Notes" section
     from qc_report so the reader sees the auditor's flags. QC never silently
-    rewrites the memo body.
+    rewrites the memo body. Run cost is always appended (unlike QC notes).
     """
+    from .cost import append_cost_to_memo, finalize_run_cost
+
     memo = state.get("styled_memo") or ""
     ticker = state.get("ticker")
     if not memo.strip():
@@ -186,7 +188,8 @@ def docx_export_node(state: dict) -> dict:
         memo = state.get("final_memo") or ""
     if not memo.strip():
         print("docx export: no styled_memo/final_memo content; skipped.")
-        return {}
+        # Still finalize cost so the run is not silent on empty memo.
+        return finalize_run_cost(dict(state))
 
     qc_status = (state.get("qc_status") or "").upper()
     qc_report = (state.get("qc_report") or "").strip()
@@ -204,6 +207,10 @@ def docx_export_node(state: dict) -> dict:
             flush=True,
         )
 
+    cost_update = finalize_run_cost(dict(state))
+    cost_report = (cost_update.get("cost_report") or state.get("cost_report") or "").strip()
+    memo = append_cost_to_memo(memo, cost_report)
+
     path = export_styled_memo(memo, ticker=ticker)
     print(f"Saved memo: {path}")
     print(
@@ -211,4 +218,5 @@ def docx_export_node(state: dict) -> dict:
         f"qc_style_status={state.get('qc_style_status') or 'n/a'}",
         flush=True,
     )
-    return {}
+    # Return cost fields so state retains the structured report.
+    return cost_update

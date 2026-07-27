@@ -24,6 +24,8 @@ from typing import Any, Optional
 
 from dotenv import load_dotenv
 
+from .cost import record_sec_call, record_tavily_search
+
 # Load both package-local and repo-root .env files (either is fine).
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.dirname(_PKG_DIR)
@@ -88,6 +90,9 @@ def _http_get_json(url: str, *, headers: Optional[dict] = None, timeout: int = 6
         if encoding == "gzip" or raw[:2] == b"\x1f\x8b":
             raw = gzip.GzipFile(fileobj=io.BytesIO(raw)).read()
         body = raw.decode("utf-8")
+    # Count SEC (and any other) EDGAR HTTP hits for rate-limit visibility.
+    if "sec.gov" in (url or "").lower():
+        record_sec_call(1)
     return json.loads(body)
 
 
@@ -127,6 +132,7 @@ def web_search(
             topic=topic,
             include_answer=include_answer,
         )
+        record_tavily_search(1)
     except Exception as exc:
         return {
             "query": query,

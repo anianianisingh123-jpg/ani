@@ -148,3 +148,13 @@ class ResearchState(TypedDict):
 
     # Style-check report: empty when CLEAN; lists substantive drifts otherwise.
     qc_style_report: str
+
+    # ------------------------------------------------------------------
+    # Cost / token accounting (estimate — not billed amount)
+    # ------------------------------------------------------------------
+
+    # Condensed run-cost block appended to every memo unconditionally.
+    cost_report: str
+
+    # Structured per-node figures for cross-run analysis (also JSONL-logged).
+    cost_data: dict

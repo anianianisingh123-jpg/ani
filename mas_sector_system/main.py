@@ -62,6 +62,7 @@ from .agents import (
     style_pass_node,
     synthesis_node,
 )
+from .cost import begin_run, finalize_run_cost
 from .export_docx import docx_export_node
 from .state import ResearchState
 from .tools import multi_search
@@ -92,8 +93,15 @@ def screener_node(state: ResearchState) -> dict:
     """Broad sector sweep producing a ranked candidate list.
 
     Populates: final_memo (the screener report IS the deliverable on this
-    path — no debate stage runs).
+    path — no debate stage runs). Also finalizes cost accounting (screener
+    has no docx export node).
     """
+    begin_run(
+        ticker=state.get("ticker"),
+        sector=state.get("sector") or "",
+        mode=state.get("mode") or "screener",
+        user_query=state.get("user_query") or "",
+    )
     sector = state["sector"]
     query = state["user_query"]
     web = multi_search(
@@ -112,7 +120,12 @@ def screener_node(state: ResearchState) -> dict:
         "Using the live research above, run the screen and produce the ranked shortlist."
     )
     # Screener stays on Sonnet (default) — lower individual stakes than deep-dive.
-    return {"final_memo": _run(SCREENER_SYSTEM_PROMPT, user_prompt)}
+    memo = _run(SCREENER_SYSTEM_PROMPT, user_prompt)
+    cost_update = finalize_run_cost({**dict(state), "final_memo": memo})
+    from .cost import append_cost_to_memo
+
+    memo = append_cost_to_memo(memo, cost_update.get("cost_report") or "")
+    return {"final_memo": memo, **cost_update}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -120,7 +133,13 @@ def screener_node(state: ResearchState) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def deep_dive_start_node(state: ResearchState) -> dict:
-    """No-op entry for deep_dive so the graph can fan out in parallel."""
+    """Entry for deep_dive: start cost tracker, then fan out in parallel."""
+    begin_run(
+        ticker=state.get("ticker"),
+        sector=state.get("sector") or "",
+        mode=state.get("mode") or "deep_dive",
+        user_query=state.get("user_query") or "",
+    )
     return {}
 
 
@@ -284,6 +303,8 @@ def empty_state(
         "qc_status": "",
         "qc_style_status": "",
         "qc_style_report": "",
+        "cost_report": "",
+        "cost_data": {},
     }
 
 

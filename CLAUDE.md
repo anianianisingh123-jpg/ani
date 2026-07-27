@@ -13,6 +13,7 @@ The system operates in two distinct modes managed by a Supervisor Router:
 - Valuation: `fundamental_valuation` (Python DCF + narrative), `relative_valuation` (yfinance peer comps + narrative)
 - Final Output: `final_memo` (raw synthesis, preserved permanently), `styled_memo` (light style pass)
 - QC / Review: `qc_report`, `qc_status` (`PASS` | `PASS_WITH_FLAGS` | `FAIL`), `qc_style_report`, `qc_style_status` (`CLEAN` | `DRIFT_DETECTED`)
+- Cost: `cost_report` (memo appendix), `cost_data` (structured per-node figures; also appended to `outputs/cost_log.jsonl`)
 
 ## 3. Execution Pipeline Topology (`main.py` & `agents.py`)
 - Screener Branch: entry → `screener` → END
@@ -41,6 +42,7 @@ Notes:
   - `qc_style_check` (Sonnet): compares pre-style `final_memo` vs post-style `styled_memo`. **CLEAN** → export. **DRIFT_DETECTED** → hard stop (no docx).
 - Valuation math is **deterministic** (`valuation_engine.py`): multi-stage FCF DCF + yfinance peer multiples. LLM agents narrate those outputs.
 - LLM calls disable extended thinking by default and retry once on empty / truncated text.
+- **Cost accounting** (`cost.py`): every LLM call records tokens, cache, duration, and estimated USD via a configurable `MODEL_PRICING` table. Tavily search count and SEC EDGAR call count are tracked. Console prints a cost-sorted table every run; a condensed "Run Cost" block is appended to every memo (unconditional). Cross-run lines go to `outputs/cost_log.jsonl`. Estimates ≠ billed amounts.
 
 ## 4. Dynamic Sector Prompt Injection
 When an agent node runs, it may use `state["sector"]` for valuation defaults (WACC, peer sets) and narrative focus:
@@ -62,3 +64,9 @@ When an agent node runs, it may use `state["sector"]` for valuation defaults (WA
 - **DCF:** Base FCF from SEC cash-flow tags → high-growth years (capped YoY) → linear fade → Gordon terminal. Sector-default WACC / terminal growth. Equity value = EV − net debt when tags allow. EPV cross-check.
 - **Comps:** Subject + sector peer list via yfinance (`trailingPE`, `forwardPE`, `enterpriseToEbitda`, `priceToSales`, etc.), peer medians, cheap/fair/rich read.
 - Agents must treat engine tables as source of truth for numbers; they may not invent peer multiples or substitute fair values from training memory.
+
+## 7. Cost Accounting (`cost.py`)
+- Configurable `MODEL_PRICING` ($/1M tokens: input, output, cache_write, cache_read) and `TAVILY_PRICE_PER_SEARCH`.
+- Tracker starts at `deep_dive_start` / screener entry; every `_invoke` and Tavily/SEC call records usage.
+- Finalize on docx export or QC halt paths: console table (cost-desc), state fields, JSONL append.
+- Sonnet intro pricing caveat: update the table after 2026-08-31 if list prices move to $3/$15.
