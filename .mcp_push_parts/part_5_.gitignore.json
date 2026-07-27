@@ -1,0 +1,1 @@
+{"owner": "anianianisingh123-jpg", "repo": "ani", "branch": "main", "path": ".gitignore", "message": "Fix placeholder agents.py/tools.py; complete SEC deep-dive rework on main.", "content": ".env\n__pycache__/\n*.pyc\n.venv/\nvenv/\n.DS_Store\n.streamlit/secrets.toml\n*.pdf\nvaluation_history.json\nmas_sector_system/.cache/\n"}

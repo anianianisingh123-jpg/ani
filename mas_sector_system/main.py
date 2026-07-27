@@ -7,11 +7,12 @@ input at the entry point:
     entry ──(mode == 'screener')──> screener ──────────────────────────────> END
 
     entry ──(mode == 'deep_dive')──> deep_dive_start
-              ├─> data_gatherer ──────────┐
-              ├─> business_overview ──────┼─> bull_agent ──────────────────┐
-              └─> macro_regime ───────────┤  bear_agent ──────────────────┤
-                                          ├─> fundamental_valuation ───────┼─> synthesis
-                                          └─> relative_valuation ──────────┘
+              ├─> data_gatherer ──────────────┐
+              ├─> business_overview ──────────┤
+              ├─> macro_regime ───────────────┼─> bull_agent ──────────────────┐
+              └─> management_track_record ─┐  │  bear_agent ──────────────────┤
+                                           └─> capital_allocation ─┘          ├─> fundamental ─┼─> synthesis
+                                                                              └─> relative ────┘
                                                 → style_pass → docx_export → END
 
 Usage (library):
@@ -47,9 +48,11 @@ from .agents import (
     bear_agent_node,
     bull_agent_node,
     business_overview_node,
+    capital_allocation_node,
     data_gatherer_node,
     fundamental_valuation_node,
     macro_regime_node,
+    management_track_record_node,
     relative_valuation_node,
     style_pass_node,
     synthesis_node,
@@ -144,6 +147,8 @@ def build_graph():
     workflow.add_node("data_gatherer", data_gatherer_node)
     workflow.add_node("business_overview", business_overview_node)
     workflow.add_node("macro_regime", macro_regime_node)
+    workflow.add_node("management_track_record", management_track_record_node)
+    workflow.add_node("capital_allocation", capital_allocation_node)
     workflow.add_node("bull_agent", bull_agent_node)
     workflow.add_node("bear_agent", bear_agent_node)
     workflow.add_node("fundamental_valuation", fundamental_valuation_node)
@@ -161,18 +166,23 @@ def build_graph():
         },
     )
 
-    # Parallel foundation: statements + business narrative + macro regime
-    # (all independent; each does its own data retrieval).
+    # Parallel foundation at entry (each independent of the others).
     workflow.add_edge("deep_dive_start", "data_gatherer")
     workflow.add_edge("deep_dive_start", "business_overview")
     workflow.add_edge("deep_dive_start", "macro_regime")
+    workflow.add_edge("deep_dive_start", "management_track_record")
 
-    # Fan-out: all three foundation nodes feed all four analysis branches.
-    # LangGraph joins on multi-parent nodes — each analysis waits for all three.
-    foundation_nodes = (
-        "data_gatherer",
+    # Capital allocation needs statement numbers + management alignment read.
+    workflow.add_edge("data_gatherer", "capital_allocation")
+    workflow.add_edge("management_track_record", "capital_allocation")
+
+    # Analysis waits for independent foundation + capital_allocation join.
+    # capital_allocation already implies data_gatherer + management completed;
+    # management_assessment is therefore present in state before analysis runs.
+    analysis_parents = (
         "business_overview",
         "macro_regime",
+        "capital_allocation",
     )
     analysis_nodes = (
         "bull_agent",
@@ -181,8 +191,8 @@ def build_graph():
         "relative_valuation",
     )
     for node in analysis_nodes:
-        for foundation in foundation_nodes:
-            workflow.add_edge(foundation, node)
+        for parent in analysis_parents:
+            workflow.add_edge(parent, node)
         # Fan-in: synthesis waits for all four analysis branches.
         workflow.add_edge(node, "synthesis")
 
@@ -221,6 +231,8 @@ def empty_state(
         "sec_filing_summary": "",
         "macro_context": "",
         "macro_regime_assessment": "",
+        "management_assessment": "",
+        "capital_allocation_assessment": "",
         "bull_thesis": "",
         "bear_thesis": "",
         "fundamental_valuation": "",

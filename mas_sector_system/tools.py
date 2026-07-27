@@ -823,3 +823,38 @@ def gather_macro_regime_context(
         "queries_run": queries,
         "gathered_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
+
+
+def gather_management_track_record_context(
+    *,
+    ticker: Optional[str],
+    sector: str,
+    user_query: str,
+) -> dict[str, Any]:
+    """Tavily research for executive track record, insiders, pay, governance.
+
+    Independent of data_gatherer — people/leadership facts only (not capital
+    allocation math, which uses statement numbers downstream).
+    """
+    if ticker:
+        t = ticker.strip().upper()
+        queries = [
+            f"{t} CEO CFO executives leadership team tenure background biography",
+            f"{t} management track record strategic decisions pivots performance",
+            f"{t} insider buying selling Form 4 executive compensation equity",
+            f"{t} board governance succession activist investor controversies",
+            f"{t} {sector} leadership quality governance {user_query}",
+        ]
+    else:
+        queries = [
+            f"{sector} company leadership executives track records",
+            f"{sector} CEO compensation governance insider activity",
+            f"{sector} {user_query} management quality succession",
+        ]
+    queries = queries[:5]
+    web_research = multi_search(queries, max_results=5, topic="finance")
+    return {
+        "web_research": web_research,
+        "queries_run": queries,
+        "gathered_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }

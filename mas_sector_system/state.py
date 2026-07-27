@@ -85,6 +85,18 @@ class ResearchState(TypedDict):
     # Independent Tavily research — not derived from data_gatherer.
     macro_regime_assessment: str
 
+    # Leadership / track-record assessment from management_track_record_node:
+    # who the executives are, tenure and prior roles, decisions at this
+    # company, insider activity, compensation alignment, governance/
+    # succession, and red flags. People and leadership only — not cash
+    # deployment (that is capital_allocation_assessment).
+    management_assessment: str
+
+    # Capital allocation quality from capital_allocation_node: reinvestment,
+    # M&A, dividends, buybacks, and debt management scored against the
+    # statement numbers, with an alignment cross-check vs management_assessment.
+    capital_allocation_assessment: str
+
     # ------------------------------------------------------------------
     # Adversarial debate fields (populated by the debate agents)
     # ------------------------------------------------------------------

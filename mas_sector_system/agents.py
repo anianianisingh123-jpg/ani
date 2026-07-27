@@ -6,9 +6,11 @@ produced). LangGraph merges these updates into the state as the graph runs.
 
 Deep-dive fan-out (wired in main.py):
 
-    entry ──┬─> data_gatherer ──────────┐
-            ├─> business_overview ──────┼─> bull / bear / fundamental / relative ─> synthesis
-            └─> macro_regime ───────────┘
+    entry ──┬─> data_gatherer ──────────────┐
+            ├─> business_overview ──────────┤
+            ├─> macro_regime ───────────────┼─> bull / bear / fundamental / relative ─> synthesis
+            └─> management_track_record ─┐  │
+                                         └─> capital_allocation ─┘
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from .tools import (
     gather_business_overview_context,
     gather_live_research_context,
     gather_macro_regime_context,
+    gather_management_track_record_context,
     multi_search,
 )
 from .valuation_engine import (
@@ -328,6 +331,14 @@ def _shared_research_payload(state: ResearchState) -> str:
                 "MACRO REGIME ASSESSMENT",
                 state.get("macro_regime_assessment") or "Not provided.",
             ),
+            _json_block(
+                "MANAGEMENT ASSESSMENT",
+                state.get("management_assessment") or "Not provided.",
+            ),
+            _json_block(
+                "CAPITAL ALLOCATION ASSESSMENT",
+                state.get("capital_allocation_assessment") or "Not provided.",
+            ),
         ]
     )
 
@@ -487,6 +498,94 @@ def macro_regime_node(state: ResearchState) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 0c. Management Track Record — people/leadership; parallel at entry
+# ─────────────────────────────────────────────────────────────────────────────
+
+MANAGEMENT_TRACK_RECORD_SYSTEM_PROMPT = """\
+You are the management and leadership analyst. Your job is to research and assess the
+company's key executives — who they are, their track record, and how they have actually run
+this business — using only what you can find in retrieved sources. This is a factual and
+track-record assessment, not a capital allocation analysis (that is a separate agent's job) —
+stay focused on people and leadership decisions, not cash deployment.
+
+Cover, grounded only in what you retrieve:
+
+1. WHO THEY ARE: CEO and other key executives (CFO, and any other named leader relevant to the
+   thesis). Tenure at this company. Prior roles and companies, and what happened at those
+   companies under their leadership if it's findable and relevant.
+
+2. TRACK RECORD AT THIS COMPANY: What has changed under current leadership — strategic pivots,
+   major decisions (successful or not), how the company has navigated prior hard periods
+   (downturns, competitive threats, crises) if evidence exists. Be specific and dated where
+   possible, not just characterological ("has navigated X well").
+
+3. INSIDER ACTIVITY: Insider buying or selling patterns if disclosed/findable — meaningful
+   insider buying is a stronger signal than routine, scheduled selling (e.g. 10b5-1 plans);
+   note which type you're seeing if you can tell the difference from available data.
+
+4. COMPENSATION AND ALIGNMENT: How executives are compensated — if the structure is disclosed
+   or reported (equity-heavy vs. cash-heavy, performance-linked vs. not) — and whether that
+   structure appears to align incentives with shareholders or with something else (revenue
+   growth regardless of profitability, short-term stock price, etc.).
+
+5. GOVERNANCE AND SUCCESSION: Board composition/independence if findable, any recent leadership
+   turnover, and succession risk — is this a single-founder-dependent story or a deep bench.
+
+6. RED FLAGS: Any disclosed governance controversies, activist investor involvement, restated
+   earnings, executive departures under unclear circumstances, or other findable concerns.
+   If none are found, say so explicitly rather than leaving this section vague.
+
+DISCIPLINE:
+- Distinguish clearly between disclosed fact (cite it) and your own read/inference (label it
+  as such).
+- If you cannot find reliable information on a section above, say so explicitly — do not pad
+  with generic characterizations ("strong leadership team") unsupported by anything retrieved.
+- Do not let a well-known name or reputation substitute for actual evidence in the retrieved
+  data. A famous founder is not automatically a well-governed company.
+
+OUTPUT: organized under the six headers above, prose under each, concluding with a one-line
+summary verdict on overall leadership quality/risk and your confidence level (high / moderate/
+low) based on how much of the above was actually findable versus inferred.
+"""
+
+
+def management_track_record_node(state: ResearchState) -> dict:
+    """Assess key executives' track record and leadership quality.
+
+    Populates: management_assessment.
+    Independent Tavily research — runs in parallel with data_gatherer,
+    business_overview, and macro_regime from the deep-dive entry point.
+    Does not analyze capital allocation (separate node).
+    """
+    ctx = gather_management_track_record_context(
+        ticker=state.get("ticker"),
+        sector=state["sector"],
+        user_query=state["user_query"],
+    )
+    user_prompt = (
+        f"Ticker: {state.get('ticker') or 'N/A'}\n"
+        f"Sector: {state['sector']}\n"
+        f"User request: {state['user_query']}\n"
+        f"Research gathered at (UTC): {ctx['gathered_at_utc']}\n"
+        f"Search queries run: {json.dumps(ctx['queries_run'])}\n\n"
+        f"=== LIVE WEB RESEARCH (Tavily — Management / leadership) ===\n"
+        f"{ctx['web_research']}\n\n"
+        "Using ONLY the research above, write the management track-record "
+        "assessment under the six required headers. If a section has no "
+        "reliable data, say so — do not invent biographies or insider stats. "
+        "Do not analyze capital allocation (buybacks, dividends, M&A spend)."
+    )
+    return {
+        "management_assessment": _run(
+            MANAGEMENT_TRACK_RECORD_SYSTEM_PROMPT,
+            user_prompt,
+            model=SONNET_MODEL,
+            label="management_track_record",
+        )
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 1. Data Gatherer — SEC statements + narrative; Opus tier
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -613,14 +712,103 @@ def data_gatherer_node(state: ResearchState) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 1b. Capital Allocation — numbers-driven; after gatherer + management
+# ─────────────────────────────────────────────────────────────────────────────
+
+CAPITAL_ALLOCATION_SYSTEM_PROMPT = """\
+You are the capital allocation analyst. Your job is to assess, unbiasedly and using only the
+numbers provided, how well this management team has actually deployed the company's cash over
+the periods available in the data. This is a numbers-driven track record assessment — not a
+narrative about strategy, and not a restatement of the management agent's qualitative read.
+
+FRAMEWORK — there are five uses of cash. Assess the company's historical mix and quality
+across each, using only the figures in the statements provided:
+
+1. REINVESTMENT IN THE CORE BUSINESS: Capex and R&D relative to revenue and relative to prior
+   periods. Where computable from the data, note return on incremental invested capital
+   (change in operating income relative to cumulative capex/R&D over the same window) as a
+   rough quality check — flag this as an approximation, not a precise ROIC calculation, since
+   the inputs available are limited.
+
+2. M&A: Any acquisitions visible in the cash flow statement or referenced in the filing
+   summary. Assess size relative to the balance sheet, and where evidence exists (goodwill
+   trends, disclosed integration outcomes), whether it looks value-accretive or value-
+   destructive. If no evidence exists either way, say so — do not guess at M&A quality with no
+   supporting data.
+
+3. DIVIDENDS: Dividend history if present — growth rate, payout ratio relative to free cash
+   flow, and sustainability given the cash flow trend. If no dividend, state that plainly
+   rather than treating its absence as a gap.
+
+4. BUYBACKS: Share repurchase activity from the cash flow statement, checked against the
+   diluted share count trend — a real test of buyback quality is whether repurchases actually
+   reduced share count, or merely offset stock-based compensation dilution (a common gap
+   between "dollars spent on buybacks" and "actual per-share benefit"). Also assess, where
+   price data is available, whether repurchases appear to have been made at reasonable
+   valuations relative to the stock's own historical range, or whether the company was buying
+   aggressively at cycle highs.
+
+5. DEBT MANAGEMENT: Debt issuance and repayment from the cash flow and balance sheet data —
+   is leverage trending up or down, and does the pace of any debt paydown or new issuance
+   look disciplined relative to cash generation.
+
+SCORING: for each of the five categories, state a brief verdict — disciplined / neutral /
+concerning — grounded in the specific numbers that justify it. Do not give a category a
+verdict if the data provided doesn't actually support one; say the data is insufficient
+instead of guessing.
+
+ALIGNMENT CHECK: cross-reference against the management_assessment's compensation-alignment
+read where relevant — e.g. if buybacks are heavy but insider selling is also heavy, or if
+compensation is tied to metrics that don't match where capital is actually being deployed,
+flag the inconsistency explicitly.
+
+OUTPUT: one short section per category above with its verdict, followed by an overall summary
+verdict on capital allocation quality and a confidence level (high / moderate / low) based on
+how complete the underlying data was. Ground every claim in the specific figures provided —
+never estimate a number that isn't in the statements or explicitly labeled as an approximation
+per the ROIC note above.
+"""
+
+
+def capital_allocation_node(state: ResearchState) -> dict:
+    """Score capital deployment from statements + management alignment.
+
+    Populates: capital_allocation_assessment.
+    Depends on data_gatherer (statements + filing summary) and
+    management_track_record (alignment context). Does not re-search the web.
+    """
+    user_prompt = (
+        f"Ticker: {state.get('ticker') or 'N/A'}\n"
+        f"Sector: {state['sector']}\n"
+        f"User request: {state['user_query']}\n\n"
+        f"{_json_block('INCOME STATEMENT', state.get('income_statement') or {})}\n\n"
+        f"{_json_block('BALANCE SHEET', state.get('balance_sheet') or {})}\n\n"
+        f"{_json_block('CASH FLOW STATEMENT', state.get('cash_flow_statement') or {})}\n\n"
+        f"{_json_block('SEC FILING SUMMARY', state.get('sec_filing_summary') or 'Not provided.')}\n\n"
+        f"{_json_block('MANAGEMENT ASSESSMENT', state.get('management_assessment') or 'Not provided.')}\n\n"
+        "Using ONLY the data above, apply the five-use-of-cash framework and "
+        "produce the capital allocation assessment. Cite specific statement "
+        "line items and periods. If data is insufficient for a category, say so."
+    )
+    return {
+        "capital_allocation_assessment": _run(
+            CAPITAL_ALLOCATION_SYSTEM_PROMPT,
+            user_prompt,
+            model=SONNET_MODEL,
+            label="capital_allocation",
+        )
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 2. Bull Agent
 # ─────────────────────────────────────────────────────────────────────────────
 
 BULL_SYSTEM_PROMPT = """\
 You are the bull analyst on an investment research team. Using only the LIVE
 data provided (business overview + SEC financial statements + filing summary
-+ macro context + macro regime assessment), write the strongest good-faith
-case FOR the investment.
++ macro context + macro regime assessment + management assessment + capital
+allocation assessment), write the strongest good-faith case FOR the investment.
 
 Focus on:
 - Upside the market may be underpricing: optionality, product cycles, pricing
@@ -629,6 +817,8 @@ Focus on:
 - Where the macro regime assessment is TAILWIND or sector-cycle supportive,
   weave that in with evidence; if it is HEADWIND or NEUTRAL, do not invent
   macro support — lean on company-specific fundamentals instead.
+- Leadership and capital-allocation strengths only when evidenced in the
+  management / capital-allocation assessments (do not invent "great management").
 - Margin expansion or operating leverage visible in the income statement
   (cite specific line items and periods, e.g. "operating margin expanded from
   X% to Y% on OperatingIncomeLoss / Revenues").
@@ -663,7 +853,8 @@ BEAR_SYSTEM_PROMPT = """\
 You are the red team: the bear analyst whose job is to find every reason this
 investment could fail. Using only the LIVE data provided (business overview +
 SEC financial statements + filing summary + macro context + macro regime
-assessment), write the strongest good-faith case AGAINST the investment.
+assessment + management assessment + capital allocation assessment), write the
+strongest good-faith case AGAINST the investment.
 
 Hunt specifically for:
 - Accounting red flags visible in the statements: revenue recognition stress,
@@ -674,6 +865,9 @@ Hunt specifically for:
 - Macro / cycle headwinds from the regime assessment (debt-cycle position,
   reflexive loops turning negative, late-sector-cycle risk) when evidenced —
   do not invent macro doom if the assessment is TAILWIND or NEUTRAL.
+- Leadership, governance, insider, or succession red flags from the management
+  assessment when evidenced; capital-allocation concerns (value-destructive M&A,
+  dilutive buybacks, leverage drift) from the capital allocation assessment.
 - Business-model risks from the overview: customer concentration, secular
   decline, competitive erosion, geography concentration.
 - Cash-flow deterioration (operating CF, FCF, buybacks funded by debt).
@@ -845,10 +1039,12 @@ You are the senior portfolio strategist and lead writer. You have received:
   (1) a descriptive business overview,
   (2) a macro/regime assessment (debt cycle, reflexivity, sector cycle,
       TAILWIND / HEADWIND / NEUTRAL verdict),
-  (3) a bull thesis,
-  (4) a bear thesis,
-  (5) a fundamental (intrinsic) valuation, and
-  (6) a relative (comps) valuation.
+  (3) a management track-record assessment (people, governance, insiders),
+  (4) a capital allocation assessment (five uses of cash + alignment),
+  (5) a bull thesis,
+  (6) a bear thesis,
+  (7) a fundamental (intrinsic) valuation, and
+  (8) a relative (comps) valuation.
 
 Your job is a single decision-ready investment memo.
 
@@ -861,14 +1057,17 @@ Structure (in this order):
 3. MACRO / CYCLE POSITIONING — briefly state how the regime assessment (and
    its confidence) informs the stance; do not invent rates or fiscal data
    beyond what upstream agents provided.
-4. KEY DEBATE POINTS — weigh bull vs bear against the valuation picture, not
+4. MANAGEMENT & CAPITAL ALLOCATION — weigh leadership quality and capital-
+   deployment discipline as independent inputs; a leadership/capital concern
+   the bear surfaces should be weighed like any financial red flag.
+5. KEY DEBATE POINTS — weigh bull vs bear against the valuation picture, not
    just against each other. Where does the bear case land a blow? Where does
    the bull case survive contact?
-5. VALUATION RECONCILIATION — explicitly reconcile disagreement between
+6. VALUATION RECONCILIATION — explicitly reconcile disagreement between
    fundamental and relative calls (e.g. "DCF says overvalued, but cheap vs
    peers — which matters more here and why").
-6. RISKS AND MONITORING TRIGGERS — what to watch next (include the regime
-   assessment's key flip-factor when present).
+7. RISKS AND MONITORING TRIGGERS — what to watch next (include the regime
+   assessment's key flip-factor and any management/capital flip-factors when present).
 
 Rules:
 - Build the stance strictly from the data assembled upstream. No outside
@@ -883,6 +1082,8 @@ def _field_status(state: ResearchState) -> dict[str, int]:
     keys = (
         "business_overview",
         "macro_regime_assessment",
+        "management_assessment",
+        "capital_allocation_assessment",
         "bull_thesis",
         "bear_thesis",
         "fundamental_valuation",
@@ -892,7 +1093,7 @@ def _field_status(state: ResearchState) -> dict[str, int]:
 
 
 def synthesis_node(state: ResearchState) -> dict:
-    """Synthesize overview + regime + debate + valuations into the final memo.
+    """Synthesize overview + regime + management + capital + debate + valuations.
 
     Writes only final_memo (raw judgment). Style is a separate downstream node.
 
@@ -917,14 +1118,18 @@ def synthesis_node(state: ResearchState) -> dict:
         f"=== BUSINESS OVERVIEW ===\n{state.get('business_overview') or 'None provided.'}\n\n"
         f"=== MACRO REGIME ASSESSMENT ===\n"
         f"{state.get('macro_regime_assessment') or 'None provided.'}\n\n"
+        f"=== MANAGEMENT ASSESSMENT ===\n"
+        f"{state.get('management_assessment') or 'None provided.'}\n\n"
+        f"=== CAPITAL ALLOCATION ASSESSMENT ===\n"
+        f"{state.get('capital_allocation_assessment') or 'None provided.'}\n\n"
         f"=== BULL THESIS ===\n{state.get('bull_thesis') or 'None provided.'}\n\n"
         f"=== BEAR THESIS ===\n{state.get('bear_thesis') or 'None provided.'}\n\n"
         f"=== FUNDAMENTAL VALUATION ===\n{state.get('fundamental_valuation') or 'None provided.'}\n\n"
         f"=== RELATIVE VALUATION ===\n{state.get('relative_valuation') or 'None provided.'}\n\n"
         "Write the final investment memo in the required structure. "
         "If a section above says None provided or is clearly incomplete, say so "
-        "explicitly — do not invent DCF, peer multiples, or rate/fiscal figures "
-        "to fill the gap."
+        "explicitly — do not invent DCF, peer multiples, rate/fiscal figures, "
+        "or management biography to fill the gap."
     )
     return {
         "final_memo": _run(

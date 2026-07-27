@@ -8,7 +8,7 @@ The system operates in two distinct modes managed by a Supervisor Router:
 ## 2. State Schema (`state.py`)
 `ResearchState` holds end-to-end memory for a run:
 - Base Inputs: `mode` ("screener" | "deep_dive"), `ticker`, `sector`, `user_query`
-- Foundation: `business_overview`, `income_statement`, `balance_sheet`, `cash_flow_statement`, `sec_filing_summary`, `macro_context`, `macro_regime_assessment`
+- Foundation: `business_overview`, `income_statement`, `balance_sheet`, `cash_flow_statement`, `sec_filing_summary`, `macro_context`, `macro_regime_assessment`, `management_assessment`, `capital_allocation_assessment`
 - Adversarial Debate: `bull_thesis`, `bear_thesis`
 - Valuation: `fundamental_valuation` (Python DCF + narrative), `relative_valuation` (yfinance peer comps + narrative)
 - Final Output: `final_memo` (raw synthesis), `styled_memo` (light style pass)
@@ -19,17 +19,20 @@ The system operates in two distinct modes managed by a Supervisor Router:
 
 ```
 entry → deep_dive_start
-          ├─> data_gatherer ──────────┐
-          ├─> business_overview ──────┼─> bull_agent ──────────────┐
-          └─> macro_regime ───────────┤  bear_agent ──────────────┤
-                                      ├─> fundamental_valuation ───┼─> synthesis → style_pass → docx_export → END
-                                      └─> relative_valuation ──────┘
+          ├─> data_gatherer ──────────────┐
+          ├─> business_overview ──────────┤
+          ├─> macro_regime ───────────────┼─> bull_agent ──────────────┐
+          └─> management_track_record ─┐  │  bear_agent ──────────────┤
+                                       └─> capital_allocation ─┘      ├─> fundamental ─┼─> synthesis → style_pass → docx → END
+                                                                      └─> relative ────┘
 ```
 
 Notes:
 - There is **no** `red_team_node` (dropped by design; do not restore).
 - `macro_regime` runs its **own** Tavily search (independent of `data_gatherer`) and writes `macro_regime_assessment` using a three-lens framework: debt-cycle positioning → reflexivity → sector-specific cycle, closing with TAILWIND / HEADWIND / NEUTRAL + confidence.
-- `macro_context` remains a short digest from `data_gatherer`; `macro_regime_assessment` is the structured cycle read. Downstream agents and synthesis consume both.
+- `management_track_record` runs its **own** Tavily search in parallel at entry and writes `management_assessment` (people/leadership only — not cash deployment).
+- `capital_allocation` waits for `data_gatherer` + `management_track_record`, scores five uses of cash from statement numbers, and writes `capital_allocation_assessment` (with alignment cross-check vs management).
+- `macro_context` remains a short digest from `data_gatherer`; structured reads live in the dedicated assessment fields. Downstream agents and synthesis consume them.
 - Valuation math is **deterministic** (`valuation_engine.py`): multi-stage FCF DCF + yfinance peer multiples. LLM agents narrate those outputs.
 - LLM calls disable extended thinking by default and retry once on empty / truncated text.
 
@@ -43,7 +46,7 @@ When an agent node runs, it may use `state["sector"]` for valuation defaults (WA
 | Role | Nodes | Model |
 |------|--------|--------|
 | Heavy foundation | `data_gatherer` | Claude Opus (`claude-opus-5`) |
-| Analytical writers | `business_overview`, `macro_regime`, `bull`, `bear`, `fundamental`, `relative`, `screener`, `style_pass` | Claude Sonnet (`claude-sonnet-5`) |
+| Analytical writers | `business_overview`, `macro_regime`, `management_track_record`, `capital_allocation`, `bull`, `bear`, `fundamental`, `relative`, `screener`, `style_pass` | Claude Sonnet (`claude-sonnet-5`) |
 | Senior writer | `synthesis` | Claude Opus (`claude-opus-5`) |
 | Router | entry / `route_by_mode` | Deterministic code — no LLM |
 
