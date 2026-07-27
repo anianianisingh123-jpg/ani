@@ -1420,6 +1420,15 @@ def _build_synthesis_user_prompt(
         f"Query type: {qt} | Synthesis mode: {mode}\n\n"
         f"{format_metrics_for_prompt(state.get('canonical_metrics'))}\n\n"
         f"{format_validation_for_prompt(state.get('validation_report'))}\n\n"
+        "NUMBER HIERARCHY (mandatory):\n"
+        "1) Company financials, growth rates, margins, net cash, buybacks, share counts, "
+        "trailing P/E, market cap → quote CANONICAL METRICS headlines only.\n"
+        "2) DCF / residual-income fair value → quote the valuation engine block only; "
+        "do not call engine EV the same thing as market enterprise value without labeling.\n"
+        "3) Peer multiples → comps table only; if comps PE disagrees with canonical trailing "
+        "P/E, say so and prefer canonical for the subject company.\n"
+        "4) Never say 'currently' for an annual YoY headline; keep the basis period.\n"
+        "5) If validation WARNINGs list stale metrics, do not use those lines for the thesis.\n\n"
         f"=== BUSINESS OVERVIEW ===\n{state.get('business_overview') or 'None provided.'}\n\n"
         f"=== MACRO REGIME ASSESSMENT ===\n"
         f"{state.get('macro_regime_assessment') or 'None provided.'}\n\n"
@@ -1615,25 +1624,31 @@ change the view, and are those triggers specific and monitorable rather than vag
 sizing or conviction language consistent with the actual strength and completeness of the
 analysis? If the analysis has material gaps, does the conviction level reflect that?
 
-SEVERITY — assign to every finding:
-- CRITICAL: fabricated or unsourced figure; arithmetic/unit error; undisclosed missing upstream
-  input; recommendation contradicting its own evidence. Any CRITICAL finding = FAIL.
-- MAJOR: internal contradiction; unsourced substantive claim; materially miscalibrated
-  confidence. Multiple MAJOR findings = FAIL; one or two = PASS_WITH_FLAGS.
-- MINOR: imprecise wording, weak sourcing on a non-load-bearing claim, formatting inconsistency.
+SEVERITY — assign to every finding carefully (do not inflate):
+- CRITICAL: a load-bearing number that contradicts a CANONICAL METRICS headline or engine
+  table; fabricated figure with no upstream source; clear arithmetic error on a claim a
+  reader would act on; recommendation that reverses the evidence without explanation.
+  **Only real CRITICAL findings force STATUS: FAIL.** Do not label presentation issues CRITICAL.
+- MAJOR: basis-period wording slips; internal tension that is disclosed elsewhere; de-hedging;
+  missing a non-core disclosure. Prefer STATUS: PASS_WITH_FLAGS when numbers match canonical
+  and the recommendation is coherent — attach MAJORs as notes rather than FAIL.
+- MINOR: imprecise wording, weak sourcing on a non-load-bearing claim, formatting.
   MINOR findings alone = PASS_WITH_FLAGS.
+
+STATUS RULES (strict):
+- FAIL only if there is at least one standing CRITICAL after you finish (not withdrawn).
+- PASS_WITH_FLAGS for MAJOR/MINOR only when the memo is usable (numbers grounded, gaps disclosed).
+- PASS when clean.
+- Do not invent CRITICAL findings to appear thorough. If a draft CRITICAL is wrong, delete it —
+  do not leave "Withdrawn CRITICAL" noise in the report.
+- Prefer fewer precise findings over a long list of nitpicks.
 
 OUTPUT FORMAT:
 Line 1: STATUS: PASS | PASS_WITH_FLAGS | FAIL
-Then, for each finding: severity, category number, the exact quoted text from the memo, the
-specific problem, and the upstream source that contradicts it or the absence of any source.
+Then, for each *standing* finding only: severity, category number, the exact quoted text,
+the specific problem, and the upstream source. No withdrawn items.
 Then: a coverage note stating which upstream fields were populated and which were empty.
 Then: one paragraph of overall assessment.
-
-If you find no issues, say so plainly and state STATUS: PASS. Do not manufacture findings to
-appear thorough. But do not pass a memo you have real doubts about — the cost of a false flag
-is a few minutes of the reader's time; the cost of a missed error is a bad capital allocation
-decision.
 """
 
 QC_STYLE_SYSTEM_PROMPT = """\

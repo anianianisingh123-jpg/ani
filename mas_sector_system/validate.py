@@ -160,30 +160,46 @@ def validate_inputs(state: dict[str, Any]) -> dict[str, Any]:
             detail=f"labeled periods: {list(period_labels.keys())}",
         )
 
-    # Stale tags on load-bearing lines
+    # Stale tags: common on SEC XBRL (interest, STI, debt). Flag them so agents
+    # avoid load-bearing use, but do NOT hard-stop the pipeline for count alone.
+    # FAIL only if a *core* metric (price/mcap/revenue/gross margin) is stale.
+    _CORE_STALE_PREFIXES = (
+        "price",
+        "market_cap",
+        "revenue__current_annual",
+        "gross_margin__current_annual",
+    )
     stale_count = 0
     stale_ids: list[str] = []
+    core_stale: list[str] = []
     for m in (cm.get("metrics") or []) if isinstance(cm, dict) else []:
         if not isinstance(m, dict):
             continue
         st = m.get("staleness") or []
         if st and m.get("applicable"):
+            mid = str(m.get("id") or "")
             stale_count += 1
-            if len(stale_ids) < 8:
-                stale_ids.append(str(m.get("id")))
+            if len(stale_ids) < 12:
+                stale_ids.append(mid)
+            if any(mid == p or mid.startswith(p) for p in _CORE_STALE_PREFIXES):
+                core_stale.append(mid)
     if stale_count == 0:
         _check(checks, name="stale_tags", status="PASS", detail="no stale flags")
-    elif stale_count <= 6:
-        msg = f"{stale_count} metrics with stale source tags (e.g. {', '.join(stale_ids[:4])})"
-        _check(checks, name="stale_tags", status="WARN", detail=msg)
-        warnings.append(msg)
-    else:
+    elif core_stale:
         msg = (
-            f"{stale_count} metrics carry stale XBRL tags — above threshold; "
-            f"examples: {', '.join(stale_ids[:5])}"
+            f"CORE metrics carry stale XBRL tags (cannot underwrite run): "
+            f"{', '.join(core_stale[:6])}"
         )
         _check(checks, name="stale_tags", status="FAIL", detail=msg)
         failures.append(msg)
+    else:
+        msg = (
+            f"{stale_count} non-core metrics carry stale XBRL tags "
+            f"(e.g. {', '.join(stale_ids[:5])}) — proceed with WARN; agents must "
+            f"not use stale lines for load-bearing claims"
+        )
+        _check(checks, name="stale_tags", status="WARN", detail=msg)
+        warnings.append(msg)
 
     # ── Market data ──────────────────────────────────────────────────────
     price_m = get_metric(cm, "price") if cm else None
