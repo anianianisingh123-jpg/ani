@@ -214,8 +214,7 @@ def docx_export_node(state: dict) -> dict:
     path = export_styled_memo(memo, ticker=ticker)
     print(f"Saved memo: {path}")
     print(
-        f"docx export: qc_status={qc_status or 'n/a'} "
-        f"qc_style_status={state.get('qc_style_status') or 'n/a'}",
+        f"docx export: qc_status={qc_status or 'n/a'}",
         flush=True,
     )
     # Return cost fields so state retains the structured report.

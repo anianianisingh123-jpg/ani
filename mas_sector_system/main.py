@@ -7,15 +7,19 @@ input at the entry point:
     entry ──(mode == 'screener')──> screener ──────────────────────────────> END
 
     entry ──(mode == 'deep_dive')──> deep_dive_start
-              ├─> data_gatherer → metrics_compute ──┐
-              ├─> business_overview ────────────────┤
-              ├─> macro_regime ─────────────────────┼─> analysis_ready (defer)
-              └─> management_track_record ──────┐   │
-                                                └─> capital_allocation ─┘
-                → bull → bear / fundamental / relative
-                → synthesis_ready (defer) → synthesis → qc → style → qc_style → docx
-                              │ FAIL                          │ DRIFT
-                              └─> qc_halt → END               └─> qc_style_halt → END
+              ├─> data_gatherer → metrics → validation ──┐
+              ├─> business_overview ─────────────────────┤
+              ├─> macro_regime ──────────────────────────┼─> capital_ready (defer)
+              └─> management_track_record ───────────────┘
+                    → capital_allocation → bull
+                         → bear / fundamental / relative  (parallel)
+                         → synthesis_ready (defer) → synthesis → qc → style → docx
+                                      │ FAIL
+                                      └─> qc_halt → END
+
+Single-parent analysis path (capital → bull only) prevents LangGraph
+multi-parent fan-in from re-running bull/bear/valuation/synthesis twice.
+Style QC was removed: style_pass writes styled_memo and exports directly.
 
 Usage (library):
     from mas_sector_system.main import app, run_deep_dive, run_screener
@@ -58,8 +62,6 @@ from .agents import (
     metrics_compute_node,
     qc_halt_node,
     qc_node,
-    qc_style_check_node,
-    qc_style_halt_node,
     relative_valuation_node,
     style_pass_node,
     synthesis_node,
@@ -179,13 +181,6 @@ def route_after_qc(state: ResearchState) -> str:
     return "style_pass"
 
 
-def route_after_qc_style(state: ResearchState) -> str:
-    """After style QC: substance drift hard-stops; CLEAN proceeds to export."""
-    if (state.get("qc_style_status") or "").upper() == "DRIFT_DETECTED":
-        return "qc_style_halt"
-    return "docx_export"
-
-
 def route_after_validation(state: ResearchState) -> str:
     """Pre-narration gate: FAIL hard-stops before capital/analysis spend."""
     status = (state.get("validation_status") or "").upper()
@@ -206,15 +201,19 @@ def _passthrough_barrier(state: ResearchState) -> dict:
 def build_graph():
     """Assemble and compile the research graph.
 
-    IMPORTANT — multi-parent fan-in + LangGraph Pregel:
-    A node with N parents that finish in *different* supersteps re-runs once
-    per wave (e.g. bull/bear/fund/relative used to fire when overview+macro
-    completed, then again when capital_allocation completed — 2× cost).
+    Double-execution fix (LangGraph multi-parent fan-in):
+    Analysis used to re-fire when overview/macro completed in one wave and
+    capital_allocation in a later wave. We now:
+      1. Fold overview + macro into the *same* deferred capital_ready join as
+         validation + management (all foundation work joins once).
+      2. Give bull a *single* parent (capital_allocation) — no multi-parent
+         analysis_ready barrier on the critical path.
+      3. Join synthesis only from the three parallel analysis children
+         (bear / fundamental / relative), not also from bull directly.
+      4. Agents also skip if their output field is already populated
+         (idempotency belt-and-suspenders).
 
-    Fix: explicit single-parent barriers with ``defer=True``. The barrier
-    waits until all non-deferred upstream work is done, then runs once and
-    fans out. Analysis agents each have exactly one parent (analysis_ready);
-    synthesis has exactly one parent (synthesis_ready).
+    Style QC layer removed: style_pass → docx_export directly.
     """
     workflow = StateGraph(ResearchState)
 
@@ -229,22 +228,19 @@ def build_graph():
     workflow.add_node("business_overview", business_overview_node)
     workflow.add_node("macro_regime", macro_regime_node)
     workflow.add_node("management_track_record", management_track_record_node)
-    # Deferred join: validation OK + management must both complete before capital.
+    # Deferred join: ALL foundation work must finish before capital/analysis.
     workflow.add_node("capital_ready", _passthrough_barrier, defer=True)
     workflow.add_node("capital_allocation", capital_allocation_node)
-    # Deferred join barriers (see docstring) — prevent double execution.
-    workflow.add_node("analysis_ready", _passthrough_barrier, defer=True)
     workflow.add_node("bull_agent", bull_agent_node)
     workflow.add_node("bear_agent", bear_agent_node)
     workflow.add_node("fundamental_valuation", fundamental_valuation_node)
     workflow.add_node("relative_valuation", relative_valuation_node)
+    # Deferred join of the three parallel analysis children only.
     workflow.add_node("synthesis_ready", _passthrough_barrier, defer=True)
     workflow.add_node("synthesis", synthesis_node)
     workflow.add_node("qc", qc_node)
     workflow.add_node("qc_halt", qc_halt_node)
     workflow.add_node("style_pass", style_pass_node)
-    workflow.add_node("qc_style_check", qc_style_check_node)
-    workflow.add_node("qc_style_halt", qc_style_halt_node)
     workflow.add_node("docx_export", docx_export_node)
 
     # Conditional entry: screener path vs deep-dive fan-out start.
@@ -276,25 +272,20 @@ def build_graph():
     )
     workflow.add_edge("validation_halt", END)
 
-    # Capital only after validation PASS/WARN *and* management, via a single
-    # deferred join. Do NOT wire management → capital directly (that raced
-    # past validation FAIL on NVDA).
+    # Capital only after validation PASS/WARN *and* the three parallel foundation
+    # writers, via one deferred join. Single downstream edge into analysis.
     workflow.add_edge("post_validation", "capital_ready")
     workflow.add_edge("management_track_record", "capital_ready")
+    workflow.add_edge("business_overview", "capital_ready")
+    workflow.add_edge("macro_regime", "capital_ready")
     workflow.add_edge("capital_ready", "capital_allocation")
 
-    # Join foundation into a single deferred barrier, then fan out analysis.
-    # capital_allocation already implies metrics_compute + validation + management.
-    workflow.add_edge("business_overview", "analysis_ready")
-    workflow.add_edge("macro_regime", "analysis_ready")
-    workflow.add_edge("capital_allocation", "analysis_ready")
-
-    # Cache-friendly analysis order:
-    #   analysis_ready → bull (writes the shared-prefix cache)
-    #                 ↘ bear / fundamental / relative in parallel (cache reads)
-    # All four then join at synthesis_ready. Starting all four at once would
-    # race and produce four cache_w with zero cache_r (cold parallel start).
-    workflow.add_edge("analysis_ready", "bull_agent")
+    # Cache-friendly analysis order (single parent into bull):
+    #   capital_allocation → bull (writes the shared-prefix cache)
+    #                     ↘ bear / fundamental / relative in parallel (cache reads)
+    # Those three join at synthesis_ready. Bull is NOT a direct parent of
+    # synthesis_ready (that multi-parent pattern re-fired the fan-out).
+    workflow.add_edge("capital_allocation", "bull_agent")
     for node in (
         "bear_agent",
         "fundamental_valuation",
@@ -302,12 +293,10 @@ def build_graph():
     ):
         workflow.add_edge("bull_agent", node)
         workflow.add_edge(node, "synthesis_ready")
-    workflow.add_edge("bull_agent", "synthesis_ready")
 
-    # Single deferred join before synthesis (one parent → one run).
     workflow.add_edge("synthesis_ready", "synthesis")
 
-    # Synthesis → QC (substantive) → style → QC style → docx (or hard stop).
+    # Synthesis → QC (substantive) → style → docx (or hard stop on QC FAIL).
     workflow.add_edge("synthesis", "qc")
     workflow.add_conditional_edges(
         "qc",
@@ -318,16 +307,7 @@ def build_graph():
         },
     )
     workflow.add_edge("qc_halt", END)
-    workflow.add_edge("style_pass", "qc_style_check")
-    workflow.add_conditional_edges(
-        "qc_style_check",
-        route_after_qc_style,
-        {
-            "docx_export": "docx_export",
-            "qc_style_halt": "qc_style_halt",
-        },
-    )
-    workflow.add_edge("qc_style_halt", END)
+    workflow.add_edge("style_pass", "docx_export")
     workflow.add_edge("docx_export", END)
 
     # Screener report is terminal (no style pass on this path).

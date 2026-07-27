@@ -73,7 +73,10 @@ ARCHETYPE_PEERS: dict[str, list[str]] = {
     "pre_profit_growth": ["PLTR", "SNOW", "PATH", "DKNG", "ABNB"],
     "telecom": ["T", "VZ", "TMUS"],
     "midstream": ["EPD", "ET", "WMB", "KMI", "OKE"],
-    "general": ["AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "AMD"],
+    # Mega-cap tech fallback only — sector SECTOR_PEERS should win for semis/energy/etc.
+    "general": ["AAPL", "MSFT", "GOOGL", "AMZN", "META", "AMD"],
+    # Soft peer pack for semiconductor names classified as general (fabless/design).
+    "semiconductor": ["AMD", "AVGO", "INTC", "TSM", "QCOM", "AMAT", "MU", "ASML"],
 }
 
 # Golden / known tickers — high confidence when set.

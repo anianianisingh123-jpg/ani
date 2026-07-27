@@ -197,10 +197,29 @@ def multi_search(queries: list[str], **kwargs: Any) -> str:
 
 def _relevance_tokens(*, ticker: Optional[str], entity_name: Optional[str] = None) -> list[str]:
     """Lowercased tokens used to check whether search text is on-target."""
+    # Common legal / brand names when entity_name was not threaded through.
+    _TICKER_ALIASES: dict[str, tuple[str, ...]] = {
+        "NVDA": ("nvidia",),
+        "AAPL": ("apple",),
+        "MSFT": ("microsoft",),
+        "GOOGL": ("alphabet", "google"),
+        "GOOG": ("alphabet", "google"),
+        "AMZN": ("amazon",),
+        "META": ("meta", "facebook"),
+        "AVGO": ("broadcom",),
+        "TSM": ("tsmc", "taiwan semiconductor"),
+        "QCOM": ("qualcomm",),
+        "AMD": ("advanced micro devices",),
+        "INTC": ("intel",),
+        "JPM": ("jpmorgan", "jp morgan"),
+    }
     tokens: list[str] = []
     if ticker and str(ticker).strip():
-        tokens.append(str(ticker).strip().upper())
+        t_up = str(ticker).strip().upper()
+        tokens.append(t_up)
         tokens.append(str(ticker).strip().lower())
+        for alias in _TICKER_ALIASES.get(t_up, ()):
+            tokens.append(alias.lower())
     if entity_name and str(entity_name).strip():
         name = str(entity_name).strip()
         tokens.append(name.lower())
@@ -1268,11 +1287,11 @@ def gather_management_track_record_context(
     if ticker:
         t = ticker.strip().upper()
         queries = [
-            f"{t} CEO CFO executives leadership team tenure background biography",
-            f"{t} management track record strategic decisions pivots performance",
-            f"{t} insider buying selling Form 4 executive compensation equity",
-            f"{t} board governance succession activist investor controversies",
-            f"{t} {sector} leadership quality governance {user_query}",
+            f"{t} CEO name tenure biography track record leadership",
+            f"{t} CFO chief financial officer name biography appointment",
+            f"{t} DEF 14A proxy executive compensation equity awards CEO pay",
+            f"{t} Form 4 insider transactions buying selling last 12 months",
+            f"{t} board of directors independence succession plan governance",
         ]
     else:
         queries = [

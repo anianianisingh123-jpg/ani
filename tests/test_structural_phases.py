@@ -371,9 +371,17 @@ def test_graph_imports():
         "validation_gate",
         "validation_halt",
         "capital_allocation",
-        "analysis_ready",
+        "capital_ready",
+        "bull_agent",
+        "synthesis_ready",
+        "style_pass",
+        "docx_export",
     ):
         assert n in nodes, n
+    # Removed layers must stay gone (double-run barrier + style QC).
+    assert "analysis_ready" not in nodes
+    assert "qc_style_check" not in nodes
+    assert "qc_style_halt" not in nodes
     s = empty_state(
         ticker="NVDA",
         sector="Semiconductors",
@@ -383,6 +391,23 @@ def test_graph_imports():
     assert "canonical_metrics" in s
     assert "validation_report" in s
     assert "query_type" in s
+
+
+def test_sector_peers_preferred_for_semiconductors():
+    """NVDA / Semiconductors must not fall back to mega-cap tech peers only."""
+    comps = fetch_peer_multiples(
+        "NVDA",
+        sector="Semiconductors",
+        subject_archetype="general",
+    )
+    peers = set(comps.get("peer_list") or [])
+    # At least one true semi peer should be present.
+    semi = {"AMD", "AVGO", "INTC", "TSM", "QCOM", "AMAT", "MU", "ASML"}
+    assert peers & semi, f"expected semi peers, got {peers}"
+    # Mega-cap software/retail names should not dominate a pure mega-cap set.
+    assert not peers.issubset({"AAPL", "MSFT", "GOOGL", "AMZN", "META"})
+    src = comps.get("peer_source") or ""
+    assert "sector" in src or peers & semi
 
 
 if __name__ == "__main__":

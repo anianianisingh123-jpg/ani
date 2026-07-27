@@ -811,6 +811,48 @@ def _mcap_band_filter(
     return kept, excl
 
 
+def _apply_canonical_subject_overrides(
+    subject_row: dict[str, Any],
+    canonical_metrics: Optional[dict[str, Any]],
+) -> dict[str, Any]:
+    """Prefer Python canonical metrics for subject standalone multiples.
+
+    yfinance trailing P/E / P/S often disagree with SEC-derived canonical
+    figures; agents must not treat Yahoo subject multiples as source of truth.
+    """
+    if not canonical_metrics or not isinstance(subject_row, dict):
+        return subject_row
+    try:
+        from .metrics import get_metric
+    except Exception:
+        return subject_row
+
+    overrides: list[str] = []
+    mapping = (
+        ("trailing_pe", "trailing_pe"),
+        ("price_to_sales", "price_to_sales"),
+        ("price_to_book", "price_to_book"),
+        ("market_cap", "market_cap"),
+        ("price", "price"),
+    )
+    for row_key, mid in mapping:
+        m = get_metric(canonical_metrics, mid)
+        if not m or not m.get("applicable") or m.get("value") is None:
+            continue
+        # Skip stale-flagged lines for load-bearing subject overrides.
+        if m.get("staleness"):
+            continue
+        try:
+            subject_row[row_key] = float(m["value"])
+            overrides.append(mid)
+        except (TypeError, ValueError):
+            continue
+    if overrides:
+        subject_row["canonical_overrides"] = overrides
+        subject_row["multiples_source"] = "canonical_metrics_preferred"
+    return subject_row
+
+
 def fetch_peer_multiples(
     subject_ticker: str,
     *,
@@ -818,17 +860,22 @@ def fetch_peer_multiples(
     peer_tickers: Optional[list[str]] = None,
     subject_archetype: Optional[str] = None,
     subject_sic: Optional[str] = None,
+    canonical_metrics: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Pull live multiples for subject + peers via yfinance.
 
-    Peer universe: archetype list ∪ SIC-proximity candidates (when SIC known),
-    then filter by archetype match and market-cap band.
+    Peer universe priority:
+      1. Explicit peer_tickers if provided
+      2. Sector peer list when sector maps to a known SECTOR_PEERS key
+         (e.g. Semiconductors → AMD/AVGO/TSM… — not mega-cap tech)
+      3. Archetype peer list + SIC-proximity candidates
+    Then filter by archetype match and market-cap band.
+    Subject standalone multiples prefer canonical_metrics when supplied.
     """
     from .archetype import (
         filter_peers_by_archetype,
         peers_for_archetype,
         classify_archetype,
-        archetype_of_ticker,
     )
 
     subject = (subject_ticker or "").strip().upper()
@@ -839,8 +886,23 @@ def fetch_peer_multiples(
 
     if peer_tickers:
         raw_peers = [p.strip().upper() for p in peer_tickers if p]
+        peer_source = "explicit"
     else:
-        raw_peers = peers_for_archetype(arch, subject=subject)
+        sk = _sector_key(sector)
+        # Prefer sector peers when sector maps (e.g. Semiconductors → AMD/AVGO/…).
+        sector_list = (
+            default_peers_for_sector(sector, subject=subject)
+            if sk != "DEFAULT"
+            else []
+        )
+        arch_list = peers_for_archetype(arch, subject=subject)
+        raw_peers = list(sector_list)
+        for p in arch_list:
+            if p not in raw_peers:
+                raw_peers.append(p)
+        peer_source = (
+            f"sector:{sk}+archetype:{arch}" if sector_list else f"archetype:{arch}"
+        )
         # SIC proximity: candidates with same 4-digit or 3-digit SIC from
         # submissions cache + archetype peer pool (lazy — no full SEC crawl).
         if subject_sic:
@@ -856,27 +918,82 @@ def fetch_peer_multiples(
             except Exception:
                 pass
         if not raw_peers:
-            raw_peers = default_peers_for_sector(sector, subject=subject)
+            raw_peers = sector_list or arch_list
+            peer_source = "fallback_sector_or_archetype"
 
-    peers, exclusions = filter_peers_by_archetype(
-        raw_peers, arch, subject=subject
-    )
+    # For hard financial archetypes keep strict filter; for general/semi allow
+    # sector peers through even if archetype map labels them "general".
+    if arch in ("bank_lender", "insurance", "equity_reit", "mortgage_reit", "reit_real_estate"):
+        peers, exclusions = filter_peers_by_archetype(
+            raw_peers, arch, subject=subject
+        )
+    else:
+        # Soft filter: drop only hard-mismatched archetypes (banks etc.), keep
+        # other general/tech/semi names from the sector list.
+        peers = []
+        exclusions = []
+        hard = {
+            "bank_lender",
+            "insurance",
+            "equity_reit",
+            "mortgage_reit",
+            "reit_real_estate",
+        }
+        from .archetype import classify_archetype as _clf
+
+        for p in raw_peers:
+            if p == subject:
+                continue
+            pa = (_clf(ticker=p).get("archetype") or "general")
+            if pa in hard:
+                exclusions.append(
+                    {
+                        "ticker": p,
+                        "peer_archetype": pa,
+                        "reason": f"hard archetype mismatch ({pa} vs {arch})",
+                    }
+                )
+            else:
+                peers.append(p)
+
     subject_row = _row_from_info(subject, _yf_info(subject)) if subject else {}
-    # Market-cap band
+    yf_trailing = subject_row.get("trailing_pe")
+    subject_row = _apply_canonical_subject_overrides(subject_row, canonical_metrics)
+    # Market-cap band — prefer canonical mcap when present.
+    # Keep sector-default peers even when the subject is a mega-cap (NVDA-scale
+    # 0.1×–10× band would otherwise drop most true semi comps).
     mcap = subject_row.get("market_cap")
-    peers, mcap_excl = _mcap_band_filter(mcap if isinstance(mcap, (int, float)) else None, peers)
+    sk = _sector_key(sector)
+    sector_core = set(
+        default_peers_for_sector(sector, subject=subject) if sk != "DEFAULT" else []
+    )
+    if sector_core:
+        core = [p for p in peers if p in sector_core]
+        extra = [p for p in peers if p not in sector_core]
+        extra, mcap_excl = _mcap_band_filter(
+            mcap if isinstance(mcap, (int, float)) else None, extra
+        )
+        peers = core + extra
+    else:
+        peers, mcap_excl = _mcap_band_filter(
+            mcap if isinstance(mcap, (int, float)) else None, peers
+        )
     exclusions = list(exclusions) + list(mcap_excl)
 
-    # If filtering wiped the list, re-seed from archetype defaults only.
+    # If filtering wiped the list, re-seed from sector then archetype.
     if len(peers) < 2:
-        peers = peers_for_archetype(arch, subject=subject)
+        peers = default_peers_for_sector(sector, subject=subject) or peers_for_archetype(
+            arch, subject=subject
+        )
         exclusions = exclusions + [
             {
                 "ticker": "?",
                 "peer_archetype": "",
-                "reason": "re-seeded from ARCHETYPE_PEERS after filter left <2 peers",
+                "reason": "re-seeded after filter left <2 peers",
             }
         ]
+    # Cap list length for prompt size (sector core first).
+    peers = peers[:8]
 
     peer_rows = [_row_from_info(p, _yf_info(p)) for p in peers]
 
@@ -935,6 +1052,22 @@ def fetch_peer_multiples(
     else:
         overall = "insufficient_data"
 
+    notes: list[str] = []
+    if subject_row.get("canonical_overrides"):
+        notes.append(
+            "Subject trailing multiples overridden from canonical_metrics: "
+            + ", ".join(subject_row["canonical_overrides"])
+        )
+        if (
+            isinstance(yf_trailing, (int, float))
+            and isinstance(subject_row.get("trailing_pe"), (int, float))
+            and abs(float(yf_trailing) - float(subject_row["trailing_pe"])) > 1.0
+        ):
+            notes.append(
+                f"yfinance trailing P/E was {yf_trailing:.1f}x; "
+                f"canonical {float(subject_row['trailing_pe']):.1f}x governs for subject."
+            )
+
     return {
         "subject": subject_row,
         "peers": peer_rows,
@@ -944,21 +1077,27 @@ def fetch_peer_multiples(
         "peer_list": peers,
         "subject_archetype": arch,
         "peer_exclusions": exclusions,
+        "peer_source": peer_source,
+        "notes": notes,
         "relative_valuation_applicable": len(peers) >= 2,
     }
 
 
 def format_comps_for_prompt(comps: dict[str, Any]) -> str:
     lines = [
-        "=== DETERMINISTIC PEER COMPS (yfinance — source of truth for multiples) ===",
+        "=== DETERMINISTIC PEER COMPS (peer multiples from yfinance; "
+        "subject standalone multiples prefer canonical_metrics when present) ===",
         f"Subject archetype: {comps.get('subject_archetype')}",
-        f"Peers used (archetype-matched): {', '.join(comps.get('peer_list') or [])}",
+        f"Peer source: {comps.get('peer_source') or 'n/a'}",
+        f"Peers used: {', '.join(comps.get('peer_list') or [])}",
         f"Overall vs peers: {comps.get('overall_vs_peers')}",
         f"Relative valuation applicable: {comps.get('relative_valuation_applicable')}",
     ]
+    for note in comps.get("notes") or []:
+        lines.append(f"NOTE: {note}")
     excl = comps.get("peer_exclusions") or []
     if excl:
-        lines.append("Excluded peers (archetype mismatch or re-seed notes):")
+        lines.append("Excluded peers (mismatch or re-seed notes):")
         for e in excl[:8]:
             if isinstance(e, dict):
                 lines.append(
@@ -966,8 +1105,9 @@ def format_comps_for_prompt(comps: dict[str, Any]) -> str:
                     f"(peer_archetype={e.get('peer_archetype')})"
                 )
     sub = comps.get("subject") or {}
+    src = sub.get("multiples_source") or "yfinance"
     lines.append(
-        f"Subject {sub.get('ticker')}: price={_fmt_price(sub.get('price'))} "
+        f"Subject {sub.get('ticker')} (source={src}): price={_fmt_price(sub.get('price'))} "
         f"mcap={_fmt_money(sub.get('market_cap'))} "
         f"P/E t={_fmt_num(sub.get('trailing_pe'), 1)} f={_fmt_num(sub.get('forward_pe'), 1)} "
         f"EV/EBITDA={_fmt_num(sub.get('ev_to_ebitda'), 1)} "

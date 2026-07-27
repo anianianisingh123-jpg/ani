@@ -6,12 +6,12 @@ produced). LangGraph merges these updates into the state as the graph runs.
 
 Deep-dive fan-out (wired in main.py):
 
-    entry ──┬─> data_gatherer ──────────────┐
-            ├─> business_overview ──────────┤
-            ├─> macro_regime ───────────────┼─> bull / bear / fundamental / relative
-            └─> management_track_record ─┐  │
-                                         └─> capital_allocation ─┘
-              → synthesis → qc → style_pass → qc_style_check → docx_export
+    entry ──┬─> data_gatherer → metrics → validation ──┐
+            ├─> business_overview ─────────────────────┤
+            ├─> macro_regime ──────────────────────────┼─> capital_allocation
+            └─> management_track_record ───────────────┘
+                  → bull → bear / fundamental / relative
+                  → synthesis → qc → style_pass → docx_export
 """
 
 from __future__ import annotations
@@ -54,6 +54,7 @@ def _agent_enabled(state: ResearchState, key: str) -> bool:
     qt = state.get("query_type") or "full_underwrite"
     return bool(agents_for_query_type(str(qt)).get(key, True))
 
+
 # ── Model tiering ────────────────────────────────────────────────────────────
 # Opus: highest-stakes reasoning (data foundation + final deliverable).
 # Sonnet: bounded analytical writing over already-clean data.
@@ -76,6 +77,15 @@ MAX_TOKENS_GATHERER = 32000
 MAX_TOKENS_RETRY = 12000
 # Minimum usable prose length — below this we treat the call as failed.
 MIN_USEFUL_CHARS = 200
+
+
+def _already_populated(state: ResearchState, field: str) -> bool:
+    """Idempotency guard: skip re-running an agent if its output is already set.
+
+    Protects against accidental multi-parent re-fires in LangGraph without
+    blocking legitimate empty → fill transitions.
+    """
+    return len((state.get(field) or "").strip()) >= MIN_USEFUL_CHARS
 
 # Shared system prefix for bull / bear / fundamental / relative.
 # Must be byte-identical across those four calls so Anthropic's prefix cache
@@ -1021,20 +1031,23 @@ def capital_allocation_node(state: ResearchState) -> dict:
     if not _agent_enabled(state, "capital_allocation"):
         print("[capital_allocation] skipped (query_type routing)", flush=True)
         return {"capital_allocation_assessment": ""}
+    if _already_populated(state, "capital_allocation_assessment"):
+        print("[capital_allocation] skip — already populated (idempotent)", flush=True)
+        return {}
+    # Prefer canonical metrics + cash flow (buybacks/capex/dividends) over dumping
+    # full IS/BS JSON a second time — metrics already encode the load-bearing lines.
     user_prompt = (
         f"Ticker: {state.get('ticker') or 'N/A'}\n"
         f"Sector: {state['sector']}\n"
         f"User request: {state['user_query']}\n\n"
         f"{format_metrics_for_prompt(state.get('canonical_metrics'))}\n\n"
-        f"{_json_block('INCOME STATEMENT', state.get('income_statement') or {})}\n\n"
-        f"{_json_block('BALANCE SHEET', state.get('balance_sheet') or {})}\n\n"
         f"{_json_block('CASH FLOW STATEMENT', state.get('cash_flow_statement') or {})}\n\n"
         f"{_json_block('SEC FILING SUMMARY', state.get('sec_filing_summary') or 'Not provided.')}\n\n"
         f"{_json_block('MANAGEMENT ASSESSMENT', state.get('management_assessment') or 'Not provided.')}\n\n"
         "Using ONLY the data above, apply the five-use-of-cash framework and "
         "produce the capital allocation assessment. Quote canonical metric "
         "headlines for every load-bearing number. If data is insufficient for "
-        "a category, say so."
+        "a category, say so. Do not invent statement lines not present above."
     )
     return {
         "capital_allocation_assessment": _run(
@@ -1084,6 +1097,9 @@ def bull_agent_node(state: ResearchState) -> dict:
     if not _agent_enabled(state, "bull"):
         print("[bull] skipped (query_type routing)", flush=True)
         return {"bull_thesis": ""}
+    if _already_populated(state, "bull_thesis"):
+        print("[bull] skip — already populated (idempotent)", flush=True)
+        return {}
     text = _run_with_shared_cache(
         _shared_research_payload(state),
         BULL_SYSTEM_PROMPT
@@ -1132,6 +1148,9 @@ def bear_agent_node(state: ResearchState) -> dict:
     if not _agent_enabled(state, "bear"):
         print("[bear] skipped (query_type routing)", flush=True)
         return {"bear_thesis": ""}
+    if _already_populated(state, "bear_thesis"):
+        print("[bear] skip — already populated (idempotent)", flush=True)
+        return {}
     text = _run_with_shared_cache(
         _shared_research_payload(state),
         BEAR_SYSTEM_PROMPT
@@ -1175,6 +1194,9 @@ def fundamental_valuation_node(state: ResearchState) -> dict:
     if not _agent_enabled(state, "fundamental"):
         print("[fundamental] skipped (query_type routing)", flush=True)
         return {"fundamental_valuation": ""}
+    if _already_populated(state, "fundamental_valuation"):
+        print("[fundamental] skip — already populated (idempotent)", flush=True)
+        return {}
     dcf = compute_dcf_from_state(state)
     dcf_block = format_dcf_for_prompt(dcf)
     print(
@@ -1242,6 +1264,9 @@ def relative_valuation_node(state: ResearchState) -> dict:
     if not _agent_enabled(state, "relative"):
         print("[relative] skipped (query_type routing)", flush=True)
         return {"relative_valuation": ""}
+    if _already_populated(state, "relative_valuation"):
+        print("[relative] skip — already populated (idempotent)", flush=True)
+        return {}
     ticker = state.get("ticker") or ""
     sector = state["sector"]
     arch = None
@@ -1257,6 +1282,7 @@ def relative_valuation_node(state: ResearchState) -> dict:
             sector=sector,
             subject_archetype=arch,
             subject_sic=state.get("sic"),
+            canonical_metrics=cm if isinstance(cm, dict) else None,
         )
         comps_block = format_comps_for_prompt(comps)
         print(
@@ -1470,6 +1496,11 @@ def synthesis_node(state: ResearchState) -> dict:
     if not _agent_enabled(state, "synthesis"):
         print("[synthesis] skipped (query_type routing)", flush=True)
         return {"final_memo": ""}
+    # QC retry rewrites final_memo inside qc_node — not via this node. Safe to
+    # skip a second graph entry if synthesis already produced a full memo.
+    if _already_populated(state, "final_memo"):
+        print("[synthesis] skip — final_memo already populated (idempotent)", flush=True)
+        return {}
     status = _field_status(state)
     print(f"[synthesis:gate] field_chars={status}", flush=True)
     weak = [k for k, n in status.items() if n < MIN_USEFUL_CHARS]
@@ -1496,48 +1527,51 @@ def synthesis_node(state: ResearchState) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 STYLE_PASS_SYSTEM_PROMPT = """\
-You are a light writing-style pass on a completed investment memo.
+You are a light formatting pass on a completed investment memo. Substance is frozen.
 
-SCOPE — rewrite ONLY these parts (leave the analytical body prose essentially intact):
-1. COVER BLOCK at the top: Ticker / Rating (Buy-Hold-Avoid) / Price Target /
-   Implied Upside / Time Horizon. Add this block if missing; sharpen if present.
-2. SECTION HEADERS: plain, phrase-based titles (e.g. "Understanding the Business",
-   "Variant Perception", "The Asymmetry", "Risks"). Rename headers for voice;
-   do not delete sections.
-3. CLOSING: ensure a binary framing sentence ("Either X or Y. Very little middle
-   ground.") and a conditional recommendation ("If you believe X… If you think Y…").
-   Rewrite only the final 1–3 paragraphs if needed to land that shape.
+SCOPE — you may only:
+1. COVER BLOCK at the top: if the memo already states a rating, price target,
+   and/or implied upside, surface them in a clean one-line header
+   (Ticker | Rating | Price Target | Implied Upside). Include Time Horizon
+   ONLY if the memo body already states one — never invent a horizon.
+2. SECTION HEADERS: rename for clarity (e.g. "1. BUSINESS OVERVIEW" →
+   "Understanding the Business"). Do not delete, merge, or reorder sections.
+3. Light typography: fix broken markdown, spacing, obvious typos. Nothing else.
 
-HARD CONSTRAINTS:
-- Do NOT rewrite the full body paragraph-by-paragraph. Body analysis stays as-is
-  except for light header renames and the cover/closing edits above.
-- Do not alter the recommendation, price target, any figure, any valuation
-  conclusion, or the overall stance.
-- Do not add new claims, evidence, or numbers. Do not remove substantive content.
-- No corporate hedge-language, no exclamation points, no "in conclusion".
+HARD CONSTRAINTS (violations are failures):
+- Do NOT rewrite body analysis. Copy body paragraphs essentially verbatim.
+- Do NOT alter the recommendation, price target, any figure, any valuation
+  conclusion, hedges, or monitoring triggers.
+- Do NOT add new claims, evidence, numbers, time horizons, binary
+  "either/or / little middle ground" frames, or "if you believe X / if you
+  think Y" decision trees that are not already in the source memo.
+- Do NOT soften or harden the stance. No new hedging. No "in conclusion".
 
-Output the full memo (cover + body with updated headers + closing), not a diff.
+If the source memo's closing is already clear, leave it unchanged.
+Output the full memo (cover + body), not a diff.
 """
 
 
 def style_pass_node(state: ResearchState) -> dict:
-    """Light voice pass on final_memo → styled_memo.
+    """Light formatting pass on final_memo → styled_memo.
 
-    Only seasons cover block, section headers, and closing — not a full
-    body rewrite (token-efficient; keeps synthesis judgment intact).
+    Cover block + header renames only. No substance, no style-QC gate —
+    export follows this node. Falls back to final_memo on empty/weak output.
     """
     raw = state.get("final_memo") or ""
     if not raw.strip():
         return {"styled_memo": ""}
+    if _already_populated(state, "styled_memo"):
+        print("[style_pass] skip — styled_memo already populated (idempotent)", flush=True)
+        return {}
 
     user_prompt = (
         f"Target: {state.get('ticker') or state['sector']}\n"
         f"Sector: {state['sector']}\n\n"
-        f"=== FINAL MEMO ===\n{raw}\n\n"
-        "Apply the light style pass: cover block, headers, and closing only. "
-        "Preserve every number and conclusion."
+        f"=== FINAL MEMO (substance frozen — format only) ===\n{raw}\n\n"
+        "Apply the light formatting pass only. Preserve every number, "
+        "recommendation, hedge, and conclusion exactly."
     )
-    # Cap below full-memo rewrite budget: body is mostly copied, not regenerated.
     styled = _run(
         STYLE_PASS_SYSTEM_PROMPT,
         user_prompt,
@@ -1545,9 +1579,12 @@ def style_pass_node(state: ResearchState) -> dict:
         max_tokens=MAX_TOKENS_MEMO,
         label="style_pass",
     )
-    # If style pass fails empty, ship the raw synthesis rather than a blank docx.
-    if not (styled or "").strip():
-        print("[style_pass] empty — falling back to final_memo", flush=True)
+    # If style pass fails empty or collapses the memo, ship the raw synthesis.
+    if not (styled or "").strip() or len(styled.strip()) < 0.5 * len(raw.strip()):
+        print(
+            "[style_pass] empty/truncated — falling back to final_memo",
+            flush=True,
+        )
         styled = raw
     return {"styled_memo": styled}
 
