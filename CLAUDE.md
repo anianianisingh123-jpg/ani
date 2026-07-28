@@ -1,5 +1,23 @@
 # Master Architecture Specification: Financial Multi-Agent System (MAS)
 
+## 0. Collaboration Protocol (MANDATORY — applies to every agent in this repo)
+
+Full protocol: `AGENTS.md` (repo root). Live engineering state: `mas_sector_system/DEV_SCRATCHPAD.md`.
+
+- **Rule 1 — Read First.** Before starting ANY task, read `mas_sector_system/DEV_SCRATCHPAD.md` for recent changes, active schemas/data contracts, the task queue, and notes left by other agents. Do not start from the code alone.
+- **Rule 2 — Isolated Edits.** Stay within your assigned module boundary (ownership table is in the scratchpad). **Do not modify core orchestration logic — `main.py` graph topology/edges or `routing.py` — unless explicitly assigned.** Changing `state.py` is a shared-contract change: announce it in the scratchpad before editing. If a task seems to need an out-of-boundary edit, stop and log `BLOCKED` rather than widening scope. The hard invariants in this spec (no `red_team_node`, no `qc_style_check`, single-parent analysis path, QC-never-edits-the-memo, deterministic valuation math, free-source market data) require an explicit product decision to override.
+- **Rule 3 — Log When Done.** On completing a task or hitting a blocker, append to the "Agent Activity & Handoff Logs" section of `mas_sector_system/DEV_SCRATCHPAD.md` (append at the bottom; never rewrite another agent's entry), and update the task's row in the Active Task Queue:
+
+```markdown
+### [TIMESTAMP] - [AGENT_NAME] - [TASK_ID/NAME]
+- What I changed:
+- Files modified:
+- Notes / Handoff for next agent:
+- Status: [COMPLETED / BLOCKED / IN_PROGRESS]
+```
+
+Related docs: `mas_sector_system/AI_SYNC.md` holds cross-vendor design discussion and run post-mortems (narrative); the scratchpad holds the live task board. Keep the architecture description in one place and link, rather than forking it across files.
+
 ## 1. System Objective & Architecture
 The system operates in two distinct modes managed by a Supervisor Router:
 - Mode 1: "The Radar" (Top-Down Screener): Takes sector-level queries (e.g., sector="Financials") and scans for high-conviction shortlists using financial APIs.
