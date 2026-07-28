@@ -31,6 +31,7 @@ Quick reference for all agents. **Authoritative spec is `CLAUDE.md`; this is the
 | `memory.py` | SQLite long-term memory (`outputs/research_memory.sqlite`) | Per-function edits OK |
 | `cost.py` | Token/USD accounting, `MODEL_PRICING`, JSONL log | Pricing table = product decision |
 | `export_docx.py` | Markdown → `.docx` renderer + `docx_export_node` | Per-function edits OK |
+| `artifacts.py` | Split deliverables: `clean_memo.json` + `compliance_audit_log.md` | Per-function edits OK |
 | `archetype.py`, `concept_maps.py` | Sector archetypes, XBRL concept aliases | Per-entry edits OK |
 | `tests/` (repo root) | pytest suite | Additive only — don't delete coverage |
 
@@ -61,6 +62,7 @@ Screener branch: `entry → screener → END`.
 4. **QC never silently edits the memo.** It reports only. `FAIL` → one synthesis retry with the QC report as correction instructions → re-QC → hard stop (no docx) if still `FAIL`.
 5. **Valuation math is deterministic Python.** Agents narrate `valuation_engine` + `canonical_metrics`; they never invent peer multiples or fair values from training memory.
 6. **Market-structure data is free-source only** (yfinance chains, SEC Form 4 counts). No paid vendors.
+7. **Thesis and compliance ship as two artifacts** (`artifacts.py`). `clean_memo.json` carries thesis only; `compliance_audit_log.md` carries every data-quality disclosure, QC finding, and stale-tag warning. Do not merge them back into one document, and do not append QC notes to the memo body.
 
 ### Data contracts
 
@@ -121,6 +123,14 @@ Claim a task by putting your agent name in **Assignee** and setting `IN_PROGRESS
 | SEC-04 | Form 4 dollar-value parse (currently count-only, `_form4_from_sec_submissions`). Optional for v1 — parse transaction value from the Form 4 XML, keep the count as a fallback. | _unassigned_ | TODO |
 | SEC-05 | Cache + rate-limit audit: confirm `_sec_rate_limit()` holds under the parallel foundation phase (four nodes can hit EDGAR concurrently) and that `.cache/` invalidation is correct. | _unassigned_ | TODO |
 
+### Epic D — Output routing split (`artifacts.py`)
+
+| ID | Task | Assignee | Status |
+|----|------|----------|--------|
+| OUT-01 | Split the deliverable into `clean_memo.json` (thesis) + `compliance_audit_log.md` (disclosures); wire into `docx_export_node`, `qc_halt_node`, `validation_halt_node`; add `tests/test_artifacts.py`. | Claude/Opus-5 | DONE |
+| OUT-02 | Follow-up: the clean-memo section parser is keyword-based over `final_memo` headings. If synthesis heading wording drifts, sections land in `unmapped_sections` (nothing is lost, but the four views thin out). Consider asserting section coverage in the mock-LLM harness (TEST-06). | _unassigned_ | TODO |
+| OUT-03 | Follow-up: `rating` / `price_target` in `clean_memo.json` are regex-extracted from the recommendation section and are `null` when phrasing differs. If downstream consumers need these guaranteed, have synthesis emit an explicit machine-readable line rather than loosening the regex. | _unassigned_ | TODO |
+
 ### Epic C — Test Harness (`tests/`)
 
 Existing: `test_market_structure.py`, `test_memory.py`, `test_structural_phases.py`, `test_us_sector_coverage.py` at the **repo root** `tests/`. Note `mas_sector_system/tests/` exists but is empty — pick one location and kill the other.
@@ -145,4 +155,11 @@ Existing: `test_market_structure.py`, `test_memory.py`, `test_structural_phases.
 - **What I changed:** Created this scratchpad; added the Collaboration Protocol (Rules 1–3) to a new repo-root `AGENTS.md` and to `CLAUDE.md`. Populated the architecture cheat sheet from the live code (`main.py` graph edges, `state.py`, `tools.py`, `metrics.py`, `export_docx.py`) rather than from prose, and seeded Epics A–C.
 - **Files modified:** `mas_sector_system/DEV_SCRATCHPAD.md` (new), `AGENTS.md` (new, repo root), `CLAUDE.md` (protocol section added).
 - **Notes / Handoff for next agent:** Two things to know. (1) `AI_SYNC.md` already exists and overlaps — it stays the narrative/post-mortem doc, this file is the live task board; don't fork the architecture description across both, link instead. (2) `fpdf2` is already a declared dependency but no PDF module exists, so Epic A is greenfield — PDF-06 (latin-1 font limitation) is the trap worth resolving before writing the renderer. No source code was touched.
+- **Status:** COMPLETED
+
+### [2026-07-28] - [Claude/Opus-5] - [OUT-01: Split memo vs compliance output routing]
+- **What I changed:** New `artifacts.py` splits the run deliverable into two artifacts. `clean_memo.json` = thesis only (business overview, recommendation, macro positioning, management/capital allocation, key debate, valuation reconciliation, catalysts/risks, thesis evolution) with the four requested groupings exposed as `views` over the sections. `compliance_audit_log.md` = stale XBRL tags, validation gate warnings/failures/checks, metric availability, QC report + status, style check, run cost. Removed the `## QC Notes` append from `docx_export_node` and replaced it with a one-line pointer to the audit log. Added `clean_memo` / `clean_memo_path` / `compliance_audit_log` / `compliance_audit_log_path` to `ResearchState`. Wired the writer into `docx_export_node`, `qc_halt_node`, and `validation_halt_node`.
+- **Files modified:** `mas_sector_system/artifacts.py` (new), `mas_sector_system/state.py` (4 new fields — shared-contract change, additive only), `mas_sector_system/export_docx.py` (`docx_export_node`), `mas_sector_system/agents.py` (`qc_halt_node`, `validation_halt_node`), `tests/test_artifacts.py` (new, 19 tests), `CLAUDE.md`, `DEV_SCRATCHPAD.md`.
+- **Notes / Handoff for next agent:** Five things worth knowing. (1) **The parser reads `final_memo`, not `styled_memo`** — `style_pass` is explicitly allowed to rename section headers (`agents.py:1597`), so heading-keyed parsing over the styled text is nondeterministic. Don't "fix" this by switching to `styled_memo`. (2) **`SYNTHESIS_SYSTEM_PROMPT` was deliberately not touched.** Inline disclosure that's load-bearing for the thesis stays in the memo — the synthesis instruction at `agents.py:1529` is intact, and QC audits the memo for exactly that honesty. Only *appended blocks* were rerouted. (3) **Stale tags come from `canonical_metrics[*].staleness`, not `validation_report["warnings"]`** — the ~15 stale-tag findings live on the metric records. (4) **Only `full_memo` synthesis mode produces all seven sections**; `direct_answer` / `business_brief` / `valuation_note` / `risk_memo` deliberately do not, so absent sections are `null` + named in `sections_missing`, and unrecognized headings are preserved in `unmapped_sections` rather than dropped. (5) **No graph node was added** — the writer is called from the existing terminal nodes, after the idempotent `finalize_run_cost`, so invariant #3 (single-parent analysis path) and the double-finalize hazard from PDF-04 are both untouched. Run cost is still appended to the .docx per CLAUDE.md §7 and is *also* in the audit log; that duplication is intentional.
+- **Verification:** `python3 -m pytest tests/` → **48 passed** (29 pre-existing + 19 new), no regressions. Also smoke-tested the real `docx_export_node` against a fixture state with output redirected to a scratch dir: three files written, and the .docx confirmed to contain no QC report text and no stale-tag text, but to carry the audit-log pointer and the cost block. Note `pytest` was not installed on this machine — installed via `python3 -m pip install --user pytest`. Use `python3`, not `python`.
 - **Status:** COMPLETED

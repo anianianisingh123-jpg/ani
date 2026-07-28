@@ -191,3 +191,26 @@ class ResearchState(TypedDict):
 
     # Structured per-node figures for cross-run analysis (also JSONL-logged).
     cost_data: dict
+
+    # ------------------------------------------------------------------
+    # Split deliverables (artifacts.py) — thesis and compliance are separate
+    # documents with separate audiences; never merge them back together.
+    # ------------------------------------------------------------------
+
+    # Reader-facing thesis only, parsed deterministically from final_memo:
+    # business overview, recommendation, macro positioning, management/capital
+    # allocation, key debate, valuation reconciliation, catalysts/risks.
+    # Carries no QC findings, stale-tag warnings, or cost figures.
+    clean_memo: dict
+
+    # Absolute path of the written {TICKER}_{DATE}_clean_memo.json.
+    clean_memo_path: str
+
+    # Full data-quality disclosure document (markdown): stale XBRL tags,
+    # validation warnings/failures, metric availability, QC report + status,
+    # style check, and the run-cost block. Written on export AND on halt
+    # paths — a halted run still owes an explanation.
+    compliance_audit_log: str
+
+    # Absolute path of the written {TICKER}_{DATE}_compliance_audit_log.md.
+    compliance_audit_log_path: str

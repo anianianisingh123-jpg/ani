@@ -30,6 +30,7 @@ The system operates in two distinct modes managed by a Supervisor Router:
 - Adversarial Debate: `bull_thesis`, `bear_thesis`
 - Valuation: `fundamental_valuation` (Python DCF + narrative), `relative_valuation` (yfinance peer comps + narrative)
 - Final Output: `final_memo` (raw synthesis, preserved permanently), `styled_memo` (light format pass)
+- Split deliverables (`artifacts.py`): `clean_memo` / `clean_memo_path` (thesis-only JSON parsed deterministically from `final_memo`) and `compliance_audit_log` / `compliance_audit_log_path` (all data-quality disclosures). **Never merge these back into one document.**
 - QC / Review: `qc_report`, `qc_status` (`PASS` | `PASS_WITH_FLAGS` | `FAIL`)
 - Cost: `cost_report` (memo appendix), `cost_data` (structured per-node figures; also appended to `outputs/cost_log.jsonl`)
 - Long-term memory (`memory.py` / SQLite `outputs/research_memory.sqlite`): `prior_run_id`, `prior_run_meta`, `prior_run_context` loaded at deep_dive start; saved on export / QC halt. Backfill: `python -m mas_sector_system.memory --backfill`. Keep all runs forever.
@@ -61,7 +62,11 @@ Notes:
 - `capital_allocation` waits for validation + management + overview + macro, scores five uses of cash from canonical metrics + cash-flow numbers, and writes `capital_allocation_assessment` (with alignment cross-check vs management).
 - **QC never silently edits the memo.** It only reports.
   - `qc_node` (Opus): full audit of `final_memo` vs all upstream agents. Console always prints status, severity counts, and upstream coverage.
-  - **PASS** → style pass → docx. **PASS_WITH_FLAGS** → style pass → docx with QC Notes appended. **FAIL** → one synthesis retry with the QC report as correction instructions, then re-QC; if still FAIL, hard stop (no docx).
+  - **PASS** → style pass → docx. **PASS_WITH_FLAGS** → style pass → docx; QC findings go to the compliance audit log, **not** appended to the memo body. **FAIL** → one synthesis retry with the QC report as correction instructions, then re-QC; if still FAIL, hard stop (no docx, audit log still written).
+- **Output routing is split by audience** (`artifacts.py`, no graph node — called from the terminal nodes):
+  - `outputs/{TICKER}_{DATE}_clean_memo.json` — thesis only: business overview, recommendation, macro positioning, management/capital allocation, key debate, valuation reconciliation, catalysts/risks. Parsed from **`final_memo`**, never `styled_memo` (the style pass renames headers, so heading-keyed parsing over it is nondeterministic). Absent sections are `null` + listed in `sections_missing`; unrecognized sections are preserved under `unmapped_sections`. Only `full_memo` synthesis mode yields all seven sections.
+  - `outputs/{TICKER}_{DATE}_compliance_audit_log.md` — stale XBRL tag warnings (walked from `canonical_metrics[*].staleness`), validation gate warnings/failures/checks, metric availability, QC report + status, style check, run cost. Written on export **and** on `qc_halt` / `validation_halt`, where it is the only artifact.
+  - The .docx carries thesis content plus a one-line pointer to the audit log; the run-cost block stays appended per §7.
 - Valuation math is **deterministic** (`valuation_engine.py`): multi-stage FCF DCF + yfinance peer comps. Peer lists prefer **sector** peers (e.g. Semiconductors → AMD/AVGO/TSM) over mega-cap tech. Subject standalone multiples prefer **canonical_metrics** over Yahoo when available.
 - LLM calls disable extended thinking by default and retry once on empty / truncated text.
 - **Cost accounting** (`cost.py`): every LLM call records tokens, cache, duration, and estimated USD via a configurable `MODEL_PRICING` table. Tavily search count and SEC EDGAR call count are tracked. Console prints a cost-sorted table every run; a condensed "Run Cost" block is appended to every memo (unconditional). Cross-run lines go to `outputs/cost_log.jsonl`. Estimates ≠ billed amounts.

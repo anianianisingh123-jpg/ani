@@ -171,14 +171,19 @@ def export_styled_memo(
 
 
 def docx_export_node(state: dict) -> dict:
-    """LangGraph node: export styled_memo to .docx and print the path.
+    """LangGraph node: export the run's deliverables and print their paths.
 
-    Side effects: write .docx; finalize cost accounting (console + JSONL).
+    Side effects: write .docx; write clean_memo.json + compliance_audit_log.md;
+    finalize cost accounting (console + JSONL); archive to desk memory.
 
-    On qc_status == PASS_WITH_FLAGS, appends a visible "## QC Notes" section
-    from qc_report so the reader sees the auditor's flags. QC never silently
-    rewrites the memo body. Run cost is always appended (unlike QC notes).
+    Output routing is split by audience. The .docx carries thesis content only.
+    QC findings, stale XBRL tag warnings, and validation disclosures go to the
+    compliance audit log instead of being appended to the memo body — the memo
+    gets a one-line pointer so the reader knows the audit exists. Run cost is
+    still appended to the memo per the cost-accounting spec, and is repeated in
+    the audit log.
     """
+    from .artifacts import write_run_artifacts
     from .cost import append_cost_to_memo, finalize_run_cost
 
     memo = state.get("styled_memo") or ""
@@ -189,26 +194,41 @@ def docx_export_node(state: dict) -> dict:
     if not memo.strip():
         print("docx export: no styled_memo/final_memo content; skipped.")
         # Still finalize cost so the run is not silent on empty memo.
-        return finalize_run_cost(dict(state))
+        cost_update = finalize_run_cost(dict(state))
+        # No thesis to ship, but the run still owes a data-quality account.
+        try:
+            artifact_update = write_run_artifacts(
+                {**dict(state), **cost_update},
+                context="export_empty_memo",
+                write_clean_memo=False,
+            )
+        except Exception as exc:
+            print(f"[artifacts] write failed (non-fatal): {exc}", flush=True)
+            artifact_update = {}
+        return {**cost_update, **artifact_update}
 
     qc_status = (state.get("qc_status") or "").upper()
-    qc_report = (state.get("qc_report") or "").strip()
-    if qc_status == "PASS_WITH_FLAGS" and qc_report:
-        memo = (
-            memo.rstrip()
-            + "\n\n## QC Notes\n\n"
-            + "Institutional review flagged the following items "
-            "(memo body was not auto-corrected):\n\n"
-            + qc_report
-            + "\n"
-        )
-        print(
-            "docx export: appending QC Notes section (PASS_WITH_FLAGS)",
-            flush=True,
-        )
 
     cost_update = finalize_run_cost(dict(state))
     cost_report = (cost_update.get("cost_report") or state.get("cost_report") or "").strip()
+
+    # Split artifacts first so the memo can point at the audit log by name.
+    try:
+        artifact_update = write_run_artifacts(
+            {**dict(state), **cost_update}, context="export"
+        )
+    except Exception as exc:
+        print(f"[artifacts] write failed (non-fatal): {exc}", flush=True)
+        artifact_update = {}
+
+    audit_path = artifact_update.get("compliance_audit_log_path")
+    if audit_path:
+        memo = (
+            memo.rstrip()
+            + "\n\nData quality, QC findings, and stale-tag disclosures for this run: "
+            + f"`{Path(audit_path).name}`\n"
+        )
+
     memo = append_cost_to_memo(memo, cost_report)
 
     path = export_styled_memo(memo, ticker=ticker)
@@ -221,8 +241,8 @@ def docx_export_node(state: dict) -> dict:
     try:
         from .memory import save_run
 
-        save_run({**dict(state), **cost_update})
+        save_run({**dict(state), **cost_update, **artifact_update})
     except Exception as exc:
         print(f"[memory] save_run failed (non-fatal): {exc}", flush=True)
-    # Return cost fields so state retains the structured report.
-    return cost_update
+    # Return cost + artifact fields so state retains the structured reports.
+    return {**cost_update, **artifact_update}

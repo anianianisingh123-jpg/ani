@@ -1011,7 +1011,11 @@ def validation_gate_node(state: ResearchState) -> dict:
 
 
 def validation_halt_node(state: ResearchState) -> dict:
-    """Terminal node when validation FAILs."""
+    """Terminal node when validation FAILs.
+
+    Emits a data-quality-only compliance audit log: the run stopped because of
+    the data, so the failing checks are the whole story worth keeping.
+    """
     report = state.get("validation_report") or {}
     print(
         f"[validation_halt] Run ended without analysis. "
@@ -1020,7 +1024,19 @@ def validation_halt_node(state: ResearchState) -> dict:
     )
     from .cost import finalize_run_cost
 
-    return finalize_run_cost(dict(state))
+    cost_update = finalize_run_cost(dict(state))
+    try:
+        from .artifacts import write_run_artifacts
+
+        artifact_update = write_run_artifacts(
+            {**dict(state), **cost_update},
+            context="validation_halt",
+            write_clean_memo=False,
+        )
+    except Exception as exc:
+        print(f"[artifacts] write failed (non-fatal): {exc}", flush=True)
+        artifact_update = {}
+    return {**cost_update, **artifact_update}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2084,12 +2100,26 @@ def qc_style_check_node(state: ResearchState) -> dict:
 
 
 def qc_halt_node(state: ResearchState) -> dict:
-    """Terminal node after QC FAIL — no export; still emit cost accounting."""
+    """Terminal node after QC FAIL — no export; still emit cost accounting.
+
+    Writes the compliance audit log even though no memo ships: a hard stop is
+    precisely when the data-quality and QC record matters most. No clean memo
+    is written — a failed run has no thesis to hand anyone.
+    """
     print(
         f"[qc_halt] Run ended without export. qc_status={state.get('qc_status')!r}",
         flush=True,
     )
     cost_update = finalize_run_cost(dict(state))
+    try:
+        from .artifacts import write_run_artifacts
+
+        artifact_update = write_run_artifacts(
+            {**dict(state), **cost_update}, context="qc_halt", write_clean_memo=False
+        )
+    except Exception as exc:
+        print(f"[artifacts] write failed (non-fatal): {exc}", flush=True)
+        artifact_update = {}
     # Still archive failed-QC memos so the next run knows what almost shipped.
     try:
         from .memory import save_run
@@ -2097,7 +2127,7 @@ def qc_halt_node(state: ResearchState) -> dict:
         save_run({**dict(state), **cost_update})
     except Exception as exc:
         print(f"[memory] save_run failed (non-fatal): {exc}", flush=True)
-    return cost_update
+    return {**cost_update, **artifact_update}
 
 
 def qc_style_halt_node(state: ResearchState) -> dict:
