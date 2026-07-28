@@ -123,6 +123,27 @@ CLEAN_MEMO_VIEWS: dict[str, tuple[str, ...]] = {
 
 _SECTION_KEYS = [s["key"] for s in SECTION_SPECS]
 
+# Synthesis is still instructed to disclose validation warnings inline
+# (agents.py, "If validation WARNINGs are present, disclose them in the memo"),
+# and Opus reliably emits them as their own section. That section is compliance
+# content by definition: it is routed to the audit log and kept out of the
+# clean memo. The synthesis prompt is deliberately NOT changed to suppress it —
+# inline disclosure that is load-bearing for the thesis stays where the analyst
+# put it, and QC audits the memo for exactly that honesty.
+DISCLOSURE_KEYWORDS = (
+    "DATA QUALITY",
+    "DATA LIMITATION",
+    "DISCLOSURE",
+    "DATA CAVEAT",
+    "DATA INTEGRITY",
+)
+
+# Minimum ATX headings before bold / ALL-CAPS lines stop counting as headings.
+# A well-formed memo uses ATX throughout; in that case bold standalone lines
+# ("**What would change this to HOLD:**") are paragraph lead-ins, and treating
+# them as headings fragments real sections.
+_ATX_DOMINANCE_THRESHOLD = 3
+
 
 def _now_utc() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -143,11 +164,12 @@ def strip_appendices(memo: str) -> str:
     return body[:cut].rstrip()
 
 
-def _heading_text(line: str) -> Optional[str]:
+def _heading_text(line: str, *, atx_only: bool = False) -> Optional[str]:
     """Return the heading text of a line, or None if it is not a heading.
 
     Recognizes ATX headings, bold-only lines, and bare ALL-CAPS lines with an
     optional leading number — synthesis emits all three shapes in practice.
+    ``atx_only`` disables the looser two when the memo is ATX-structured.
     """
     stripped = line.strip()
     if not stripped:
@@ -156,6 +178,8 @@ def _heading_text(line: str) -> Optional[str]:
     m = _ATX_RE.match(stripped)
     if m:
         return m.group(2).strip()
+    if atx_only:
+        return None
 
     m = _BOLD_LINE_RE.match(stripped)
     if m:
@@ -211,12 +235,16 @@ def split_memo_sections(memo: str) -> dict[str, Any]:
     body = strip_appendices(memo)
     lines = body.replace("\r\n", "\n").split("\n")
 
+    # If the memo is ATX-structured, bold/caps lines are lead-ins, not headings.
+    atx_count = sum(1 for ln in lines if _ATX_RE.match(ln.strip()))
+    atx_only = atx_count >= _ATX_DOMINANCE_THRESHOLD
+
     blocks: list[dict[str, Any]] = []
     preamble: list[str] = []
     current: Optional[dict[str, Any]] = None
 
     for line in lines:
-        title = _heading_text(line)
+        title = _heading_text(line, atx_only=atx_only)
         if title is not None:
             if current is not None:
                 blocks.append(current)
@@ -231,22 +259,30 @@ def split_memo_sections(memo: str) -> dict[str, Any]:
 
     sections: dict[str, str] = {}
     unmapped: list[dict[str, str]] = []
+    disclosures: list[dict[str, str]] = []
     order: list[str] = []
     taken: set[str] = set()
 
     for block in blocks:
         text = "\n".join(block["lines"]).strip()
-        key = _match_section_key(block["title"], taken)
+        title = block["title"].strip()
+        norm = _normalize_title(title)
+        if any(kw in norm for kw in DISCLOSURE_KEYWORDS):
+            # Compliance content — routed to the audit log, never the clean memo.
+            disclosures.append({"title": title, "text": text})
+            continue
+        key = _match_section_key(title, taken)
         if key:
             taken.add(key)
             sections[key] = text
             order.append(key)
         else:
-            unmapped.append({"title": block["title"].strip(), "text": text})
+            unmapped.append({"title": title, "text": text})
 
     return {
         "sections": sections,
         "unmapped_sections": unmapped,
+        "disclosures": disclosures,
         "preamble": "\n".join(preamble).strip(),
         "order": order,
     }
@@ -314,6 +350,8 @@ def build_clean_memo(state: dict[str, Any], *, audit_log_filename: Optional[str]
         "sections_found": [k for k in _SECTION_KEYS if found.get(k)],
         "sections_missing": [k for k in _SECTION_KEYS if not found.get(k)],
         "unmapped_sections": parsed["unmapped_sections"],
+        # Count only — the disclosure text itself is routed to the audit log.
+        "disclosure_sections_routed_out": len(parsed["disclosures"]),
         "preamble": parsed["preamble"] or None,
         "views": {name: list(keys) for name, keys in CLEAN_MEMO_VIEWS.items()},
         "source": {
@@ -437,6 +475,23 @@ def build_compliance_audit_log(
     else:
         L.append("No stale-tag findings recorded for this run.")
     L.append("")
+
+    # ── 1b. Disclosure sections lifted out of the memo body ───────────────
+    memo_disclosures = split_memo_sections(state.get("final_memo") or "")["disclosures"]
+    if memo_disclosures:
+        L.append("## 1b. Disclosures Written Into the Memo Body")
+        L.append("")
+        L.append(
+            "Synthesis writes data-quality disclosures inline when the validation gate "
+            "raises warnings. Those sections were lifted out of the clean memo and are "
+            "reproduced verbatim here."
+        )
+        L.append("")
+        for d in memo_disclosures:
+            L.append(f"### {d['title']}")
+            L.append("")
+            L.append(d["text"] or "_(empty)_")
+            L.append("")
 
     # ── 2. Validation gate ────────────────────────────────────────────────
     L.append("## 2. Validation Gate")

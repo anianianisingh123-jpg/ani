@@ -158,7 +158,15 @@ def test_appendices_are_stripped_from_memo_body():
 # ── Clean memo ───────────────────────────────────────────────────────────────
 
 
-def test_clean_memo_excludes_all_compliance_content():
+def test_clean_memo_excludes_appended_compliance_blocks():
+    """The guarantee is 'no appended QC/cost/stale-tag blocks, no disclosure sections'.
+
+    It is NOT 'no compliance wording anywhere': synthesis is still instructed to
+    disclose material data-quality caveats inline where they bear on the thesis
+    (agents.py, "If validation WARNINGs are present, disclose them in the memo"),
+    and that prompt was deliberately left intact. A sentence like "conviction
+    firmer on data quality" is analyst judgment and stays in the thesis.
+    """
     payload = build_clean_memo(_state())
     blob = json.dumps(payload)
     assert "QC Notes" not in blob
@@ -166,6 +174,38 @@ def test_clean_memo_excludes_all_compliance_content():
     assert "Run Cost" not in blob
     assert "tag missing" not in blob
     assert "Balance sheet identity" not in blob
+
+
+def test_disclosure_section_is_routed_to_audit_log_not_clean_memo():
+    """Opus writes a standalone 'DATA QUALITY DISCLOSURE' section in real memos."""
+    memo = FULL_MEMO + (
+        "\n## DATA QUALITY DISCLOSURE (read first)\n"
+        "Short-term investments tag is missing; net cash is approximate.\n"
+    )
+    st = _state(final_memo=memo)
+    payload = build_clean_memo(st)
+    assert payload["disclosure_sections_routed_out"] == 1
+    blob = json.dumps(payload)
+    assert "Short-term investments tag is missing" not in blob
+    assert "DATA QUALITY DISCLOSURE" not in blob
+    log = build_compliance_audit_log(st)
+    assert "Short-term investments tag is missing" in log
+    assert "Disclosures Written Into the Memo Body" in log
+
+
+def test_bold_lead_ins_do_not_fragment_an_atx_structured_memo():
+    """Real memos put '**What would change this to HOLD:**' inside sections.
+
+    Regression guard: before the ATX-dominance rule these bold lines were read
+    as headings, splitting real sections into unmapped fragments.
+    """
+    memo = FULL_MEMO.replace(
+        "BUY. Price target $210.",
+        "**What would change this to HOLD or AVOID:**\nBUY. Price target $210.",
+    )
+    parsed = split_memo_sections(memo)
+    assert parsed["unmapped_sections"] == []
+    assert "What would change this to HOLD" in parsed["sections"]["recommendation"]
 
 
 def test_clean_memo_extracts_rating_and_price_target():
