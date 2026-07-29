@@ -625,14 +625,18 @@ def _grade_c2(state: dict) -> dict[str, Any]:
             "detail": "no argued inputs present — vacuous pass (pre-ICL baseline)",
         }
 
+    # §4.4: each argued parameter needs ≥1 resolvable evidence field.
+    # Extra unresolvable citations are noise, not a fail — validate_argued_inputs
+    # accepts the param when any listed field resolves; the grader must match.
     failures: list[str] = []
     for label, evidence in argued:
         if not evidence:
             failures.append(f"{label}: empty evidence")
             continue
-        for field_id in evidence:
-            if not _evidence_resolves(state, str(field_id)):
-                failures.append(f"{label}: unresolvable evidence '{field_id}'")
+        resolved = [str(f) for f in evidence if _evidence_resolves(state, str(f))]
+        if not resolved:
+            bad = ", ".join(str(f) for f in evidence[:4])
+            failures.append(f"{label}: no resolvable evidence (tried: {bad})")
 
     if failures:
         return {
@@ -645,7 +649,7 @@ def _grade_c2(state: dict) -> dict[str, Any]:
         "passed": True,
         "judged": False,
         "method": "mechanical",
-        "detail": f"{len(argued)} argued input(s) each have resolvable evidence",
+        "detail": f"{len(argued)} argued input(s) each have ≥1 resolvable evidence field",
     }
 
 

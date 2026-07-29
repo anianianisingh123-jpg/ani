@@ -548,7 +548,7 @@ def test_c2_fails_on_unresolvable_evidence_field():
     )
     by = _result_by_id(grade_valuation(state, judge=_always_pass_judge))
     assert by[2]["passed"] is False
-    assert "unresolvable" in by[2]["detail"].lower()
+    assert "no resolvable evidence" in by[2]["detail"].lower()
 
 
 # ── Criterion 4 — TV share ───────────────────────────────────────────────────
