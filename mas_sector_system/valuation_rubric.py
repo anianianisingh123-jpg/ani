@@ -747,7 +747,13 @@ def _grade_c3(state: dict, text: str) -> dict[str, Any]:
 
 
 def _grade_c4(state: dict, text: str) -> dict[str, Any]:
-    """Terminal-value share of EV stated (DCF path)."""
+    """Terminal-value share of EV stated (DCF path).
+
+    §10.1 scopes this to the DCF path. Residual-income / book methods
+    (e.g. ``excess_return_on_equity`` for banks) are N/A — live JPM baseline
+    correctly rejected FCF DCF as primary but was false-failed here because
+    any fair_value_per_share was treated as a DCF path.
+    """
     vc = state.get("valuation_critique") if isinstance(state.get("valuation_critique"), dict) else {}
     dcf = state.get("dcf_engine") if isinstance(state.get("dcf_engine"), dict) else {}
 
@@ -758,6 +764,27 @@ def _grade_c4(state: dict, text: str) -> dict[str, Any]:
             "judged": False,
             "method": "mechanical",
             "detail": "DCF path not applicable (method_appropriate=false) — N/A pass",
+        }
+
+    method = str(dcf.get("method") or "").lower()
+    # Explicit non-FCF-DCF engine methods → N/A (bank residual income, etc.).
+    non_fcff_markers = (
+        "excess_return",
+        "residual_income",
+        "dividend_discount",
+        "ddm",
+        "ffo",
+        "nav",
+        "book_value",
+        "p_b",
+        "price_to_book",
+    )
+    if method and any(m in method for m in non_fcff_markers):
+        return {
+            "passed": True,
+            "judged": False,
+            "method": "mechanical",
+            "detail": f"non-FCF method ({dcf.get('method')}) — TV-share N/A pass",
         }
 
     tv_share = vc.get("terminal_value_share_of_ev")
@@ -777,15 +804,20 @@ def _grade_c4(state: dict, text: str) -> dict[str, Any]:
             "detail": "terminal-value share language found in valuation text",
         }
 
-    # If there is no DCF engine output at all, nothing to state — vacuous pass
-    # for non-DCF runs (e.g. bank residual-income only).
-    has_dcf_math = bool(dcf.get("enterprise_value") or dcf.get("terminal_value") or dcf.get("fair_value_per_share"))
-    if not has_dcf_math and not (state.get("fundamental_valuation") or "").strip():
+    # FCF DCF path: need terminal_value (or EV + projections), not merely a
+    # fair_value from a non-DCF engine.
+    has_fcf_dcf = bool(
+        dcf.get("terminal_value") is not None
+        or (dcf.get("projections") and dcf.get("enterprise_value") is not None)
+        or "fcf" in method
+        or "multi_stage" in method
+    )
+    if not has_fcf_dcf:
         return {
             "passed": True,
             "judged": False,
             "method": "mechanical",
-            "detail": "no DCF path present — N/A pass",
+            "detail": "no FCF DCF path present — N/A pass",
         }
 
     return {
