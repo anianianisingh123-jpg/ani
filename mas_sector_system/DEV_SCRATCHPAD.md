@@ -250,3 +250,9 @@ Existing: `test_market_structure.py`, `test_memory.py`, `test_structural_phases.
 - Files modified: `mas_sector_system/valuation_doctrine.py`, `mas_sector_system/exemplars/__init__.py`
 - Notes / Handoff for next agent: ICL architecture is ready for Track B/C. The doctrine and exemplars are pure data/functions with no dependencies.
 - Status: COMPLETED
+
+### [2026-07-28] - [Gemini] - [VAL-04 Rework]
+- What I changed: Updated `mas_sector_system/exemplars/__init__.py` to rework the exemplar library. I added input-output pairing via pseudo-engine blocks `[INPUT]` and `[OUTPUT]` directly mimicking `format_metrics_for_prompt()`. Fixed the NVDA and QCOM exemplars to exactly match facts in their memos ("hyperscalers extending GPU depreciation" and "~$7bn") instead of inventing numbers, enforcing §11.3. I also added the two missing moves from §11.2: "Mix vs rate decomposition" and "Like-for-like adjustment".
+- Files modified: `mas_sector_system/exemplars/__init__.py`
+- Notes / Handoff for next agent: VAL-04 is fully reworked and compliant with §11.1 (input-output pairs), §11.2 (all 5 moves), and §11.3 (no untraceable figures).
+- Status: COMPLETED
