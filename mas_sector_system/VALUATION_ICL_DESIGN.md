@@ -238,6 +238,78 @@ precision.
 
 ---
 
+### 4.6 FCF history contract — `base_fcf_method` normalization rules
+
+*Added 2026-07-28 resolving Codex's BLOCKED on VAL-05a. §4.1 named the enum without defining the
+data behind it; this section defines it.*
+
+**The history exists and is not currently surfaced.** `tools.py::_extract_line()` already accepts an
+arbitrary `rank: int` and SEC companyfacts carries 5–10 years per tag, but
+`_extract_statement_block()` only requests `rank=0` (current) and `rank=1` (prior). Nothing needs to
+be fetched; one more loop needs to be written. That is **VAL-10** (§12 Track B), and it is a
+deliberate one-file widening of Track B's lane into `tools.py`.
+
+#### Producer schema — `annual_series` (VAL-10, `tools.py`)
+
+`_extract_statement_block()` gains one key alongside the existing four. Same label structure as
+`current_annual`, ordered **newest first**, maximum 5 entries. Ranks with no observation are
+**omitted, never null-padded** — a gap must not be silently treated as a zero.
+
+```python
+block["annual_series"] = [
+    {"rank": 0, "fy": "2026", **labels},   # == current_annual
+    {"rank": 1, "fy": "2025", **labels},   # == prior_annual
+    {"rank": 2, "fy": "2024", **labels},
+    # … through rank 4 where tagged
+]
+```
+
+Additive only. `current_annual` / `prior_annual` keep their exact current meaning — do not
+reimplement them as views over the series, and do not change `_extract_statement_block`'s signature.
+
+Two notes for the implementer: `_compute_fcf()` must fill `FreeCashFlow` for every series entry, not
+just the four legacy blocks; and `_extract_line`'s null-reason string at `tools.py:685` hardcodes
+`"current" if rank == 0 else "prior"`, which will emit a misleading message for rank ≥ 2 — fix it
+while you are in there.
+
+#### Consumer rules — `base_fcf_method` (VAL-05a, `valuation_engine.py`)
+
+Read via a new `fcf_history(state) -> list[dict]` returning `[{fy, fcf, revenue}, …]` newest-first.
+`fcf` per entry follows the existing `extract_fcf_series` fallback (`FreeCashFlow`, else
+`NetCashFromOperatingActivities − abs(CapitalExpenditures)`); `revenue` is the `Revenues` label from
+the income block's series.
+
+| Method | Formula | Minimum non-null annual periods |
+|---|---|---|
+| `ttm` | `current_annual` FCF — **existing behavior, unchanged** | 1 |
+| `avg_3y` | arithmetic mean of ranks 0–2 | 3 |
+| `avg_5y` | arithmetic mean of ranks 0–4 | 5 |
+| `mid_cycle` | `median(fcf_t / revenue_t for t in available) × revenue_rank0` | 3 |
+
+**Why `mid_cycle` is margin-based rather than an average of absolute FCF.** A plain multi-year
+average silently penalizes growth: a company three times larger than it was four years ago gets a
+normalized FCF anchored to a much smaller business. Normalizing the *margin* and re-applying it to
+current revenue separates cycle position from scale, which is the actual analyst intent. This
+matters most for exactly the names the desk cares about — see §11.5.
+
+**Period-selection rules, all mandatory:**
+
+1. **Annual periods only.** Never mix quarterly observations into a normalization. Quarters stay
+   available for other uses.
+2. **No gap filling.** Do not interpolate, extrapolate, or carry a value forward. Missing is missing.
+3. **Insufficient history → reject the method, fall back to `ttm`,** and append to `clamp_warnings`
+   naming the requested method and the count found (e.g. `"avg_5y requested, 3 annual periods
+   available — fell back to ttm"`). This is a §4.2-class clamp, not a hard failure.
+4. **`mid_cycle` additionally requires** a non-null `revenue` for every period it uses and a non-null
+   `revenue_rank0`. Any missing revenue → same fallback path as rule 3.
+5. **Negative FCF periods are retained**, not filtered. A trough year is signal; dropping it is how a
+   cyclical gets valued off its peak, which is the error this enum exists to prevent.
+
+**No new state field.** `annual_series` lives inside the existing `cash_flow_statement` and
+`income_statement` dicts. VAL-00 is unaffected and does not need reopening.
+
+---
+
 ## 5. Relative valuation chain (VAL-03) — **builds first**
 
 ### 5.1 Why this leads
@@ -558,8 +630,9 @@ Deterministic functions, fully testable without an LLM. No dependency on other t
 
 | Epic | Deliverable | Files (exclusive) |
 |---|---|---|
+| VAL-10 | `annual_series` producer per §4.6 — **explicit one-file lane widening into `tools.py`.** Do this first; VAL-05a's `base_fcf_method` depends on it. | `mas_sector_system/tools.py` |
 | VAL-03a | Peer-set mutation + justified-multiple → implied value, incl. the forward-estimate chain in §5.3 | `mas_sector_system/valuation_engine.py` |
-| VAL-05a | Argued-input validation, clamping, and DCF re-run | `mas_sector_system/valuation_engine.py` |
+| VAL-05a | Argued-input validation, clamping, and DCF re-run, incl. `fcf_history()` and the §4.6 consumer rules | `mas_sector_system/valuation_engine.py` |
 
 Required API:
 ```python
