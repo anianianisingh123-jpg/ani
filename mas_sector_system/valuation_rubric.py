@@ -198,18 +198,19 @@ def grade_valuation(
     text = _valuation_text(state)
     results: list[dict[str, Any]] = []
 
+    agent_text = _agent_valuation_text(state)
     checkers: dict[int, Callable[..., dict[str, Any]]] = {
         1: lambda: _grade_c1(state, text, judge),
         2: lambda: _grade_c2(state),
-        3: lambda: _grade_c3(state, text),
-        4: lambda: _grade_c4(state, text),
-        5: lambda: _grade_c5(state, text),
+        3: lambda: _grade_c3(state, agent_text),
+        4: lambda: _grade_c4(state, agent_text),
+        5: lambda: _grade_c5(state, agent_text),
         6: lambda: _grade_c6(state),
-        7: lambda: _grade_c7(text),
+        7: lambda: _grade_c7(agent_text),
         8: lambda: _grade_c8(state, text, judge),
         9: lambda: _grade_c9(state),
         10: lambda: _grade_c10(state),
-        11: lambda: _grade_c11(text),
+        11: lambda: _grade_c11(agent_text),
     }
 
     for spec in RUBRIC:
@@ -242,7 +243,10 @@ def grade_valuation(
 # ── Text / number helpers ────────────────────────────────────────────────────
 
 def _valuation_text(state: dict) -> str:
-    """Concatenate the valuation-facing prose used by text criteria."""
+    """Full valuation-facing prose (agents + memo + critiques).
+
+    Used for LLM-judged criteria (1, 8) where synthesis context matters.
+    """
     parts: list[str] = []
     for key in (
         "fundamental_valuation",
@@ -253,6 +257,26 @@ def _valuation_text(state: dict) -> str:
         if isinstance(val, str) and val.strip():
             parts.append(val)
     # Structured critique reasoning also counts as valuation prose when present.
+    for key in ("valuation_critique", "relative_critique"):
+        obj = state.get(key)
+        if isinstance(obj, dict) and obj:
+            parts.append(_flatten_strings(obj))
+    return "\n\n".join(parts)
+
+
+def _agent_valuation_text(state: dict) -> str:
+    """Prose owned by the valuation agents only (not the full memo).
+
+    Mechanical criteria 3/4/5/7/11 grade *valuation* quality. Scanning the
+    entire ``final_memo`` false-flags business-overview currency (buybacks,
+    segment revenue) and peer-table multiples as engine/contradiction defects.
+    Live NVDA baseline (2026-07-28) surfaced both failure modes.
+    """
+    parts: list[str] = []
+    for key in ("fundamental_valuation", "relative_valuation"):
+        val = state.get(key)
+        if isinstance(val, str) and val.strip():
+            parts.append(val)
     for key in ("valuation_critique", "relative_critique"):
         obj = state.get(key)
         if isinstance(obj, dict) and obj:
@@ -508,15 +532,20 @@ _SELF_NEUTRALIZE_RE = re.compile(
     re.I,
 )
 
+# Matches "terminal value's ~65% share of enterprise value", "TV/EV", etc.
 _TV_SHARE_RE = re.compile(
     r"("
-    r"terminal[- ]value\s+(share|as\s+a\s+share|portion|fraction|%|percent)|"
+    r"terminal[- ]value'?s?\s*(?:[~≈]?\s*[0-9]+(?:\.[0-9]+)?\s*%\s*)?"
+    r"(?:share|as\s+a\s+share|portion|fraction|%|percent)|"
+    r"terminal[- ]value'?s?\s+~?\s*[0-9]+(?:\.[0-9]+)?\s*%\s+share|"
     r"tv\s*/\s*ev|"
     r"terminal\s+value\s+(?:is|accounts?\s+for|represents?|comprises?)\s+"
-    r"[0-9]+(?:\.[0-9]+)?\s*%|"
-    r"[0-9]+(?:\.[0-9]+)?\s*%\s+of\s+(?:enterprise\s+value|ev)\s+"
-    r"(?:is\s+)?(?:from\s+)?terminal|"
-    r"terminal_value_share_of_ev"
+    r"~?\s*[0-9]+(?:\.[0-9]+)?\s*%|"
+    r"~?\s*[0-9]+(?:\.[0-9]+)?\s*%\s+(?:share\s+)?of\s+(?:enterprise\s+value|ev)"
+    r"(?:\s+(?:is\s+)?(?:from\s+)?terminal)?|"
+    r"terminal_value_share_of_ev|"
+    r"share\s+of\s+enterprise\s+value\s+means\s+the\s+dcf|"  # "TV's ~65% share of EV means the DCF"
+    r"[0-9]+(?:\.[0-9]+)?\s*%\s+share\s+of\s+enterprise\s+value"
     r")",
     re.I,
 )
@@ -1059,8 +1088,26 @@ def _grade_c10(state: dict) -> dict[str, Any]:
     }
 
 
+# Peer multiples legitimately take many values in one comps write-up.
+# Criterion 11 targets *identity* contradictions (patents 196k vs 300k; two
+# different fair values presented as the same base case), not peer tables.
+_C11_IDENTITY_LABELS = frozenset(
+    {
+        "wacc",
+        "g_terminal",
+        "g_high",
+        "fair_value",
+        "price_target",
+        "base_fcf",
+        "patents",
+        "shares",
+        "eps",
+    }
+)
+
+
 def _grade_c11(text: str) -> dict[str, Any]:
-    """No internal numeric contradiction (same metric, two values)."""
+    """No internal numeric contradiction (same identity metric, two values)."""
     if not (text or "").strip():
         return {
             "passed": True,
@@ -1106,6 +1153,9 @@ def _grade_c11(text: str) -> dict[str, Any]:
 
     for m in _LABELED_METRIC_RE.finditer(text):
         label = _norm_label(m.group("label"))
+        if label not in _C11_IDENTITY_LABELS:
+            continue
+        raw = m.group(0)
         try:
             num = float(m.group("num").replace(",", ""))
         except ValueError:
@@ -1113,14 +1163,33 @@ def _grade_c11(text: str) -> dict[str, Any]:
         if m.group("sign") == "-":
             num = -num
         unit = (m.group("unit") or "").lower()
-        if unit in ("%", "percent"):
-            num = num / 100.0 if abs(num) > 1.0 else num
-            if label in ("wacc", "g_terminal", "g_high") and not label.endswith("_pct"):
-                label = label + "_pct"
+        # Rates: reject "$5.04" bound after "WACC" (live NVDA: "At 10.0% WACC, ~$5.04T").
+        # Also reject "terminal growth by Y10" binding year 10 as g_terminal.
+        if label in ("wacc", "g_terminal", "g_high"):
+            if "$" in raw:
+                continue
+            if re.search(r"\bby\s+Y?\s*\d+\s*$", raw, re.I):
+                continue
+            if re.search(r"terminal\s+growth\s+by\s+Y", raw, re.I):
+                continue
+            if unit in ("%", "percent"):
+                num = num / 100.0 if abs(num) > 1.0 else num
+            elif abs(num) > 1.0:
+                # bare 10.0 after WACC → treat as percent
+                if abs(num) <= 100:
+                    num = num / 100.0
+                else:
+                    continue
+            # Growth/WACC rates are fractions in (0, 1] or small negatives; a bare
+            # integer 10 from "Y10" after unit stripping should not survive.
+            if abs(num) > 1.0:
+                continue
         by_label.setdefault(label, []).append(num)
 
     for m in _COUNT_BEFORE_LABEL_RE.finditer(text):
         label = _norm_label(m.group("label"))
+        if label not in _C11_IDENTITY_LABELS:
+            continue
         try:
             num = float(m.group("num").replace(",", ""))
         except ValueError:
@@ -1134,7 +1203,8 @@ def _grade_c11(text: str) -> dict[str, Any]:
         # Distinct values beyond tolerance
         uniq: list[float] = []
         for v in vals:
-            if not any(abs(v - u) <= max(0.02 * max(abs(u), abs(v)), 0.5) for u in uniq):
+            tol = max(0.02 * max(abs(u) for u in [v] + uniq) if uniq else 0.02 * abs(v), 0.005 if abs(v) < 2 else 0.5)
+            if not any(abs(v - u) <= tol for u in uniq):
                 uniq.append(v)
         if len(uniq) >= 2:
             conflicts.append(f"{label}: {uniq[:4]}")
@@ -1150,7 +1220,7 @@ def _grade_c11(text: str) -> dict[str, Any]:
         "passed": True,
         "judged": False,
         "method": "mechanical",
-        "detail": f"no contradictions across {len(by_label)} labeled metric(s)",
+        "detail": f"no contradictions across {len(by_label)} identity metric(s)",
     }
 
 

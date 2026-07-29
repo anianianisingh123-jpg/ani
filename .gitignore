@@ -10,3 +10,5 @@ valuation_history.json
 *.log
 mas_sector_system/.cache/
 outputs/
+.claude/
+tmp/
