@@ -327,3 +327,13 @@ Tracks A / B / C have **zero file overlap** by construction. **Note:** in round 
   5. **Acceptance check, free and repeatable:** re-grading `outputs/val02_baseline/NVDA_state_slice.json` with the judgment fields populated moves it 10/11 → 11/11 with criterion 9 flipping True. That proves the wiring emits the shape the grader expects. It does **not** prove the arguing is any good — that needs a live run and an after-baseline.
 - **Verification:** `python3 -m pytest tests/ -q` → **134 passed** (120 prior + 14 new). No graph node added; `main.py` and `routing.py` untouched.
 - **Status:** COMPLETED
+
+### [2026-07-29] - [Claude/Opus-5] - [COST-01: run cost under-reported after an early finalize]
+- **What I changed:** `mark_finalized()` no longer returns a first-wins boolean; it returns `"write" | "rewrite" | "skip"` based on whether a later finalize saw strictly more nodes. `append_cost_log()` gained `replace_last=` so the correction rewrites the run's own trailing line instead of appending a second, conflicting one. Exactly one line per run is preserved.
+- **Files modified:** `mas_sector_system/cost.py`, `tests/test_cost_finalize.py` (new, 6 tests).
+- **Notes / Handoff for next agent:** Three things.
+  1. **This is a symptom, not the root cause.** The root cause is BUG-VAL-GATE below: `validation_halt` finalizes cost and is then *unable to actually halt the run*, so the graph keeps executing and the remaining nodes never made it into the log. Evidence: JPM 2026-07-29 logged **$1.00 across 4 nodes** for a run that executed all 12 and took 11.9 minutes; NVDA and CRM the same day logged $2.79 and $2.82. Fixing cost accounting makes the number honest; it does not stop the halt from failing to halt.
+  2. **The rewrite is deliberately conservative.** It only replaces the trailing line if that line carries the same ticker, otherwise it appends. A concurrent run must never have its record clobbered by another run's correction.
+  3. **`mark_finalized()` changed signature** (now takes `node_count` and returns a string). The only caller is `finalize_run_cost`. If another call site appears, it must not treat the return value as a boolean — `"skip"` is truthy.
+- **Verification:** `python3 -m pytest tests/ -q` → **140 passed** (134 prior + 6 new).
+- **Status:** COMPLETED
