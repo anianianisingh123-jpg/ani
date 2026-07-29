@@ -334,3 +334,13 @@ Tracks A / B / C have **zero file overlap** by construction. **Note:** in round 
 - Files modified: `mas_sector_system/validate.py`, `mas_sector_system/main.py`, `tests/test_structural_phases.py`, `mas_sector_system/DEV_SCRATCHPAD.md`.
 - Notes / Handoff for next agent: The JPM failure was one root cause with a cascade: a valid bank suppression triggered FAIL, while three ungated foundation parents still released the deferred join. The fix addresses both ends. A FAIL now terminates at `validation_halt`; PASS/WARN alone reaches capital allocation. Tests assert the exact predecessor/successor sets, not just node presence.
 - Status: COMPLETED
+
+### [2026-07-29] - [Claude/Opus-5] - [COST-01: run cost under-reported after an early finalize]
+- **What I changed:** `mark_finalized()` no longer returns a first-wins boolean; it returns `"write" | "rewrite" | "skip"` based on whether a later finalize saw strictly more nodes. `append_cost_log()` gained `replace_last=` so the correction rewrites the run's own trailing line instead of appending a second, conflicting one. Exactly one line per run is preserved.
+- **Files modified:** `mas_sector_system/cost.py`, `tests/test_cost_finalize.py` (new, 6 tests).
+- **Notes / Handoff for next agent:** Three things.
+  1. **This is a symptom, not the root cause.** The root cause is BUG-VAL-GATE below: `validation_halt` finalizes cost and is then *unable to actually halt the run*, so the graph keeps executing and the remaining nodes never made it into the log. Evidence: JPM 2026-07-29 logged **$1.00 across 4 nodes** for a run that executed all 12 and took 11.9 minutes; NVDA and CRM the same day logged $2.79 and $2.82. Fixing cost accounting makes the number honest; it does not stop the halt from failing to halt.
+  2. **The rewrite is deliberately conservative.** It only replaces the trailing line if that line carries the same ticker, otherwise it appends. A concurrent run must never have its record clobbered by another run's correction.
+  3. **`mark_finalized()` changed signature** (now takes `node_count` and returns a string). The only caller is `finalize_run_cost`. If another call site appears, it must not treat the return value as a boolean — `"skip"` is truthy.
+- **Verification:** `python3 -m pytest tests/ -q` → **140 passed** (134 prior + 6 new).
+- **Status:** COMPLETED

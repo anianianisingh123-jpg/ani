@@ -165,6 +165,9 @@ class RunCostTracker:
         self.tavily_searches = 0
         self.sec_calls = 0
         self._finalized = False
+        # Node count captured by the finalize that wrote the run's log line.
+        # A later, more complete finalize corrects it — see mark_finalized().
+        self._finalized_node_count = 0
 
     def record_llm(
         self,
@@ -347,13 +350,29 @@ class RunCostTracker:
             "tavily_price_per_search": TAVILY_PRICE_PER_SEARCH,
         }
 
-    def mark_finalized(self) -> bool:
-        """Return True if this is the first finalize (idempotent)."""
+    def mark_finalized(self, node_count: int = 0) -> str:
+        """Decide what this finalize call should do with the run log.
+
+        Returns "write" (first finalize), "rewrite" (a later finalize that
+        saw strictly more nodes, so the line already on disk understates the
+        run), or "skip".
+
+        Why this is not a plain first-wins flag: `validation_halt` finalizes
+        and then — because three parallel foundation branches never pass
+        through the validation gate — the graph keeps running and the rest of
+        the nodes execute anyway. First-wins recorded only the pre-gate nodes,
+        under-reporting those runs by roughly two thirds. Correcting on a more
+        complete pass keeps exactly one honest line per run.
+        """
         with self.lock:
-            if self._finalized:
-                return False
-            self._finalized = True
-            return True
+            if not self._finalized:
+                self._finalized = True
+                self._finalized_node_count = node_count
+                return "write"
+            if node_count > getattr(self, "_finalized_node_count", 0):
+                self._finalized_node_count = node_count
+                return "rewrite"
+            return "skip"
 
 
 def begin_run(
@@ -483,8 +502,16 @@ def append_cost_log(
     summary: dict[str, Any],
     *,
     path: Optional[Path] = None,
+    replace_last: bool = False,
 ) -> Path:
-    """Append one JSON line for cross-run analysis. Returns log path."""
+    """Append one JSON line for cross-run analysis. Returns log path.
+
+    `replace_last` rewrites the final line instead of appending, so a run
+    that finalized early (validation_halt) and then kept executing ends up
+    with one corrected line rather than two conflicting ones. The rewrite
+    only proceeds if that last line is the same ticker — otherwise it falls
+    back to appending rather than risk clobbering another run's record.
+    """
     log_path = Path(path) if path else DEFAULT_COST_LOG
     log_path.parent.mkdir(parents=True, exist_ok=True)
     # Slimmer line for the rolling log (drop raw per-call list bloat if huge)
@@ -512,8 +539,31 @@ def append_cost_log(
         "tavily_price_per_search": summary.get("tavily_price_per_search"),
         "pricing_note": summary.get("pricing_note"),
     }
+    new_line = json.dumps(line_obj, default=str) + "\n"
+
+    if replace_last and log_path.exists():
+        try:
+            existing = log_path.read_text(encoding="utf-8").splitlines(keepends=True)
+        except OSError:
+            existing = []
+        while existing and not existing[-1].strip():
+            existing.pop()
+        same_run = False
+        if existing:
+            try:
+                same_run = (
+                    json.loads(existing[-1]).get("ticker") == line_obj.get("ticker")
+                )
+            except (json.JSONDecodeError, AttributeError):
+                same_run = False
+        if same_run:
+            existing[-1] = new_line
+            log_path.write_text("".join(existing), encoding="utf-8")
+            return log_path.resolve()
+        # Last line belongs to a different run — append rather than clobber it.
+
     with open(log_path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(line_obj, default=str) + "\n")
+        f.write(new_line)
     return log_path.resolve()
 
 
@@ -546,16 +596,20 @@ def finalize_run_cost(
         summary["mode"] = summary.get("mode") or state.get("mode") or ""
 
     report = format_memo_appendix(summary)
-    first = tracker.mark_finalized()
-    if first:
+    action = tracker.mark_finalized(len(summary.get("nodes") or []))
+    if action in ("write", "rewrite"):
         if print_console:
             print(format_console_table(summary), flush=True)
         if write_jsonl:
-            path = append_cost_log(summary)
-            print(f"[cost] wrote run line → {path}", flush=True)
-    else:
-        # Still print if something re-finalizes without console (rare)
-        pass
+            path = append_cost_log(summary, replace_last=(action == "rewrite"))
+            if action == "rewrite":
+                print(
+                    f"[cost] corrected run line ({len(summary.get('nodes') or [])} "
+                    f"nodes — an earlier finalize recorded fewer) → {path}",
+                    flush=True,
+                )
+            else:
+                print(f"[cost] wrote run line → {path}", flush=True)
 
     return {
         "cost_report": report,
