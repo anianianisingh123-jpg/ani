@@ -18,11 +18,49 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from mas_sector_system.artifacts import (  # noqa: E402
     build_clean_memo,
     build_compliance_audit_log,
+    build_metrics_block,
+    build_valuation_block,
     collect_stale_tags,
+    collect_valuation_disclosures,
     split_memo_sections,
     strip_appendices,
     write_run_artifacts,
 )
+
+# Real memos are one H1 title, numbered H2 sections, and H3 sub-headings inside
+# them. Before the hierarchy fix every heading was a boundary, so the H3 bodies
+# orphaned into unmapped_sections and their parents thinned to a sentence.
+HIERARCHICAL_MEMO = """\
+# NVIDIA CORPORATION (NVDA)
+
+Rating: BUY | Price Target: $318.63
+
+## 1. BUSINESS OVERVIEW
+Accelerated computing platforms.
+
+## 4. MANAGEMENT & CAPITAL ALLOCATION
+One-line preamble under the parent heading.
+
+### Management: low-confidence, high key-person concentration
+Founder-led with real key-person risk.
+
+### Capital allocation: disciplined on reinvestment
+Buybacks at $34.29B per percentage point.
+
+## 5. KEY DEBATE POINTS
+
+### Where the bear lands real blows
+Working capital is outrunning revenue.
+
+### Where the bull survives contact
+The margin story has already turned.
+
+### My adjudication
+The bear wins the near term.
+
+## 6. VALUATION RECONCILIATION
+DCF and comps disagree on the horizon.
+"""
 
 FULL_MEMO = """\
 Preamble line before any heading.
@@ -77,6 +115,8 @@ def _state(**over):
             "metrics": [
                 {
                     "id": "net_cash",
+                    "value": 30.0e9,
+                    "unit": "USD",
                     "basis_period": "FY2025",
                     "confidence": "moderate",
                     "applicable": True,
@@ -85,6 +125,8 @@ def _state(**over):
                 },
                 {
                     "id": "revenue",
+                    "value": 130.0e9,
+                    "unit": "USD",
                     "basis_period": "FY2025",
                     "confidence": "high",
                     "applicable": True,
@@ -153,6 +195,52 @@ def test_appendices_are_stripped_from_memo_body():
     assert "QC Notes" not in body
     assert "Run Cost" not in body
     assert "export controls" in body
+
+
+# ── Heading hierarchy (OUT-02) ───────────────────────────────────────────────
+
+
+def test_sub_headings_stay_inside_their_parent_section():
+    """Regression guard for OUT-02: H3 bodies must not orphan to unmapped."""
+    parsed = split_memo_sections(HIERARCHICAL_MEMO)
+    debate = parsed["sections"]["key_debate_points"]
+    assert "Working capital is outrunning revenue" in debate
+    assert "The margin story has already turned" in debate
+    assert "The bear wins the near term" in debate
+
+    mgmt = parsed["sections"]["management_and_capital_allocation"]
+    assert "Founder-led with real key-person risk" in mgmt
+    assert "Buybacks at $34.29B" in mgmt
+    assert "One-line preamble" in mgmt
+
+    assert parsed["unmapped_sections"] == []
+
+
+def test_sub_headings_are_indexed_for_structured_layouts():
+    parsed = split_memo_sections(HIERARCHICAL_MEMO)
+    titles = [s["title"] for s in parsed["subsections"]["key_debate_points"]]
+    assert titles == [
+        "Where the bear lands real blows",
+        "Where the bull survives contact",
+        "My adjudication",
+    ]
+    bear = parsed["subsections"]["key_debate_points"][0]
+    assert "Working capital" in bear["text"]
+    assert "margin story" not in bear["text"], "subsection slices must not bleed"
+
+
+def test_lone_top_heading_is_the_document_title_not_a_section():
+    parsed = split_memo_sections(HIERARCHICAL_MEMO)
+    assert parsed["title"] == "NVIDIA CORPORATION (NVDA)"
+    assert "Rating: BUY" in parsed["preamble"]
+
+
+def test_flat_memo_without_a_repeated_depth_keeps_boundary_per_heading():
+    """No inferable hierarchy → every heading still delimits a section."""
+    memo = "# RECOMMENDATION\nBuy.\n\n## VALUATION RECONCILIATION\nFair.\n"
+    parsed = split_memo_sections(memo)
+    assert parsed["sections"]["recommendation"].strip() == "Buy."
+    assert parsed["sections"]["valuation_reconciliation"].strip() == "Fair."
 
 
 # ── Clean memo ───────────────────────────────────────────────────────────────
@@ -244,6 +332,83 @@ def test_clean_memo_survives_empty_memo():
 def test_synthesis_mode_recorded_for_every_query_type(query_type, expected_mode):
     payload = build_clean_memo(_state(query_type=query_type))
     assert payload["synthesis_mode"] == expected_mode
+
+
+# ── Numeric blocks (schema 1.1) ──────────────────────────────────────────────
+
+
+def _engine_state(**over):
+    """A state carrying structured DCF + comps output, as the nodes now return."""
+    return _state(
+        dcf_engine={
+            "method": "multi_stage_fcf_dcf",
+            "fair_value_per_share": 318.85,
+            "assumptions": {"wacc": 0.10},
+            "warnings": ["FCF grew 59% YoY — g_high capped at 35%."],
+            "errors": [],
+        },
+        comps_engine={
+            "subject": {"ticker": "NVDA", "trailing_pe": 40.1},
+            "peers": [
+                {"ticker": "AMD", "trailing_pe": 92.1, "error": None},
+                {"ticker": "BADTKR", "error": "no data returned"},
+            ],
+            "peer_medians": {"trailing_pe": 32.8},
+            "overall_vs_peers": "cheap",
+            "peer_exclusions": ["MU excluded: market cap outside band"],
+            "notes": ["yfinance trailing P/E was 41.8x; canonical 40.1x governs."],
+            "relative_valuation_applicable": True,
+        },
+        **over,
+    )
+
+
+def test_metrics_block_omits_stale_records_and_counts_them():
+    """Decision of record: stale figures are dropped, never caveated."""
+    block = build_metrics_block(_state()["canonical_metrics"])
+    ids = [r["id"] for r in block["records"]]
+    assert ids == ["revenue"], "net_cash is stale and interest_expense unavailable"
+    assert block["excluded_stale"] == 1
+    assert block["excluded_unavailable"] == 1
+    assert "staleness" not in json.dumps(block)
+
+
+def test_metrics_block_survives_a_run_with_no_metrics():
+    empty = build_metrics_block(None)
+    assert empty["records"] == [] and empty["count"] == 0
+
+
+def test_valuation_block_strips_engine_data_quality_keys():
+    block = build_valuation_block(_engine_state())
+    assert block["dcf"]["fair_value_per_share"] == 318.85
+    assert "warnings" not in block["dcf"] and "errors" not in block["dcf"]
+    assert "peer_exclusions" not in block["comps"] and "notes" not in block["comps"]
+    # A peer row that failed to fetch is not a comparable.
+    assert [p["ticker"] for p in block["comps"]["peers"]] == ["AMD"]
+
+
+def test_stripped_engine_disclosures_are_routed_not_destroyed():
+    """The module contract is 'nothing is silently dropped' — assert both halves."""
+    st = _engine_state()
+    clean = json.dumps(build_clean_memo(st)["valuation"])
+    log = build_compliance_audit_log(st)
+    for probe in ("g_high capped at 35%", "MU excluded", "canonical 40.1x governs",
+                  "no data returned"):
+        assert probe not in clean, f"{probe} leaked into the clean memo"
+        assert probe in log, f"{probe} was destroyed instead of routed"
+    assert "Valuation Engine Disclosures" in log
+
+
+def test_valuation_block_absent_when_no_engine_ran():
+    assert build_valuation_block(_state()) == {}
+    assert collect_valuation_disclosures(_state()) == {}
+
+
+def test_clean_memo_carries_numeric_blocks_at_schema_1_1():
+    payload = build_clean_memo(_engine_state())
+    assert payload["schema_version"] == "1.1"
+    assert payload["metrics"]["count"] >= 1
+    assert payload["valuation"]["dcf"]["fair_value_per_share"] == 318.85
 
 
 # ── Compliance audit log ─────────────────────────────────────────────────────

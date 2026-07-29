@@ -41,7 +41,38 @@ _PKG_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _PKG_DIR.parent
 DEFAULT_OUTPUT_DIR = _REPO_ROOT / "outputs"
 
-CLEAN_MEMO_SCHEMA_VERSION = "1.0"
+CLEAN_MEMO_SCHEMA_VERSION = "1.1"
+
+# ── Numeric contract (schema 1.1) ────────────────────────────────────────────
+# 1.0 carried prose only, so any downstream renderer had thesis text and no
+# figures to chart. 1.1 adds `metrics` and `valuation` blocks. The audience
+# split is unchanged and load-bearing: metric *values* are thesis content;
+# every statement about a value's *reliability* is compliance content and stays
+# in the audit log.
+#
+# Consequences, all deliberate:
+#   - A metric with a non-empty `staleness` list is omitted from the clean memo
+#     entirely rather than exported with a caveat, so a stale figure can never
+#     reach a reader-facing deliverable. The count is disclosed; the values are
+#     not. Nothing is lost — §1 of the audit log already itemises every one.
+#   - Engine warnings/errors and peer exclusions are stripped from the
+#     valuation block and re-emitted in §6 of the audit log. Stripping without
+#     re-emitting would destroy them, which the module contract forbids.
+_METRIC_PUBLIC_FIELDS = (
+    "id",
+    "value",
+    "unit",
+    "basis_period",
+    "period_key",
+    "headline",
+    "computation",
+    "qualifiers",
+    "confidence",
+)
+
+# Engine keys that describe data quality rather than value. Audit log only.
+_DCF_DISCLOSURE_FIELDS = ("warnings", "errors")
+_COMPS_DISCLOSURE_FIELDS = ("peer_exclusions", "notes")
 
 # Blocks that must never reach the clean memo, in case an upstream path ever
 # appends them to final_memo. Matched case-sensitively on the exact markers
@@ -164,12 +195,14 @@ def strip_appendices(memo: str) -> str:
     return body[:cut].rstrip()
 
 
-def _heading_text(line: str, *, atx_only: bool = False) -> Optional[str]:
-    """Return the heading text of a line, or None if it is not a heading.
+def _heading(line: str, *, atx_only: bool = False) -> Optional[tuple[str, Optional[int]]]:
+    """Return ``(text, level)`` for a heading line, or None if it is not one.
 
     Recognizes ATX headings, bold-only lines, and bare ALL-CAPS lines with an
     optional leading number — synthesis emits all three shapes in practice.
     ``atx_only`` disables the looser two when the memo is ATX-structured.
+    ``level`` is the ATX depth; pseudo-headings carry ``None`` (no depth), and
+    always act as section boundaries.
     """
     stripped = line.strip()
     if not stripped:
@@ -177,7 +210,7 @@ def _heading_text(line: str, *, atx_only: bool = False) -> Optional[str]:
 
     m = _ATX_RE.match(stripped)
     if m:
-        return m.group(2).strip()
+        return m.group(2).strip(), len(m.group(1))
     if atx_only:
         return None
 
@@ -186,17 +219,43 @@ def _heading_text(line: str, *, atx_only: bool = False) -> Optional[str]:
         text = m.group(1).strip()
         # A bold sentence is not a heading; headings are short.
         if len(text) <= 80 and not text.endswith("."):
-            return text
+            return text, None
         return None
 
     m = _NUMBERED_CAPS_RE.match(stripped)
     if m:
         text = m.group(1).strip()
         if len(text) <= 80:
-            return text
+            return text, None
         return None
 
     return None
+
+
+def _heading_text(line: str, *, atx_only: bool = False) -> Optional[str]:
+    """Heading text only — thin wrapper over :func:`_heading`."""
+    found = _heading(line, atx_only=atx_only)
+    return found[0] if found else None
+
+
+def _section_level(levels: list[int]) -> Optional[int]:
+    """The ATX depth that delimits top-level sections, or None if undecidable.
+
+    Synthesis writes the memo as one H1 title followed by numbered H2 sections,
+    each of which may carry H3 sub-headings ("Where the bear lands real blows").
+    Treating every heading as a boundary — the pre-fix behaviour — orphaned
+    those H3 bodies into ``unmapped_sections`` because their parent key was
+    already ``taken``, thinning the real sections to a sentence.
+
+    The delimiting depth is the *shallowest* depth used more than once: a lone
+    H1 is a document title, not a section. When no depth repeats there is no
+    hierarchy to infer, so the caller falls back to boundary-per-heading.
+    """
+    counts: dict[int, int] = {}
+    for lv in levels:
+        counts[lv] = counts.get(lv, 0) + 1
+    repeated = [lv for lv, n in sorted(counts.items()) if n >= 2]
+    return repeated[0] if repeated else None
 
 
 def _normalize_title(title: str) -> str:
@@ -236,19 +295,33 @@ def split_memo_sections(memo: str) -> dict[str, Any]:
     lines = body.replace("\r\n", "\n").split("\n")
 
     # If the memo is ATX-structured, bold/caps lines are lead-ins, not headings.
-    atx_count = sum(1 for ln in lines if _ATX_RE.match(ln.strip()))
-    atx_only = atx_count >= _ATX_DOMINANCE_THRESHOLD
+    atx_levels = [len(m.group(1)) for m in (_ATX_RE.match(ln.strip()) for ln in lines) if m]
+    atx_only = len(atx_levels) >= _ATX_DOMINANCE_THRESHOLD
+    section_level = _section_level(atx_levels) if atx_only else None
 
     blocks: list[dict[str, Any]] = []
     preamble: list[str] = []
     current: Optional[dict[str, Any]] = None
 
     for line in lines:
-        title = _heading_text(line, atx_only=atx_only)
-        if title is not None:
+        found = _heading(line, atx_only=atx_only)
+        if found is not None:
+            title, level = found
+            # A heading deeper than the section depth is a sub-heading: it stays
+            # inside its parent's body (verbatim, so the renderer keeps it) and
+            # is also indexed under ``subsections`` for structured layouts.
+            if (
+                section_level is not None
+                and level is not None
+                and level > section_level
+                and current is not None
+            ):
+                current["subsections"].append({"title": title, "level": level, "start": len(current["lines"])})
+                current["lines"].append(line)
+                continue
             if current is not None:
                 blocks.append(current)
-            current = {"title": title, "lines": []}
+            current = {"title": title, "level": level, "lines": [], "subsections": []}
             continue
         if current is None:
             preamble.append(line)
@@ -257,7 +330,22 @@ def split_memo_sections(memo: str) -> dict[str, Any]:
     if current is not None:
         blocks.append(current)
 
+    # A lone heading shallower than the section depth is the document title
+    # ("# NVIDIA CORPORATION (NVDA)"), not a section. Its body is the preamble.
+    doc_title: Optional[str] = None
+    if (
+        blocks
+        and section_level is not None
+        and blocks[0].get("level") is not None
+        and blocks[0]["level"] < section_level
+        and sum(1 for lv in atx_levels if lv == blocks[0]["level"]) == 1
+    ):
+        head = blocks.pop(0)
+        doc_title = head["title"].strip()
+        preamble = preamble + head["lines"]
+
     sections: dict[str, str] = {}
+    subsections: dict[str, list[dict[str, str]]] = {}
     unmapped: list[dict[str, str]] = []
     disclosures: list[dict[str, str]] = []
     order: list[str] = []
@@ -276,16 +364,41 @@ def split_memo_sections(memo: str) -> dict[str, Any]:
             taken.add(key)
             sections[key] = text
             order.append(key)
+            subs = _slice_subsections(block)
+            if subs:
+                subsections[key] = subs
         else:
             unmapped.append({"title": title, "text": text})
 
     return {
         "sections": sections,
+        "subsections": subsections,
         "unmapped_sections": unmapped,
         "disclosures": disclosures,
+        "title": doc_title,
         "preamble": "\n".join(preamble).strip(),
         "order": order,
     }
+
+
+def _slice_subsections(block: dict[str, Any]) -> list[dict[str, str]]:
+    """Cut a parent block's body into its sub-headed parts.
+
+    Sub-heading bodies stay in the parent text as well; this is an index over
+    the same characters, not a second copy of the contract.
+    """
+    marks = block.get("subsections") or []
+    if not marks:
+        return []
+    lines = block["lines"]
+    out: list[dict[str, str]] = []
+    for i, mark in enumerate(marks):
+        start = mark["start"] + 1
+        end = marks[i + 1]["start"] if i + 1 < len(marks) else len(lines)
+        text = "\n".join(lines[start:end]).strip()
+        if text:
+            out.append({"title": mark["title"], "text": text})
+    return out
 
 
 _RATING_RE = re.compile(
@@ -310,6 +423,125 @@ def _extract_price_target(text: str) -> Optional[str]:
         return None
     raw = m.group(1).strip().replace(" ", "")
     return raw if raw.startswith("$") else f"${raw}"
+
+
+def build_metrics_block(canonical_metrics: Optional[dict[str, Any]]) -> dict[str, Any]:
+    """Every computed figure that carries a value, minus anything stale.
+
+    Three exclusion classes, counted separately so the block is auditable:
+    ``unavailable`` (the engine could not compute it), ``valueless``
+    (applicable but null), and ``stale`` (the XBRL tag lags the period spine).
+    Only the counts travel; the stale records themselves are audit-log content.
+    """
+    empty = {
+        "records": [],
+        "count": 0,
+        "excluded_stale": 0,
+        "excluded_unavailable": 0,
+        "excluded_valueless": 0,
+    }
+    if not isinstance(canonical_metrics, dict):
+        return empty
+
+    records: list[dict[str, Any]] = []
+    stale = unavailable = valueless = 0
+    for rec in canonical_metrics.get("metrics") or []:
+        if not isinstance(rec, dict):
+            continue
+        if not rec.get("applicable"):
+            unavailable += 1
+            continue
+        if rec.get("value") is None:
+            valueless += 1
+            continue
+        if rec.get("staleness"):
+            stale += 1
+            continue
+        records.append({f: rec.get(f) for f in _METRIC_PUBLIC_FIELDS if rec.get(f) is not None})
+
+    return {
+        "ticker": canonical_metrics.get("ticker"),
+        "archetype": canonical_metrics.get("archetype"),
+        "computed_at_utc": canonical_metrics.get("computed_at_utc"),
+        "period_labels": canonical_metrics.get("period_labels") or {},
+        "records": records,
+        "by_id": {r["id"]: r for r in records if r.get("id")},
+        "count": len(records),
+        "excluded_stale": stale,
+        "excluded_unavailable": unavailable,
+        "excluded_valueless": valueless,
+        "note": (
+            "Values only. Metrics whose SEC XBRL tag lags the period spine are "
+            "omitted outright, not caveated — see the compliance audit log for "
+            "the itemised stale-tag findings."
+        ),
+    }
+
+
+def build_valuation_block(state: dict[str, Any]) -> dict[str, Any]:
+    """Structured DCF + peer comps, with data-quality keys stripped out.
+
+    Returns ``{}`` when neither engine ran, so a screener or ``direct_answer``
+    run does not carry an empty scaffold.
+    """
+    dcf = state.get("dcf_engine")
+    comps = state.get("comps_engine")
+    out: dict[str, Any] = {}
+
+    if isinstance(dcf, dict) and dcf:
+        out["dcf"] = {k: v for k, v in dcf.items() if k not in _DCF_DISCLOSURE_FIELDS}
+
+    if isinstance(comps, dict) and comps:
+        clean_comps = {k: v for k, v in comps.items() if k not in _COMPS_DISCLOSURE_FIELDS}
+        # A peer row carrying an `error` is a failed fetch, not a comparable.
+        peers = [
+            {k: v for k, v in row.items() if k != "error"}
+            for row in (comps.get("peers") or [])
+            if isinstance(row, dict) and not row.get("error")
+        ]
+        clean_comps["peers"] = peers
+        subject = comps.get("subject")
+        if isinstance(subject, dict):
+            clean_comps["subject"] = {k: v for k, v in subject.items() if k != "error"}
+        out["comps"] = clean_comps
+
+    if out:
+        out["note"] = (
+            "Deterministic engine output (CLAUDE.md §6). Engine warnings, peer "
+            "exclusions, and methodology notes are compliance content and live "
+            "in the audit log."
+        )
+    return out
+
+
+def collect_valuation_disclosures(state: dict[str, Any]) -> dict[str, list[str]]:
+    """The data-quality keys :func:`build_valuation_block` strips out."""
+    out: dict[str, list[str]] = {}
+    dcf = state.get("dcf_engine")
+    comps = state.get("comps_engine")
+
+    if isinstance(dcf, dict):
+        for field in _DCF_DISCLOSURE_FIELDS:
+            items = [str(x) for x in (dcf.get(field) or [])]
+            if items:
+                out[f"dcf_{field}"] = items
+    if isinstance(comps, dict):
+        for field in _COMPS_DISCLOSURE_FIELDS:
+            items = [str(x) for x in (comps.get(field) or [])]
+            if items:
+                out[f"comps_{field}"] = items
+        failed = [
+            f"{row.get('ticker')}: {row.get('error')}"
+            for row in (comps.get("peers") or [])
+            if isinstance(row, dict) and row.get("error")
+        ]
+        if failed:
+            out["comps_peer_fetch_errors"] = failed
+        if comps and not comps.get("relative_valuation_applicable", True):
+            out["comps_applicability"] = [
+                "Fewer than 2 archetype-matched peers — relative valuation not applicable."
+            ]
+    return out
 
 
 def build_clean_memo(state: dict[str, Any], *, audit_log_filename: Optional[str] = None) -> dict[str, Any]:
@@ -346,10 +578,14 @@ def build_clean_memo(state: dict[str, Any], *, audit_log_filename: Optional[str]
         "synthesis_mode": mode,
         "rating": _extract_rating(rating_source),
         "price_target": _extract_price_target(rating_source),
+        "title": parsed.get("title"),
         "sections": sections_payload,
+        "subsections": parsed.get("subsections") or {},
         "sections_found": [k for k in _SECTION_KEYS if found.get(k)],
         "sections_missing": [k for k in _SECTION_KEYS if not found.get(k)],
         "unmapped_sections": parsed["unmapped_sections"],
+        "metrics": build_metrics_block(state.get("canonical_metrics")),
+        "valuation": build_valuation_block(state),
         # Count only — the disclosure text itself is routed to the audit log.
         "disclosure_sections_routed_out": len(parsed["disclosures"]),
         "preamble": parsed["preamble"] or None,
@@ -447,6 +683,7 @@ def build_compliance_audit_log(
     L.append(f"| Validation status | {validation_status} |")
     L.append(f"| QC status | {qc_status} |")
     L.append(f"| Stale-tag findings | {len(stale)} |")
+    L.append(f"| Valuation engine disclosures | {sum(len(v) for v in collect_valuation_disclosures(state).values())} |")
     L.append(f"| Validation warnings | {len(warnings)} |")
     L.append(f"| Validation failures | {len(failures)} |")
     L.append(f"| Generated (UTC) | {_now_utc()} |")
@@ -584,8 +821,39 @@ def build_compliance_audit_log(
             L.append(style_report)
         L.append("")
 
-    # ── 5. Run cost ───────────────────────────────────────────────────────
-    L.append("## 5. Run Cost")
+    # ── 5. Valuation engine disclosures ───────────────────────────────────
+    # The clean memo carries the engine's numbers; everything the engine said
+    # about the reliability of those numbers is reproduced here instead.
+    L.append("## 5. Valuation Engine Disclosures")
+    L.append("")
+    vdis = collect_valuation_disclosures(state)
+    if vdis:
+        L.append(
+            "Warnings, peer exclusions, and methodology notes emitted by the "
+            "deterministic valuation engine. These are stripped from the clean "
+            "memo's `valuation` block, which carries values only."
+        )
+        L.append("")
+        labels = {
+            "dcf_warnings": "DCF warnings",
+            "dcf_errors": "DCF errors",
+            "comps_notes": "Comps methodology notes",
+            "comps_peer_exclusions": "Peer exclusions",
+            "comps_peer_fetch_errors": "Peer fetch failures",
+            "comps_applicability": "Relative valuation applicability",
+        }
+        for field, items in vdis.items():
+            L.append(f"### {labels.get(field, field)}")
+            L.append("")
+            for item in items:
+                L.append(f"- {item}")
+            L.append("")
+    else:
+        L.append("No valuation engine warnings, exclusions, or errors recorded for this run.")
+        L.append("")
+
+    # ── 6. Run cost ───────────────────────────────────────────────────────
+    L.append("## 6. Run Cost")
     L.append("")
     cost_report = (state.get("cost_report") or "").strip()
     L.append(cost_report if cost_report else "_No cost report recorded for this run._")

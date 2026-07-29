@@ -152,6 +152,24 @@ class ResearchState(TypedDict):
     # Relative / comps valuation write-up (multiples vs peers + history).
     relative_valuation: str
 
+    # Structured output of the deterministic valuation engine, kept alongside
+    # the narratives above. The agents narrate these dicts; previously they
+    # were computed, formatted into the prompt, and discarded, which left the
+    # downstream artifacts with prose but no numbers to chart. Engine tables
+    # remain the source of truth per CLAUDE.md §6 — agents do not invent them.
+    #
+    # dcf_engine: compute_dcf_from_state() — inputs, assumptions (wacc,
+    # g_high, g_terminal), per-year projections, terminal/enterprise/equity
+    # value, fair_value_per_share, fair_value_range, epv_per_share,
+    # implied_upside_vs_price, plus warnings/errors (compliance content —
+    # routed to the audit log, never the clean memo).
+    dcf_engine: dict
+
+    # comps_engine: fetch_peer_multiples() — subject row, peer rows, peer
+    # medians, relative read per multiple, overall_vs_peers, peer_list, and
+    # peer_exclusions/notes (compliance content — audit log only).
+    comps_engine: dict
+
     # ------------------------------------------------------------------
     # Output fields
     # ------------------------------------------------------------------

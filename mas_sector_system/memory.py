@@ -69,18 +69,23 @@ def init_db(db_path: Optional[Path] = None) -> Path:
                 relative_valuation TEXT,
                 metrics_summary_json TEXT,
                 canonical_metrics_json TEXT,
+                metrics_full_json TEXT,
+                valuation_json TEXT,
                 cost_total_usd REAL,
                 source_path TEXT
             )
             """
         )
-        # Migrate older DBs that predate source_path.
+        # Migrate older DBs. CREATE TABLE IF NOT EXISTS is a no-op once the
+        # table exists, so every column added after the first release needs an
+        # explicit ALTER or live databases keep writing the old shape.
         cols = {
             r[1]
             for r in conn.execute("PRAGMA table_info(runs)").fetchall()
         }
-        if "source_path" not in cols:
-            conn.execute("ALTER TABLE runs ADD COLUMN source_path TEXT")
+        for name in ("source_path", "metrics_full_json", "valuation_json"):
+            if name not in cols:
+                conn.execute(f"ALTER TABLE runs ADD COLUMN {name} TEXT")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_runs_ticker_created "
             "ON runs(ticker, created_at DESC)"
@@ -211,6 +216,18 @@ def save_run(
         "metrics_summary": metrics_summary,
     }
 
+    # Full metric records + structured engine output, so a past run can be
+    # re-rendered with the same figures the live run had. Deliberately NOT
+    # read by format_prior_run_for_prompt, which whitelists the 16 headlines
+    # from metrics_summary_json — the QC input packet is the largest cost
+    # hotspot in the system and must not grow with this blob.
+    metrics_full = cm if cm else {}
+    valuation_full = {
+        k: state.get(k)
+        for k in ("dcf_engine", "comps_engine")
+        if isinstance(state.get(k), dict) and state.get(k)
+    }
+
     created_at = state.get("memory_created_at") or _now_utc()
     source_path = state.get("memory_source_path") or None
 
@@ -226,6 +243,7 @@ def save_run(
                 bull_thesis, bear_thesis,
                 fundamental_valuation, relative_valuation,
                 metrics_summary_json, canonical_metrics_json,
+                metrics_full_json, valuation_json,
                 cost_total_usd, source_path
             ) VALUES (
                 ?, ?, ?, ?, ?,
@@ -233,6 +251,7 @@ def save_run(
                 ?, ?,
                 ?, ?,
                 ?,
+                ?, ?,
                 ?, ?,
                 ?, ?,
                 ?, ?,
@@ -260,6 +279,8 @@ def save_run(
                 state.get("relative_valuation") or "",
                 json.dumps(metrics_summary, default=str),
                 json.dumps(cm_slim, default=str),
+                json.dumps(metrics_full, default=str) if metrics_full else None,
+                json.dumps(valuation_full, default=str) if valuation_full else None,
                 float(cost_total) if cost_total is not None else None,
                 source_path,
             ),

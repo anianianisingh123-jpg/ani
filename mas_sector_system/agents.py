@@ -1297,7 +1297,10 @@ def fundamental_valuation_node(state: ResearchState) -> dict:
             "## Fundamental valuation (engine only — narrative model failed)\n\n"
             + dcf_block
         )
-    return {"fundamental_valuation": text}
+    # Keep the structured engine output, not just the narrative about it —
+    # downstream artifacts chart these numbers and cannot re-derive them
+    # from prose.
+    return {"fundamental_valuation": text, "dcf_engine": dcf}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1405,7 +1408,8 @@ def relative_valuation_node(state: ResearchState) -> dict:
             "## Relative valuation (comps table only — narrative model failed)\n\n"
             + (comps_block or "No peer comps available.")
         )
-    return {"relative_valuation": text}
+    # Structured peer table travels with the narrative — see dcf_engine above.
+    return {"relative_valuation": text, "comps_engine": comps}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
