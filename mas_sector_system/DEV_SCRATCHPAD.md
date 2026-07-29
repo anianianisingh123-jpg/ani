@@ -297,3 +297,9 @@ Tracks A / B / C have **zero file overlap** by construction. **Note:** in round 
 - Files modified: `mas_sector_system/tools.py`, `mas_sector_system/valuation_engine.py`, `mas_sector_system/DEV_SCRATCHPAD.md` (handoff only).
 - Notes / Handoff for next agent: `compute_dcf()` and `fetch_peer_multiples()` signatures are unchanged. `fetch_peer_multiples()` now additively returns `candidate_pool` and `candidate_rows` so `apply_peer_changes()` can include only already-fetched engine candidates without I/O. `validate_argued_inputs()` returns accepted parameter records plus warnings; missing/unresolvable evidence reverts by omission. `compute_dcf_with_argued_inputs()` returns `low_case`/`high_case` and an aggregate fair-value range. `mid_cycle` uses median FCF margin times rank-0 revenue and retains negative FCF periods. No LLM calls or new fetch source were added.
 - Status: COMPLETED
+
+### [2026-07-29] - [Codex/GPT-5] - [VAL-03a / VAL-05a unit coverage]
+- What I changed: Added the authorized focused unit suite covering every hard-clamp boundary, the joint WACC/terminal-growth boundary, empty and unresolvable evidence rejection, relative-plus-absolute justified-multiple clamps, margin-based mid-cycle normalization versus `avg_3y`, negative-FCF retention, and null-forward-P/E fallback to trailing EPS.
+- Files modified: `tests/test_valuation_engine_argued.py`, `mas_sector_system/DEV_SCRATCHPAD.md` (handoff only).
+- Notes / Handoff for next agent: The focused file has 12 tests. Full branch suite is 89 passing. The Gordon boundary test checks the inequality directly; an exactly valid boundary should not emit a clamp warning.
+- Status: COMPLETED
