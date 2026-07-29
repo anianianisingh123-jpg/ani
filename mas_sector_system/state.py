@@ -171,6 +171,58 @@ class ResearchState(TypedDict):
     comps_engine: dict
 
     # ------------------------------------------------------------------
+    # Argued-input valuation (VALUATION_ICL_DESIGN.md) — the judgment layer
+    #
+    # dcf_engine / comps_engine above stay the ANCHOR case: sector-default
+    # assumptions, never overwritten, always shipped alongside the fields
+    # below. The engine math remains deterministic per CLAUDE.md §3 — what
+    # these fields add is that the *inputs* stop being sector constants and
+    # become arguable within hard clamps (design §4.2).
+    #
+    # The LLM's output surface here is bounded scalars and enums only. It
+    # cannot emit a currency amount, so a fabricated fair value has nowhere
+    # to live — that is a structural property, not a prompt instruction.
+    # ------------------------------------------------------------------
+
+    # Structured critique of the DCF engine's assumptions from the
+    # fundamental node's critique call. Per-parameter: engine_default,
+    # argued_range [lo, hi], verdict, reasoning, and evidence[] — field ids
+    # that must resolve to non-null state values or the parameter is
+    # rejected and reverts to default (design §4.4, the anti-motivated-
+    # reasoning control). Also carries terminal_value_share_of_ev, which is
+    # the fastest tell for a terminal-dominated DCF.
+    valuation_critique: Optional[dict]
+
+    # Same contract for the comps path: argued peer inclusions/exclusions
+    # (candidate-pool only — an invented ticker cannot be added) and the
+    # justified multiple with its argued range. This is where the desk's
+    # re-rating case lives, and per design §5.1 it builds before the DCF
+    # critique because that is where the memo corpus is dense.
+    relative_critique: Optional[dict]
+
+    # Engine re-run with the accepted argued inputs. Same shape as
+    # dcf_engine, plus input_source="argued", clamp_warnings[] and
+    # band_dissents[]. Runs at both corners of each argued range, so this
+    # yields a band rather than a false-precision point. None when the
+    # critique call failed or every parameter was rejected — the base case
+    # always ships regardless (design §9).
+    dcf_judgment: Optional[dict]
+
+    # Comps counterpart: peer set after accepted changes, recomputed
+    # medians, and implied value from the argued multiple applied to a
+    # consensus forward estimate (price ÷ forwardPE — engine-derived, never
+    # LLM-supplied; design §5.3). Carries forward_estimate_available=False
+    # when forwardPE is null and the trailing fallback was used.
+    comps_judgment: Optional[dict]
+
+    # Rubric score for the valuation sections (valuation_rubric.py): the
+    # 11 criteria in design §10.1, per-criterion rather than total-only.
+    # Criteria that required an LLM judge are marked judged=True. This is
+    # the measurement that makes "institutional grade" falsifiable — without
+    # it there is no way to tell whether the ICL layers helped.
+    valuation_grade: Optional[dict]
+
+    # ------------------------------------------------------------------
     # Output fields
     # ------------------------------------------------------------------
 

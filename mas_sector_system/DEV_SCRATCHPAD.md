@@ -66,7 +66,7 @@ Screener branch: `entry → screener → END`.
 
 ### Data contracts
 
-- **`ResearchState`** (`state.py`) — single dict passed between nodes. Key groups: base inputs (`mode`, `ticker`, `sector`, `user_query`); foundation (`business_overview`, statements, `sec_filing_summary`, `macro_context`, `macro_regime_assessment`, `management_assessment`, `capital_allocation_assessment`); debate (`bull_thesis`, `bear_thesis`); valuation (`fundamental_valuation`, `relative_valuation`); output (`final_memo` — *preserved permanently*, `styled_memo`); QC (`qc_report`, `qc_status` ∈ `PASS | PASS_WITH_FLAGS | FAIL`); cost (`cost_report`, `cost_data`); memory (`prior_run_id`, `prior_run_meta`, `prior_run_context`).
+- **`ResearchState`** (`state.py`) — single dict passed between nodes. Key groups: base inputs (`mode`, `ticker`, `sector`, `user_query`); foundation (`business_overview`, statements, `sec_filing_summary`, `macro_context`, `macro_regime_assessment`, `management_assessment`, `capital_allocation_assessment`); debate (`bull_thesis`, `bear_thesis`); valuation (`fundamental_valuation`, `relative_valuation`, engine anchors `dcf_engine` / `comps_engine`, and the argued-input layer `valuation_critique` / `relative_critique` / `dcf_judgment` / `comps_judgment` / `valuation_grade` — see `VALUATION_ICL_DESIGN.md`); output (`final_memo` — *preserved permanently*, `styled_memo`); QC (`qc_report`, `qc_status` ∈ `PASS | PASS_WITH_FLAGS | FAIL`); cost (`cost_report`, `cost_data`); memory (`prior_run_id`, `prior_run_meta`, `prior_run_context`).
 - **`canonical_metrics`** (`metrics.py`) — source of truth for every number an agent quotes. Each entry carries value + provenance + staleness. Subject multiples prefer canonical over Yahoo.
 - **SEC layer** (`tools.py`) — `get_cik_for_ticker` → `fetch_sec_company_facts` (XBRL companyfacts) → `extract_statements_from_company_facts`. Rate-limited via `_sec_rate_limit()`; UA from `_sec_user_agent()`. Concept aliasing lives in `concept_maps.py`, archetype-derived lines in `archetype.py`.
 - **Memory** — SQLite at `outputs/research_memory.sqlite`. Loaded at `deep_dive_start`, saved on export **and** on QC halt. Backfill: `python -m mas_sector_system.memory --backfill`. **Keep all runs forever.**
@@ -150,6 +150,27 @@ Existing: `test_market_structure.py`, `test_memory.py`, `test_structural_phases.
 | TEST-06 | Mock-LLM harness: a fake `_invoke` returning canned text per node so the full deep-dive graph can run end-to-end in CI with no API spend, asserting state keys are populated at every phase. | _unassigned_ | TODO |
 | TEST-07 | Cost-accounting test: assert `finalize_run_cost` is called exactly once per run on all three terminal paths (`docx_export`, `qc_halt`, `validation_halt`) and that `outputs/cost_log.jsonl` gets exactly one line. | _unassigned_ | TODO |
 
+### Epic V — Valuation In-Context Learning (`VALUATION_ICL_DESIGN.md`)
+
+**Read `mas_sector_system/VALUATION_ICL_DESIGN.md` before claiming any row.** §4 (the argued-input contract) is shared by three parallel tracks and is frozen — if it does not cover your case, log `BLOCKED` here and stop rather than improvising a schema. Interface drift across parallel tracks is the expensive failure here.
+
+Tracks A / B / C have **zero file overlap** by construction; that is what makes parallel dispatch safe. VAL-00 lands first because all three depend on the state contract.
+
+| ID | Task | Assignee | Status |
+|----|------|----------|--------|
+| VAL-00 | `state.py` contract: `valuation_critique`, `relative_critique`, `dcf_judgment`, `comps_judgment`, `valuation_grade`. Additive only — `dcf_engine`/`comps_engine` semantics unchanged, they remain the anchor case. **Shared contract; must land before A/B/C start.** | Claude/Opus-5 | DONE |
+| VAL-01 | L0 doctrine + L1 archetype cards for every id in `archetype.py::ARCHETYPES`, incl. defensible bands (§4.3) → `valuation_doctrine.py` (new). Pure data + pure functions; no I/O, no LLM, no `agents.py` import. | Gemini | TODO |
+| VAL-02 | **Part 1:** rubric + grader → `valuation_rubric.py` (new), `tests/test_valuation_rubric.py` (new). 11 criteria (§10.1); criteria 3/5/7/9/11 must be deterministic. **Part 2 (needs explicit spend approval):** baseline scores for the 8 held-out tickers (§10.2) = 8 live end-to-end runs at Opus/Sonnet cost. Baseline gates the epic. | Grok | TODO |
+| VAL-03a | Peer-set mutation + justified-multiple → implied value, incl. consensus forward-estimate chain (§5.3). `valuation_engine.py`. Extend only — do not change `compute_dcf()` / `fetch_peer_multiples()` signatures. | Codex | TODO |
+| VAL-03b | Relative critique call + narrative call, in-node. `agents.py`. Blocked on VAL-01/02/03a. | Claude/Opus-5 | TODO |
+| VAL-04 | Exemplar library (§11) → `exemplars/` (new). Extract reasoning moves; **never paste source memos raw** — every figure must trace to an engine block. Filter the §11.3 patterns. Note §11.5: NVDA/QCOM key to `general`, most archetypes start with zero exemplars. | Gemini | TODO |
+| VAL-05a | Argued-input validation + clamps (§4.2) + DCF re-run. `valuation_engine.py`. `g_terminal ≤ wacc − 0.015` is a math constraint, enforce in code. Empty/unresolvable evidence → revert to default (§4.4). | Codex | TODO |
+| VAL-05b | Fundamental critique call + narrative call, in-node. `agents.py`. Blocked on VAL-05a. | Claude/Opus-5 | TODO |
+| VAL-06 | Valuation reconciliation section + `CLAUDE.md` §5 tiering update (critique calls = Opus). | Claude/Opus-5 | TODO |
+| VAL-07 | Calibration loop — prior call vs realized price. `memory.py`. | _unassigned_ | TODO |
+| VAL-08 | Clean memo schema 1.2 + disclosure routing (§8): band dissents → clean memo, clamp warnings → audit log. `artifacts.py`. | _unassigned_ | TODO |
+| VAL-09 | Football-field bars: default / judgment low / judgment high / comps-implied / EPV (§8). `pdf_generator.py`. | _unassigned_ | TODO |
+
 ---
 
 ## 📝 Agent Activity & Handoff Logs
@@ -208,4 +229,17 @@ Existing: `test_market_structure.py`, `test_memory.py`, `test_structural_phases.
   4. **Sanitization is display-only.** `clean_memo.json` still stores the fully-tagged prose; nothing upstream changed, and QC still audits the untouched text. Verified all 220 numeric tokens survive sanitization and paren balance is exact.
   5. **Preserved through the refactor:** the `artifact != "clean_memo"` rejection, `_EXCLUDED_TITLE_RE`, stale-omission, `_pick_side` fallback, the `_column_markdown` overflow fix, and schema-1.0 graceful degradation.
 - **Verification:** `python3 -m pytest tests/ -q` → **77 passed** (70 prior + 7 new), no regressions. Rendered report re-inspected page by page via `pypdf` split + `qlmanage`: **0 residual `filer FY`, 0 ISO dates, 0 stray `---` rules**, all six themes present, page count 9 core / 18 with `--appendix`. That visual pass caught the `_page_title` overprint, which the tests did not. Samples: `outputs/NVDA_2026-07-28_research_report.pdf` and `..._research_report_full.pdf` (both fixture-driven).
+- **Status:** COMPLETED
+
+### [2026-07-28] - [Claude/Opus-5] - [VAL-00: Valuation ICL state contract + Epic V]
+- **What I changed:** Added `mas_sector_system/VALUATION_ICL_DESIGN.md` (architecture spec for the valuation in-context-learning work) and the five state fields it depends on: `valuation_critique`, `relative_critique`, `dcf_judgment`, `comps_judgment`, `valuation_grade`. All `Optional[dict]`, all additive. Seeded Epic V in the task queue above with tracks assigned across Gemini / Codex / Grok / Claude.
+- **Files modified:** `mas_sector_system/VALUATION_ICL_DESIGN.md` (new), `mas_sector_system/state.py` (5 new fields — shared-contract change, additive only), `mas_sector_system/DEV_SCRATCHPAD.md`.
+- **Notes / Handoff for next agent:** Six things.
+  1. **`dcf_engine` / `comps_engine` semantics are unchanged.** They are now explicitly the *anchor* case — sector-default assumptions, never overwritten, always shipped alongside the judgment fields. Do not repoint existing consumers at `dcf_judgment`; both appear in the deliverable.
+  2. **The deterministic-math invariant is preserved, and this was the design's central constraint.** The same engine functions compute every number. What changes is that inputs stop being sector constants and become arguable within hard clamps (design §4.2). If a future task proposes letting the LLM emit a fair value directly, that is an invariant break and needs a product decision — the schema deliberately has nowhere to put one.
+  3. **§4.4 (the evidence requirement) is a code-enforced control, not a prompt request.** A parameter whose `evidence[]` is empty or does not resolve to a non-null state value must be rejected and reverted to default. The model can see live price and `implied_upside_vs_price`, so nothing else prevents it reverse-engineering assumptions to fit a conclusion. Implementers: do not soften this into prompt wording.
+  4. **`g_terminal <= wacc - 0.015` is a math constraint, not a judgment.** The Gordon denominator collapses without it. Enforce in Python; it is not arguable.
+  5. **Relative valuation builds before the DCF critique** (design §5.1). Analysis of six desk-authored memos shows the method is multiple-driven — NVDA 32x FY27E EPS, CRM 20x FY27 FCF, QCOM 14x vs 27x sector — so exemplar density is on the comps side. §5.3 resolves the forward-estimate gap via consensus forward EPS (`price / forwardPE`), engine-derived; the LLM never supplies an estimate.
+  6. **Tracks A/B/C have zero file overlap and can run in parallel; VAL-02's baseline run cannot.** Part 2 of VAL-02 is 8 live end-to-end runs at Opus/Sonnet cost and needs explicit spend approval — it is the gate for the whole epic, so it should not be skipped quietly. Also note `archetype.py::ARCHETYPES` has no semiconductor id: NVDA and QCOM both key to `general`, so that card carries most of the corpus and most archetypes start with zero exemplars (design §11.5, open decision #4).
+- **Verification:** `python3 -m pytest tests/ -q` → **77 passed**, unchanged from the PDF-07 baseline. No behavior change: the five fields are additive TypedDict keys with no reader or writer yet.
 - **Status:** COMPLETED
