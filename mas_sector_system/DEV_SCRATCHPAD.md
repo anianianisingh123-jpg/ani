@@ -310,3 +310,8 @@ Tracks A / B / C have **zero file overlap** by construction. **Note:** in round 
   5. **Spend:** NVDA ~$2.79 / 12.4m, CRM ~$2.82 / 12.5m, JPM cost log showed ~$1.00 after early validation_halt line then continued analysis (~11.9m wall). Do not expand to remaining 5 tickers without new approval.
   6. **Do not treat vacuous C2/C6/C10 as ICL success** — they will start failing for real once critiques exist without evidence/reasoning.
 - Status: COMPLETED (part 2 limited subset)
+### [2026-07-29] - [Codex/GPT-5] - [VAL-03a / VAL-05a unit coverage]
+- What I changed: Added the authorized focused unit suite covering every hard-clamp boundary, the joint WACC/terminal-growth boundary, empty and unresolvable evidence rejection, relative-plus-absolute justified-multiple clamps, margin-based mid-cycle normalization versus `avg_3y`, negative-FCF retention, and null-forward-P/E fallback to trailing EPS.
+- Files modified: `tests/test_valuation_engine_argued.py`, `mas_sector_system/DEV_SCRATCHPAD.md` (handoff only).
+- Notes / Handoff for next agent: The focused file has 12 tests. Full branch suite is 89 passing. The Gordon boundary test checks the inequality directly; an exactly valid boundary should not emit a clamp warning.
+- Status: COMPLETED
