@@ -163,11 +163,11 @@ Tracks A / B / C have **zero file overlap** by construction. **Note:** in round 
 | VAL-02 | **Part 1:** rubric + grader → `valuation_rubric.py`, `tests/test_valuation_rubric.py`. **Part 2:** limited baseline (user-approved 3 tickers, not full 8). | Grok | PART 1 DONE · PART 2 DONE (NVDA 10/11, CRM 7/11, JPM 9/11) — see handoff + `outputs/val02_baseline/` |
 | VAL-10 | `annual_series` producer (§4.6): extend `_extract_statement_block` to ranks 0–4, newest-first, gaps omitted not null-padded; `_compute_fcf` must cover series entries; fix the misleading null-reason label at `tools.py:685`. **Explicit one-file lane widening into `tools.py`** — additive, `current_annual`/`prior_annual` semantics unchanged. **Do this before VAL-05a.** | Codex | DONE — verified: clamps, evidence rejection, Gordon check, margin-based mid_cycle. NO TESTS SHIPPED (see review) |
 | VAL-03a | Peer-set mutation + justified-multiple → implied value, incl. consensus forward-estimate chain (§5.3). `valuation_engine.py`. Extend only — do not change `compute_dcf()` / `fetch_peer_multiples()` signatures. | Codex | DONE — verified: clamps, evidence rejection, Gordon check, margin-based mid_cycle. NO TESTS SHIPPED (see review) |
-| VAL-03b | Relative critique call + narrative call, in-node. `agents.py`. Blocked on VAL-01/02/03a. | Claude/Opus-5 | TODO |
+| VAL-03b | Relative critique call + narrative call, in-node. `agents.py`. Blocked on VAL-01/02/03a. | Claude/Opus-5 | DONE |
 | VAL-04 | Exemplar library (§11) → `exemplars/`. Extract reasoning moves; **never paste source memos raw**. Filter the §11.3 patterns. Note §11.5: NVDA/QCOM key to `general`. | Gemini | DONE — reworked and verified: 5 exemplars, all 5 §11.2 moves, input→output pairs, every figure traceable to its own input block |
 | VAL-05a | Argued-input validation + clamps (§4.2) + DCF re-run, incl. `fcf_history()` and the §4.6 consumer rules. `g_terminal ≤ wacc − 0.015` enforced in code. Empty/unresolvable evidence → revert to default (§4.4). | Codex | DONE — verified: clamps, evidence rejection, Gordon check, margin-based mid_cycle. NO TESTS SHIPPED (see review) |
-| VAL-05b | Fundamental critique call + narrative call, in-node. `agents.py`. Blocked on VAL-05a. | Claude/Opus-5 | TODO |
-| VAL-06 | Valuation reconciliation section + `CLAUDE.md` §5 tiering update (critique calls = Opus). | Claude/Opus-5 | TODO |
+| VAL-05b | Fundamental critique call + narrative call, in-node. `agents.py`. Blocked on VAL-05a. | Claude/Opus-5 | DONE |
+| VAL-06 | Valuation reconciliation section + `CLAUDE.md` §5 tiering update (critique calls = Opus). | Claude/Opus-5 | DONE |
 | VAL-07 | Calibration loop — prior call vs realized price. `memory.py`. | _unassigned_ | TODO |
 | VAL-08 | Clean memo schema 1.2 + disclosure routing (§8): band dissents → clean memo, clamp warnings → audit log. `artifacts.py`. | _unassigned_ | TODO |
 | VAL-09 | Football-field bars: default / judgment low / judgment high / comps-implied / EPV (§8). `pdf_generator.py`. | _unassigned_ | TODO |
@@ -315,3 +315,15 @@ Tracks A / B / C have **zero file overlap** by construction. **Note:** in round 
 - Files modified: `tests/test_valuation_engine_argued.py`, `mas_sector_system/DEV_SCRATCHPAD.md` (handoff only).
 - Notes / Handoff for next agent: The focused file has 12 tests. Full branch suite is 89 passing. The Gordon boundary test checks the inequality directly; an exactly valid boundary should not emit a clamp warning.
 - Status: COMPLETED
+
+### [2026-07-29] - [Claude/Opus-5] - [VAL-03b / VAL-05b / VAL-06: wiring the argued-input path]
+- **What I changed:** Wired the critique→recompute→narrate loop into `fundamental_valuation_node` and `relative_valuation_node`. Added `CRITIQUE_SYSTEM_PROMPT`, `RELATIVE_CRITIQUE_SYSTEM_PROMPT`, `_archetype_for()`, `_icl_blocks()`, `_run_critique()`. Both nodes now return their judgment fields alongside the unchanged anchor cases. Updated `CLAUDE.md` §5 with the critique tier.
+- **Files modified:** `mas_sector_system/agents.py`, `CLAUDE.md`, `tests/test_valuation_wiring.py` (new, 14 tests), `mas_sector_system/DEV_SCRATCHPAD.md`.
+- **Notes / Handoff for next agent:** Five things.
+  1. **The critique calls deliberately bypass `_run_with_shared_cache`.** That helper pins `SHARED_ANALYSIS_SYSTEM_PROMPT` and is shared byte-for-byte by bull/bear/fundamental/relative. Routing a differently-prompted Opus call through it forks the cached prefix and stops bull and bear sharing with the valuation agents — a real cost regression that would only show up in the cost table weeks later. They use `_run`, which takes its own system prompt and model. **Do not "tidy" this into the shared helper.**
+  2. **`dcf_engine` and `comps_engine` are unchanged.** They remain the anchor case: sector defaults, never overwritten, always shipped next to the judgment fields. Downstream consumers should not be repointed at `dcf_judgment`.
+  3. **§9 is enforced and tested.** A critique that returns prose, empty text, a JSON array, truncated JSON, or raises outright all degrade to base-case-only. `tests/test_valuation_wiring.py` covers all five plus the fenced-JSON case. A valuation must never hard-fail because the judgment layer did.
+  4. **Archetype comes from `_archetype_for()` — one source, canonical-first.** Both `canonical_metrics` and the engine output carry an archetype; using different ones per call site is how a bank ends up critiqued against the `general` card. Exemplars degrade to doctrine-only rather than borrowing another archetype's (§3), and that is tested.
+  5. **Acceptance check, free and repeatable:** re-grading `outputs/val02_baseline/NVDA_state_slice.json` with the judgment fields populated moves it 10/11 → 11/11 with criterion 9 flipping True. That proves the wiring emits the shape the grader expects. It does **not** prove the arguing is any good — that needs a live run and an after-baseline.
+- **Verification:** `python3 -m pytest tests/ -q` → **134 passed** (120 prior + 14 new). No graph node added; `main.py` and `routing.py` untouched.
+- **Status:** COMPLETED

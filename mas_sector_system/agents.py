@@ -43,11 +43,16 @@ from .tools import (
     multi_search,
 )
 from .validate import format_validation_for_prompt, validate_inputs
+from .valuation_doctrine import doctrine_block_for, exemplar_block_for
 from .valuation_engine import (
+    apply_peer_changes,
     compute_dcf_from_state,
+    compute_dcf_with_argued_inputs,
     fetch_peer_multiples,
     format_comps_for_prompt,
     format_dcf_for_prompt,
+    implied_value_from_multiple,
+    validate_argued_inputs,
 )
 
 
@@ -1236,6 +1241,175 @@ def bear_agent_node(state: ResearchState) -> dict:
 # 4. Fundamental Valuation Agent
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 4a. Argued-input critique (VALUATION_ICL_DESIGN.md §4–§6)
+#
+# The critique call is deliberately NOT routed through _run_with_shared_cache.
+# That helper pins SHARED_ANALYSIS_SYSTEM_PROMPT and is shared byte-for-byte by
+# bull / bear / fundamental / relative; sending an Opus call with a different
+# system prompt through it would fork the cached prefix and stop bull and bear
+# from sharing with the valuation agents. _run gives this call its own system
+# prompt and model while leaving the shared cache untouched.
+# ─────────────────────────────────────────────────────────────────────────────
+
+CRITIQUE_SYSTEM_PROMPT = """\
+You are a senior valuation analyst reviewing a deterministic engine's
+assumptions. The engine's ARITHMETIC is correct and is not in question. Your
+job is to judge whether its *inputs* are defensible for THIS company.
+
+You may not produce a fair value, a price target, or any currency amount.
+There is no field for one. You argue inputs; Python recomputes the value.
+
+Return ONE JSON object and nothing else:
+
+{
+  "archetype": "<echo the archetype given>",
+  "method_appropriate": true|false,
+  "method_reasoning": "<one or two sentences>",
+  "arguments": [
+    {
+      "parameter": "wacc" | "g_high" | "g_terminal" | "high_growth_years"
+                   | "fade_years" | "base_fcf_method",
+      "argued_range": [low, high],
+      "verdict": "too_high" | "too_low" | "defensible",
+      "reasoning": "<why, specific to this company>",
+      "evidence": ["<field id from the packet>", ...]
+    }
+  ],
+  "overall_confidence": "high" | "moderate" | "low"
+}
+
+Rules that are enforced in code — violating them silently discards your work:
+1. EVERY argument needs a non-empty "evidence" list naming real fields from the
+   packet (e.g. "balance_sheet.current_annual.NetDebt",
+   "canonical_metrics.revenue_growth", "dcf_engine.terminal_value_pv"). An
+   argument with no resolvable evidence is REJECTED and the engine default
+   stands. Do not cite a field you were not shown.
+2. Argue a RANGE, not a point. The engine runs both corners.
+3. "base_fcf_method" is an enum, not a number: its argued_range must be
+   ["<method>", "<method>"] where method is one of ttm, avg_3y, avg_5y,
+   mid_cycle. Use it when the base year is unrepresentative of mid-cycle.
+4. If a default is genuinely defensible, say so with verdict "defensible" —
+   do not manufacture disagreement.
+
+You can see the current share price. Do not reason backwards from it. Argue the
+assumptions from company evidence, and let the value land where it lands.
+"""
+
+RELATIVE_CRITIQUE_SYSTEM_PROMPT = """\
+You are a senior valuation analyst reviewing a deterministic peer-comps table.
+The multiples in it are correct. Your job is to judge whether the PEER SET is
+right and what multiple this company actually deserves.
+
+You may not produce a fair value or a currency amount. You argue the peer set
+and the multiple; Python recomputes the implied value.
+
+Return ONE JSON object and nothing else:
+
+{
+  "archetype": "<echo the archetype given>",
+  "primary_multiple": "forward_pe" | "trailing_pe" | "ev_ebitda" | "price_sales",
+  "multiple_reasoning": "<why this multiple for this business>",
+  "peer_changes": [
+    {"ticker": "<must already appear in the peer table>",
+     "action": "exclude" | "include",
+     "reasoning": "<why>",
+     "evidence": ["<field id>", ...]}
+  ],
+  "justified_multiple": {
+    "metric": "<same as primary_multiple>",
+    "argued_range": [low, high],
+    "reasoning": "<growth, margin, quality — why a premium or discount>",
+    "evidence": ["<field id>", ...]
+  },
+  "overall_confidence": "high" | "moderate" | "low"
+}
+
+Rules enforced in code:
+1. EVERY change and the justified multiple need non-empty "evidence" naming
+   real packet fields. No evidence means the item is REJECTED.
+2. You may only exclude or include tickers ALREADY IN THE PEER TABLE. A ticker
+   you invent is dropped.
+3. Argue a RANGE for the multiple, not a point.
+4. The multiple is clamped to a band around the peer median. Arguing far
+   outside it will be clipped, so make the argument proportionate.
+
+You can see the current price. Do not reverse-engineer a multiple that makes
+the stock look cheap.
+"""
+
+
+def _archetype_for(state: ResearchState, engine_out: Optional[dict] = None) -> str:
+    """Single source of archetype for doctrine, bands, and exemplars.
+
+    Both `canonical_metrics` and the engine output carry an archetype; using
+    different ones per call site is how you end up scoring a bank against the
+    `general` card. Prefer canonical (classified from filings), then the
+    engine's, then the catch-all.
+    """
+    cm = state.get("canonical_metrics")
+    if isinstance(cm, dict) and cm.get("archetype"):
+        return str(cm["archetype"])
+    if isinstance(engine_out, dict) and engine_out.get("archetype"):
+        return str(engine_out["archetype"])
+    return "general"
+
+
+def _icl_blocks(archetype: str) -> list[str]:
+    """Doctrine + archetype card + exemplars, in increasing specificity.
+
+    These ride in `extra_uncached` (after the cache breakpoint) so the shared
+    research packet stays byte-identical across bull/bear/fundamental/relative.
+    Missing exemplars degrade to doctrine-only rather than borrowing another
+    archetype's — a semis exemplar on a bank is worse than none.
+    """
+    blocks: list[str] = []
+    doctrine = doctrine_block_for(archetype)
+    if doctrine:
+        blocks.append(doctrine)
+    exemplars, available = exemplar_block_for(archetype)
+    if available and exemplars:
+        blocks.append(exemplars)
+    return blocks
+
+
+def _run_critique(
+    system_prompt: str,
+    packet: str,
+    engine_block: str,
+    icl_blocks: list[str],
+    *,
+    archetype: str,
+    label: str,
+) -> Optional[dict]:
+    """Opus critique call → parsed JSON, or None on any failure.
+
+    Never raises and never blocks the run: per design §9 a failed critique
+    means the base case ships alone, which is exactly today's behaviour.
+    """
+    user = "\n\n".join(
+        [packet, engine_block, *icl_blocks,
+         f"Archetype for this company: {archetype}\n"
+         "Critique the engine's inputs. Return only the JSON object."]
+    )
+    try:
+        raw = _run(
+            system_prompt,
+            user,
+            model=OPUS_MODEL,
+            max_tokens=MAX_TOKENS_OPUS,
+            label=label,
+        )
+    except Exception as exc:  # noqa: BLE001 - critique must never break a run
+        print(f"[{label}] critique call failed: {exc}", flush=True)
+        return None
+    parsed = _parse_json_blob(raw or "")
+    if not isinstance(parsed, dict):
+        print(f"[{label}] critique returned unparseable JSON — base case only", flush=True)
+        return None
+    return parsed
+
+
 FUNDAMENTAL_VALUATION_SYSTEM_PROMPT = """\
 You are a fundamental valuation analyst. A DETERMINISTIC Python DCF engine has
 already computed the base-case intrinsic value from SEC free-cash-flow history
@@ -1278,17 +1452,74 @@ def fundamental_valuation_node(state: ResearchState) -> dict:
         flush=True,
     )
 
-    # DCF engine block is agent-specific — place it AFTER the cache breakpoint
-    # so bull/bear/relative still share an identical cached research packet.
+    # ── Argued inputs (design §4–§6) ────────────────────────────────────────
+    # dcf is the ANCHOR case and is never overwritten. The critique proposes
+    # inputs; Python re-runs the same engine with them.
+    packet = _shared_research_payload(state)
+    archetype = _archetype_for(state, dcf)
+    icl = _icl_blocks(archetype)
+
+    critique = _run_critique(
+        CRITIQUE_SYSTEM_PROMPT,
+        packet,
+        dcf_block,
+        icl,
+        archetype=archetype,
+        label="fundamental:critique",
+    )
+
+    dcf_judgment: Optional[dict] = None
+    judgment_block = ""
+    if critique:
+        accepted, clamp_warnings = validate_argued_inputs(
+            critique,
+            archetype=archetype,
+            engine_default=dcf,
+            state=dict(state),
+        )
+        argued_params = [k for k in accepted if k != "band_dissents"]
+        if argued_params:
+            dcf_judgment = compute_dcf_with_argued_inputs(dict(state), accepted)
+            if isinstance(dcf_judgment, dict):
+                dcf_judgment["input_source"] = "argued"
+                dcf_judgment["clamp_warnings"] = clamp_warnings
+                dcf_judgment["band_dissents"] = accepted.get("band_dissents") or []
+                judgment_block = (
+                    "=== JUDGMENT CASE (same engine, argued inputs) ===\n"
+                    + format_dcf_for_prompt(dcf_judgment)
+                )
+        print(
+            f"[valuation:dcf:argued] archetype={archetype} "
+            f"accepted={argued_params} clamps={len(clamp_warnings)} "
+            f"dissents={len(accepted.get('band_dissents') or [])}",
+            flush=True,
+        )
+    else:
+        print("[valuation:dcf:argued] no critique — base case only", flush=True)
+
+    # Engine blocks and ICL material are agent-specific — placed AFTER the
+    # cache breakpoint so bull/bear/relative still share an identical packet.
+    extra = [dcf_block, *icl]
+    if judgment_block:
+        extra.append(judgment_block)
     text = _run_with_shared_cache(
-        _shared_research_payload(state),
+        packet,
         FUNDAMENTAL_VALUATION_SYSTEM_PROMPT
         + "\n\nProduce the fundamental valuation write-up from the engine "
-        "output and packet.",
+        "output and packet."
+        + (
+            "\n\nBoth a sector-default case and a judgment case (argued "
+            "inputs, same engine) are attached. Present BOTH: state the "
+            "default, then argue why the assumptions do or do not fit this "
+            "company, and give the judgment range. Never present the "
+            "judgment case as replacing the default."
+            if judgment_block
+            else ""
+        ),
         model=SONNET_MODEL,
         label="fundamental",
         max_tokens=MAX_TOKENS_SONNET,
-        extra_uncached=[dcf_block],
+        extra_uncached=extra,
     )
     # Hard fallback: never ship an empty fundamental field if the engine has numbers.
     if not (text or "").strip():
@@ -1299,8 +1530,14 @@ def fundamental_valuation_node(state: ResearchState) -> dict:
         )
     # Keep the structured engine output, not just the narrative about it —
     # downstream artifacts chart these numbers and cannot re-derive them
-    # from prose.
-    return {"fundamental_valuation": text, "dcf_engine": dcf}
+    # from prose. `dcf_engine` keeps its exact prior meaning (anchor case);
+    # the judgment fields are additive and may be None.
+    return {
+        "fundamental_valuation": text,
+        "dcf_engine": dcf,
+        "dcf_judgment": dcf_judgment,
+        "valuation_critique": critique,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1382,10 +1619,75 @@ def relative_valuation_node(state: ResearchState) -> dict:
             topic="finance",
         )
 
+    # ── Argued peer set + justified multiple (design §5) ────────────────────
+    packet = _shared_research_payload(state)
+    archetype = _archetype_for(state, comps)
+    icl = _icl_blocks(archetype)
+
+    relative_critique: Optional[dict] = None
+    comps_judgment: Optional[dict] = None
+    judgment_block = ""
+    if comps_block:
+        relative_critique = _run_critique(
+            RELATIVE_CRITIQUE_SYSTEM_PROMPT,
+            packet,
+            comps_block,
+            icl,
+            archetype=archetype,
+            label="relative:critique",
+        )
+    if relative_critique:
+        try:
+            adjusted = apply_peer_changes(
+                comps, relative_critique.get("peer_changes") or []
+            )
+            jm = relative_critique.get("justified_multiple") or {}
+            rng = jm.get("argued_range") or []
+            metric = jm.get("metric") or "forward_pe"
+            corners = []
+            for bound in rng[:2]:
+                try:
+                    corners.append(
+                        implied_value_from_multiple(
+                            metric=str(metric),
+                            multiple=float(bound),
+                            comps=adjusted,
+                            state=dict(state),
+                        )
+                    )
+                except (TypeError, ValueError):
+                    continue
+            if corners:
+                comps_judgment = {
+                    "input_source": "argued",
+                    "metric": metric,
+                    "adjusted_comps": adjusted,
+                    "corners": corners,
+                    "clamp_warnings": adjusted.get("clamp_warnings") or [],
+                }
+                judgment_block = (
+                    "=== JUDGMENT CASE (argued peer set + justified multiple) ===\n"
+                    + json.dumps(comps_judgment.get("corners"), indent=2, default=str)
+                )
+        except Exception as exc:  # noqa: BLE001 - never break the run
+            print(f"[valuation:comps:argued] failed: {exc}", flush=True)
+            comps_judgment = None
+        print(
+            f"[valuation:comps:argued] archetype={archetype} "
+            f"peer_changes={len(relative_critique.get('peer_changes') or [])} "
+            f"corners={len((comps_judgment or {}).get('corners') or [])}",
+            flush=True,
+        )
+    else:
+        print("[valuation:comps:argued] no critique — base case only", flush=True)
+
     # Comps table + peer narrative are agent-specific — after the cache breakpoint.
     extra: list[str] = []
     if comps_block:
         extra.append(comps_block)
+    extra.extend(icl)
+    if judgment_block:
+        extra.append(judgment_block)
     if peer_research:
         extra.append(
             "=== PEER NARRATIVE WEB RESEARCH (Tavily, secondary) ===\n"
@@ -1393,10 +1695,17 @@ def relative_valuation_node(state: ResearchState) -> dict:
         )
 
     text = _run_with_shared_cache(
-        _shared_research_payload(state),
+        packet,
         RELATIVE_VALUATION_SYSTEM_PROMPT
         + "\n\nProduce the relative valuation write-up from the comps table "
-        "and packet.",
+        "and packet."
+        + (
+            "\n\nAn argued peer set and justified-multiple range are attached. "
+            "Present the peer-median read first, then the justified multiple "
+            "and what it implies, naming any peer you excluded and why."
+            if judgment_block
+            else ""
+        ),
         model=SONNET_MODEL,
         label="relative",
         max_tokens=MAX_TOKENS_SONNET,
@@ -1409,7 +1718,13 @@ def relative_valuation_node(state: ResearchState) -> dict:
             + (comps_block or "No peer comps available.")
         )
     # Structured peer table travels with the narrative — see dcf_engine above.
-    return {"relative_valuation": text, "comps_engine": comps}
+    # `comps_engine` keeps its exact prior meaning (anchor case).
+    return {
+        "relative_valuation": text,
+        "comps_engine": comps,
+        "comps_judgment": comps_judgment,
+        "relative_critique": relative_critique,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

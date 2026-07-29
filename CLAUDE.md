@@ -86,7 +86,16 @@ When an agent node runs, it may use `state["sector"]` for valuation defaults (WA
 | Heavy foundation | `data_gatherer` | Claude Opus (`claude-opus-5`) |
 | Analytical writers | `business_overview`, `macro_regime`, `management_track_record`, `capital_allocation`, `bull`, `bear`, `fundamental`, `relative`, `screener`, `style_pass` | Claude Sonnet (`claude-sonnet-5`) |
 | Senior writer / gate | `synthesis`, `qc` | Claude Opus (`claude-opus-5`) |
+| **Valuation critique** | `fundamental:critique`, `relative:critique` | **Claude Opus (`claude-opus-5`)** |
 | Router | entry / `route_by_mode` / QC routers | Deterministic code — no LLM |
+
+**Why the critique calls are Opus.** Arguing whether a sector-default WACC fits
+a specific company is the hardest reasoning in the pipeline and the cheapest
+place to buy quality (~$0.15–0.30/run). The narrative calls stay on Sonnet.
+These calls deliberately do **not** route through `_run_with_shared_cache`: that
+helper pins `SHARED_ANALYSIS_SYSTEM_PROMPT` and is shared byte-for-byte by
+bull / bear / fundamental / relative, so a differently-prompted Opus call
+through it would fork the cached prefix. They use `_run` instead.
 
 **Historical note:** An earlier CLAUDE.md revision mapped workers to Claude Haiku 4.5 and included a Sonnet/Opus red-team critic. That mapping was from a pre–SEC/deep-dive rework compliance pass and is **not** current. Do not silently downgrade bull/bear/overview to Haiku without an explicit product decision. Red team was deliberately removed.
 
