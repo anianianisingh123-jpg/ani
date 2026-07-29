@@ -6,7 +6,50 @@ LLM nodes narrate these numbers — they do not invent the core math.
 
 from __future__ import annotations
 
+from copy import deepcopy
+from statistics import median
 from typing import Any, Optional
+
+
+ARGUED_INPUT_BOUNDS: dict[str, tuple[float, float]] = {
+    "wacc": (0.05, 0.20),
+    "g_terminal": (0.0, 0.035),
+    "g_high": (-0.10, 0.40),
+    "high_growth_years": (3, 10),
+    "fade_years": (2, 10),
+    # For justified_multiple these are peer-median multipliers. Absolute
+    # metric bounds are applied as a second clamp below.
+    "justified_multiple": (0.25, 3.0),
+}
+
+_MULTIPLE_ABSOLUTE_BOUNDS: dict[str, tuple[float, float]] = {
+    "forward_pe": (3.0, 100.0),
+    "trailing_pe": (3.0, 150.0),
+    "ev_ebitda": (2.0, 60.0),
+    "price_sales": (0.2, 40.0),
+}
+
+_MULTIPLE_TO_COMPS_KEY = {
+    "forward_pe": "forward_pe",
+    "trailing_pe": "trailing_pe",
+    "ev_ebitda": "ev_to_ebitda",
+    "price_sales": "price_to_sales",
+}
+
+_ALLOWED_EVIDENCE_ROOTS = {
+    "canonical_metrics",
+    "income_statement",
+    "balance_sheet",
+    "cash_flow_statement",
+    "comps_engine",
+    "dcf_engine",
+    "business_overview",
+    "macro_regime_assessment",
+    "management_assessment",
+    "capital_allocation_assessment",
+}
+
+_BASE_FCF_METHODS = {"ttm", "avg_3y", "avg_5y", "mid_cycle"}
 
 
 # Default peer sets by sector keyword (uppercase match against state["sector"]).
@@ -103,6 +146,388 @@ def extract_fcf_series(cash_flow: dict) -> dict[str, Optional[float]]:
                 fcf = ocf - abs(capex)
         out[period] = fcf
     return out
+
+
+def fcf_history(state: dict) -> list[dict[str, Any]]:
+    """Return filing-derived annual FCF and revenue, newest first.
+
+    Rows are aligned by the producer's explicit rank. Negative FCF is retained.
+    Missing ranks are omitted rather than synthesized.
+    """
+    cash_rows = (state.get("cash_flow_statement") or {}).get("annual_series") or []
+    income_rows = (state.get("income_statement") or {}).get("annual_series") or []
+    income_by_rank = {
+        row.get("rank"): row
+        for row in income_rows
+        if isinstance(row, dict) and isinstance(row.get("rank"), int)
+    }
+    history: list[dict[str, Any]] = []
+    for cash_row in cash_rows:
+        if not isinstance(cash_row, dict) or not isinstance(cash_row.get("rank"), int):
+            continue
+        rank = cash_row["rank"]
+        fcf = _line_value(cash_row, "FreeCashFlow")
+        if fcf is None:
+            ocf = _line_value(cash_row, "NetCashFromOperatingActivities")
+            capex = _line_value(cash_row, "CapitalExpenditures")
+            if ocf is not None and capex is not None:
+                fcf = ocf - abs(capex)
+        if fcf is None:
+            continue
+        income_row = income_by_rank.get(rank) or {}
+        history.append(
+            {
+                "rank": rank,
+                "fy": cash_row.get("fy") or income_row.get("fy"),
+                "fcf": float(fcf),
+                "revenue": _line_value(income_row, "Revenues"),
+            }
+        )
+    history.sort(key=lambda row: row["rank"])
+    return history
+
+
+def _evidence_value(state: dict, field_id: str) -> Any:
+    if not isinstance(field_id, str) or not field_id.strip():
+        return None
+    parts = field_id.strip().split(".")
+    if parts[0] not in _ALLOWED_EVIDENCE_ROOTS:
+        return None
+    current: Any = state
+    for index, part in enumerate(parts):
+        if isinstance(current, dict):
+            if part in current:
+                current = current[part]
+                continue
+            if parts[0] == "canonical_metrics":
+                by_id = current.get("by_id")
+                if isinstance(by_id, dict) and part in by_id:
+                    current = by_id[part]
+                    continue
+            if part == "peer_rows" and isinstance(
+                current.get("candidate_rows") or current.get("peers"), list
+            ):
+                current = current.get("candidate_rows") or current["peers"]
+                continue
+            return None
+        if isinstance(current, list):
+            match = next(
+                (
+                    item
+                    for item in current
+                    if isinstance(item, dict)
+                    and str(item.get("ticker") or item.get("id") or item.get("rank"))
+                    == part
+                ),
+                None,
+            )
+            if match is None:
+                return None
+            current = match
+            continue
+        if index < len(parts):
+            return None
+    if isinstance(current, dict) and "value" in current:
+        current = current.get("value")
+    return current
+
+
+def _has_resolvable_evidence(state: dict, evidence: Any) -> bool:
+    if not isinstance(evidence, list) or not evidence:
+        return False
+    return any(_evidence_value(state, field_id) is not None for field_id in evidence)
+
+
+def _default_value(engine_default: dict, parameter: str) -> Any:
+    if parameter == "base_fcf_method":
+        return "ttm"
+    assumptions = engine_default.get("assumptions")
+    if isinstance(assumptions, dict) and parameter in assumptions:
+        return assumptions[parameter]
+    return engine_default.get(parameter)
+
+
+def _clamp_number(
+    value: Any,
+    *,
+    parameter: str,
+    bounds: tuple[float, float],
+    integer: bool,
+    warnings: list[str],
+) -> Optional[float | int]:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        warnings.append(f"{parameter} rejected: non-numeric value {value!r}")
+        return None
+    if number != number:
+        warnings.append(f"{parameter} rejected: NaN is not permitted")
+        return None
+    if integer:
+        rounded = int(round(number))
+        if rounded != number:
+            warnings.append(f"{parameter} rounded to integer {rounded}")
+        number = float(rounded)
+    clamped = max(bounds[0], min(number, bounds[1]))
+    if clamped != number:
+        warnings.append(
+            f"{parameter} clamped from {number:g} to {clamped:g} "
+            f"within [{bounds[0]:g}, {bounds[1]:g}]"
+        )
+    return int(clamped) if integer else clamped
+
+
+def _argument_band(archetype: str, parameter: str) -> Optional[tuple[float, float]]:
+    try:
+        from .valuation_doctrine import band_for
+
+        return band_for(archetype, parameter)
+    except (ImportError, KeyError, TypeError, ValueError):
+        return None
+
+
+def validate_argued_inputs(
+    proposed: dict,
+    *,
+    archetype: str,
+    engine_default: dict,
+    state: dict,
+) -> tuple[dict, list[str]]:
+    """Validate evidence-backed argued ranges and enforce all hard clamps."""
+    accepted: dict[str, Any] = {"band_dissents": []}
+    warnings: list[str] = []
+    arguments = proposed.get("arguments") if isinstance(proposed, dict) else None
+    if not isinstance(arguments, list):
+        arguments = []
+
+    for raw in arguments:
+        if not isinstance(raw, dict):
+            warnings.append("argued input rejected: argument is not an object")
+            continue
+        parameter = raw.get("parameter")
+        if parameter not in {*ARGUED_INPUT_BOUNDS, "base_fcf_method"}:
+            warnings.append(f"argued input rejected: unsupported parameter {parameter!r}")
+            continue
+        if not _has_resolvable_evidence(state, raw.get("evidence")):
+            warnings.append(
+                f"{parameter} rejected: evidence list is empty or unresolvable; "
+                f"reverted to engine default {_default_value(engine_default, parameter)!r}"
+            )
+            continue
+
+        if parameter == "base_fcf_method":
+            method = raw.get("value", raw.get("argued_value"))
+            if method not in _BASE_FCF_METHODS:
+                warnings.append(
+                    f"base_fcf_method rejected: {method!r} is not one of "
+                    f"{sorted(_BASE_FCF_METHODS)}"
+                )
+                continue
+            accepted[parameter] = {
+                **raw,
+                "value": method,
+                "engine_default": _default_value(engine_default, parameter),
+            }
+            continue
+
+        argued_range = raw.get("argued_range")
+        if not isinstance(argued_range, (list, tuple)) or len(argued_range) != 2:
+            warnings.append(f"{parameter} rejected: argued_range must contain [lo, hi]")
+            continue
+        integer = parameter in {"high_growth_years", "fade_years"}
+        bounds = ARGUED_INPUT_BOUNDS[parameter]
+        lo = _clamp_number(
+            argued_range[0],
+            parameter=parameter,
+            bounds=bounds,
+            integer=integer,
+            warnings=warnings,
+        )
+        hi = _clamp_number(
+            argued_range[1],
+            parameter=parameter,
+            bounds=bounds,
+            integer=integer,
+            warnings=warnings,
+        )
+        if lo is None or hi is None:
+            continue
+        if lo > hi:
+            lo, hi = hi, lo
+            warnings.append(f"{parameter} argued_range reordered to [{lo:g}, {hi:g}]")
+
+        band = _argument_band(archetype, parameter)
+        outside_band = bool(band and (lo < band[0] or hi > band[1]))
+        reasoning = str(raw.get("reasoning") or "").strip()
+        if outside_band and not reasoning:
+            warnings.append(
+                f"{parameter} rejected: range [{lo:g}, {hi:g}] is outside "
+                f"the {archetype} band {band} and requires reasoning"
+            )
+            continue
+        sanitized = {
+            **raw,
+            "argued_range": [lo, hi],
+            "engine_default": _default_value(engine_default, parameter),
+        }
+        accepted[parameter] = sanitized
+        if outside_band:
+            accepted["band_dissents"].append(
+                {
+                    "parameter": parameter,
+                    "argued_range": [lo, hi],
+                    "archetype_band": list(band),
+                    "reasoning": reasoning,
+                    "evidence": list(raw.get("evidence") or []),
+                }
+            )
+
+    justified = proposed.get("justified_multiple") if isinstance(proposed, dict) else None
+    if isinstance(justified, dict):
+        parameter = "justified_multiple"
+        if not _has_resolvable_evidence(state, justified.get("evidence")):
+            warnings.append(
+                "justified_multiple rejected: evidence list is empty or unresolvable"
+            )
+        else:
+            metric = str(justified.get("metric") or "")
+            comps_key = _MULTIPLE_TO_COMPS_KEY.get(metric)
+            peer_medians = engine_default.get("peer_medians") or {}
+            peer_median = peer_medians.get(comps_key) if comps_key else None
+            try:
+                peer_median_f = float(peer_median)
+            except (TypeError, ValueError):
+                peer_median_f = 0.0
+            if metric not in _MULTIPLE_ABSOLUTE_BOUNDS or peer_median_f <= 0:
+                warnings.append(
+                    f"justified_multiple rejected: unsupported metric {metric!r} "
+                    "or unavailable peer median"
+                )
+            else:
+                ratio_bounds = ARGUED_INPUT_BOUNDS["justified_multiple"]
+                absolute = _MULTIPLE_ABSOLUTE_BOUNDS[metric]
+                bounds = (
+                    max(absolute[0], ratio_bounds[0] * peer_median_f),
+                    min(absolute[1], ratio_bounds[1] * peer_median_f),
+                )
+                argued_range = justified.get("argued_range")
+                if (
+                    not isinstance(argued_range, (list, tuple))
+                    or len(argued_range) != 2
+                ):
+                    warnings.append(
+                        "justified_multiple rejected: argued_range must contain [lo, hi]"
+                    )
+                else:
+                    lo = _clamp_number(
+                        argued_range[0],
+                        parameter=parameter,
+                        bounds=bounds,
+                        integer=False,
+                        warnings=warnings,
+                    )
+                    hi = _clamp_number(
+                        argued_range[1],
+                        parameter=parameter,
+                        bounds=bounds,
+                        integer=False,
+                        warnings=warnings,
+                    )
+                    if lo is not None and hi is not None:
+                        if lo > hi:
+                            lo, hi = hi, lo
+                            warnings.append(
+                                "justified_multiple argued_range reordered "
+                                f"to [{lo:g}, {hi:g}]"
+                            )
+                        band = _argument_band(archetype, parameter)
+                        reasoning = str(justified.get("reasoning") or "").strip()
+                        outside_band = bool(
+                            band and (lo < band[0] or hi > band[1])
+                        )
+                        if outside_band and not reasoning:
+                            warnings.append(
+                                "justified_multiple rejected: out-of-band dissent "
+                                "requires reasoning"
+                            )
+                        else:
+                            accepted[parameter] = {
+                                **justified,
+                                "argued_range": [lo, hi],
+                                "peer_median": peer_median_f,
+                            }
+                            if outside_band:
+                                accepted["band_dissents"].append(
+                                    {
+                                        "parameter": parameter,
+                                        "metric": metric,
+                                        "argued_range": [lo, hi],
+                                        "archetype_band": list(band),
+                                        "reasoning": reasoning,
+                                        "evidence": list(
+                                            justified.get("evidence") or []
+                                        ),
+                                    }
+                                )
+
+    peer_changes = proposed.get("peer_changes") if isinstance(proposed, dict) else None
+    if isinstance(peer_changes, list):
+        accepted_changes = []
+        for change in peer_changes:
+            if not isinstance(change, dict):
+                warnings.append("peer change rejected: change is not an object")
+                continue
+            if not _has_resolvable_evidence(state, change.get("evidence")):
+                warnings.append(
+                    f"peer change for {change.get('ticker')!r} rejected: "
+                    "evidence list is empty or unresolvable"
+                )
+                continue
+            if change.get("action") not in {"include", "exclude"}:
+                warnings.append(
+                    f"peer change for {change.get('ticker')!r} rejected: invalid action"
+                )
+                continue
+            accepted_changes.append(dict(change))
+        accepted["peer_changes"] = accepted_changes
+
+    # The Gordon-spread rule is enforced after all independent clamps so it
+    # applies whether either input was argued or inherited from the engine.
+    default_wacc = _default_value(engine_default, "wacc")
+    default_g_terminal = _default_value(engine_default, "g_terminal")
+    wacc_range = (accepted.get("wacc") or {}).get(
+        "argued_range", [default_wacc, default_wacc]
+    )
+    terminal = accepted.get("g_terminal")
+    terminal_range = (terminal or {}).get(
+        "argued_range", [default_g_terminal, default_g_terminal]
+    )
+    if all(isinstance(v, (int, float)) for v in [*wacc_range, *terminal_range]):
+        constrained = [
+            min(float(terminal_range[i]), float(wacc_range[i]) - 0.015)
+            for i in (0, 1)
+        ]
+        constrained = [max(0.0, value) for value in constrained]
+        if constrained != [float(terminal_range[0]), float(terminal_range[1])]:
+            warnings.append(
+                "g_terminal clamped to preserve g_terminal <= wacc - 0.015: "
+                f"{list(terminal_range)} -> {constrained}"
+            )
+        if terminal or constrained != [default_g_terminal, default_g_terminal]:
+            source = terminal or {
+                "parameter": "g_terminal",
+                "reasoning": "mathematical Gordon-growth constraint",
+                "evidence": list(
+                    (accepted.get("wacc") or {}).get("evidence") or []
+                ),
+                "engine_default": default_g_terminal,
+                "constraint_applied": True,
+            }
+            accepted["g_terminal"] = {**source, "argued_range": constrained}
+
+    if not accepted["band_dissents"]:
+        accepted.pop("band_dissents")
+    return accepted, warnings
 
 
 def extract_income_basics(income: dict) -> dict[str, Optional[float]]:
@@ -734,6 +1159,316 @@ def compute_dcf_from_state(state: dict) -> dict[str, Any]:
     return dcf
 
 
+def _argued_corner(
+    argued: dict, parameter: str, corner: int, default: Any
+) -> Any:
+    entry = argued.get(parameter)
+    if isinstance(entry, dict):
+        values = entry.get("argued_range")
+        if isinstance(values, (list, tuple)) and len(values) == 2:
+            return values[corner]
+    return default
+
+
+def _normalized_base_fcf(
+    state: dict, method: str
+) -> tuple[Optional[float], str, list[str]]:
+    warnings: list[str] = []
+    ttm = extract_fcf_series(state.get("cash_flow_statement") or {}).get(
+        "current_annual"
+    )
+    if method == "ttm":
+        return ttm, "ttm", warnings
+
+    history = fcf_history(state)
+    required = 3 if method in {"avg_3y", "mid_cycle"} else 5
+    if method in {"avg_3y", "avg_5y"}:
+        rows = [row for row in history if row["rank"] < required]
+        expected_ranks = set(range(required))
+        found_ranks = {row["rank"] for row in rows}
+        if found_ranks != expected_ranks:
+            warnings.append(
+                f"{method} requested, {len(found_ranks)} annual periods available "
+                "— fell back to ttm"
+            )
+            return ttm, "ttm", warnings
+        return (
+            sum(float(row["fcf"]) for row in rows) / required,
+            method,
+            warnings,
+        )
+
+    # mid_cycle uses every available annual observation (maximum five),
+    # retains negative FCF, and normalizes margin back onto current revenue.
+    if method == "mid_cycle":
+        if len(history) < required:
+            warnings.append(
+                f"mid_cycle requested, {len(history)} annual periods available "
+                "— fell back to ttm"
+            )
+            return ttm, "ttm", warnings
+        current = next((row for row in history if row["rank"] == 0), None)
+        missing_revenue = [
+            row["rank"] for row in history if row.get("revenue") is None
+        ]
+        if (
+            current is None
+            or current.get("revenue") is None
+            or float(current["revenue"]) == 0
+            or missing_revenue
+            or any(float(row["revenue"]) == 0 for row in history)
+        ):
+            warnings.append(
+                "mid_cycle requested but annual revenue is missing or zero "
+                f"for ranks {missing_revenue}; fell back to ttm"
+            )
+            return ttm, "ttm", warnings
+        margins = [
+            float(row["fcf"]) / float(row["revenue"]) for row in history
+        ]
+        return (
+            float(median(margins)) * float(current["revenue"]),
+            method,
+            warnings,
+        )
+
+    warnings.append(f"unknown base_fcf_method {method!r}; fell back to ttm")
+    return ttm, "ttm", warnings
+
+
+def _recompute_dcf_case(
+    base: dict[str, Any],
+    *,
+    base_fcf: Optional[float],
+    base_fcf_method: str,
+    wacc: float,
+    g_high: float,
+    g_terminal: float,
+    high_growth_years: int,
+    fade_years: int,
+) -> dict[str, Any]:
+    result = deepcopy(base)
+    result["input_source"] = "argued"
+    result["errors"] = []
+    result["warnings"] = list(base.get("warnings") or [])
+    result.setdefault("inputs", {})["base_fcf_annual"] = base_fcf
+    result["inputs"]["base_fcf_method"] = base_fcf_method
+    result["assumptions"] = {
+        **(base.get("assumptions") or {}),
+        "wacc": float(wacc),
+        "g_high": float(g_high),
+        "g_terminal": float(g_terminal),
+        "high_growth_years": int(high_growth_years),
+        "fade_years": int(fade_years),
+        "input_source": "argued",
+    }
+    result["projections"] = []
+    result["enterprise_value"] = None
+    result["equity_value"] = None
+    result["fair_value_per_share"] = None
+    result["fair_value_range"] = None
+    result["implied_upside_vs_price"] = None
+    result["epv_per_share"] = None
+
+    if base_fcf is None or base_fcf <= 0:
+        result["errors"].append(
+            "Cannot run argued FCF DCF: normalized base FCF missing or non-positive."
+        )
+        result["confidence"] = "none"
+        return result
+    if g_terminal > wacc - 0.015:
+        result["errors"].append(
+            "Invalid argued inputs: g_terminal must be <= wacc - 0.015."
+        )
+        result["confidence"] = "none"
+        return result
+
+    projections: list[dict[str, Any]] = []
+    fcf_t = float(base_fcf)
+    total_pv = 0.0
+    year = 0
+    for year in range(1, int(high_growth_years) + 1):
+        fcf_t *= 1.0 + float(g_high)
+        pv = fcf_t / ((1.0 + float(wacc)) ** year)
+        total_pv += pv
+        projections.append(
+            {
+                "year": year,
+                "stage": "high_growth",
+                "growth": float(g_high),
+                "fcf": fcf_t,
+                "pv": pv,
+            }
+        )
+    for offset in range(1, int(fade_years) + 1):
+        year = int(high_growth_years) + offset
+        weight = offset / float(fade_years)
+        growth = float(g_high) + (
+            float(g_terminal) - float(g_high)
+        ) * weight
+        fcf_t *= 1.0 + growth
+        pv = fcf_t / ((1.0 + float(wacc)) ** year)
+        total_pv += pv
+        projections.append(
+            {
+                "year": year,
+                "stage": "fade",
+                "growth": growth,
+                "fcf": fcf_t,
+                "pv": pv,
+            }
+        )
+    terminal_value = (
+        fcf_t * (1.0 + float(g_terminal))
+    ) / (float(wacc) - float(g_terminal))
+    terminal_value_pv = terminal_value / ((1.0 + float(wacc)) ** year)
+    enterprise_value = total_pv + terminal_value_pv
+    net_debt = result["inputs"].get("net_debt")
+    equity_value = (
+        enterprise_value - float(net_debt)
+        if isinstance(net_debt, (int, float))
+        else enterprise_value
+    )
+    shares = result["inputs"].get("shares_outstanding")
+    price = result["inputs"].get("price")
+
+    result["projections"] = projections
+    result["terminal_value"] = terminal_value
+    result["terminal_value_pv"] = terminal_value_pv
+    result["enterprise_value"] = enterprise_value
+    result["equity_value"] = equity_value
+    if isinstance(shares, (int, float)) and shares > 0:
+        fair_value = equity_value / float(shares)
+        result["fair_value_per_share"] = fair_value
+        result["fair_value_range"] = {
+            "low": fair_value,
+            "base": fair_value,
+            "high": fair_value,
+            "basis": "single argued-input corner; judgment wrapper carries the range",
+        }
+        if isinstance(price, (int, float)) and price > 0:
+            result["implied_upside_vs_price"] = fair_value / float(price) - 1.0
+        epv_equity = float(base_fcf) / float(wacc)
+        if isinstance(net_debt, (int, float)):
+            epv_equity -= float(net_debt)
+        result["epv_per_share"] = epv_equity / float(shares)
+    return result
+
+
+def compute_dcf_with_argued_inputs(state: dict, argued: dict) -> dict[str, Any]:
+    """Re-run the deterministic DCF at both accepted argued-range corners."""
+    base = compute_dcf_from_state(state)
+    if base.get("method") not in {
+        "multi_stage_fcf_dcf",
+        "cycle_normalized_fcf_dcf_placeholder_trailing_base",
+    }:
+        result = deepcopy(base)
+        result["input_source"] = "argued"
+        result["clamp_warnings"] = [
+            "Argued FCF inputs not applied: the archetype does not use an FCF DCF."
+        ]
+        result["band_dissents"] = list(argued.get("band_dissents") or [])
+        return result
+
+    assumptions = base.get("assumptions") or {}
+    method_entry = argued.get("base_fcf_method")
+    method = (
+        method_entry.get("value")
+        if isinstance(method_entry, dict)
+        else method_entry
+    ) or "ttm"
+    normalized_fcf, applied_method, normalization_warnings = _normalized_base_fcf(
+        state, str(method)
+    )
+
+    cases = []
+    for corner in (0, 1):
+        wacc = float(
+            _argued_corner(argued, "wacc", corner, assumptions.get("wacc"))
+        )
+        g_terminal = float(
+            _argued_corner(
+                argued, "g_terminal", corner, assumptions.get("g_terminal")
+            )
+        )
+        # Defense in depth: callers may bypass validate_argued_inputs.
+        g_terminal = max(0.0, min(g_terminal, wacc - 0.015))
+        cases.append(
+            _recompute_dcf_case(
+                base,
+                base_fcf=normalized_fcf,
+                base_fcf_method=applied_method,
+                wacc=wacc,
+                g_high=float(
+                    _argued_corner(
+                        argued, "g_high", corner, assumptions.get("g_high")
+                    )
+                ),
+                g_terminal=g_terminal,
+                high_growth_years=int(
+                    _argued_corner(
+                        argued,
+                        "high_growth_years",
+                        corner,
+                        assumptions.get("high_growth_years"),
+                    )
+                ),
+                fade_years=int(
+                    _argued_corner(
+                        argued,
+                        "fade_years",
+                        corner,
+                        assumptions.get("fade_years"),
+                    )
+                ),
+            )
+        )
+
+    low_case, high_case = cases
+    values = [
+        case.get("fair_value_per_share")
+        for case in cases
+        if isinstance(case.get("fair_value_per_share"), (int, float))
+    ]
+    result = deepcopy(base)
+    result.update(
+        {
+            "input_source": "argued",
+            "base_engine": base,
+            "low_case": low_case,
+            "high_case": high_case,
+            "fair_value_per_share": None,
+            "fair_value_range": (
+                {
+                    "low": min(values),
+                    "base": None,
+                    "high": max(values),
+                    "basis": "two argued-input range corners",
+                }
+                if values
+                else None
+            ),
+            "clamp_warnings": normalization_warnings,
+            "band_dissents": list(argued.get("band_dissents") or []),
+            "assumptions": {
+                "low": low_case.get("assumptions"),
+                "high": high_case.get("assumptions"),
+                "base_fcf_method_requested": method,
+                "base_fcf_method_applied": applied_method,
+            },
+            "errors": list(
+                dict.fromkeys(
+                    [
+                        *(low_case.get("errors") or []),
+                        *(high_case.get("errors") or []),
+                    ]
+                )
+            ),
+        }
+    )
+    return result
+
+
 # ── Peer multiples (yfinance) ────────────────────────────────────────────────
 
 def _yf_info(ticker: str) -> dict[str, Any]:
@@ -996,6 +1731,20 @@ def fetch_peer_multiples(
     peers = peers[:8]
 
     peer_rows = [_row_from_info(p, _yf_info(p)) for p in peers]
+    candidate_pool = list(
+        dict.fromkeys(
+            p
+            for p in [*raw_peers, *peers]
+            if p and p != subject
+        )
+    )
+    peer_rows_by_ticker = {
+        str(row.get("ticker") or "").upper(): row for row in peer_rows
+    }
+    candidate_rows = [
+        peer_rows_by_ticker.get(ticker) or _row_from_info(ticker, _yf_info(ticker))
+        for ticker in candidate_pool
+    ]
 
     # Peer medians for key multiples
     def _median(key: str) -> Optional[float]:
@@ -1075,12 +1824,266 @@ def fetch_peer_multiples(
         "relative_read": relative,
         "overall_vs_peers": overall,
         "peer_list": peers,
+        "candidate_pool": candidate_pool,
+        "candidate_rows": candidate_rows,
         "subject_archetype": arch,
         "peer_exclusions": exclusions,
         "peer_source": peer_source,
         "notes": notes,
         "relative_valuation_applicable": len(peers) >= 2,
     }
+
+
+def _median_from_rows(rows: list[dict[str, Any]], key: str) -> Optional[float]:
+    values = [
+        float(row[key])
+        for row in rows
+        if isinstance(row, dict)
+        and isinstance(row.get(key), (int, float))
+        and float(row[key]) == float(row[key])
+    ]
+    if not values:
+        return None
+    return float(median(values))
+
+
+def _relative_label(subject_value: Any, peer_median: Any) -> Optional[str]:
+    if (
+        not isinstance(subject_value, (int, float))
+        or not isinstance(peer_median, (int, float))
+        or peer_median == 0
+    ):
+        return None
+    ratio = float(subject_value) / float(peer_median)
+    label = "cheap" if ratio < 0.85 else "rich" if ratio > 1.15 else "fair"
+    return f"{label} ({ratio:.2f}x peer median)"
+
+
+def apply_peer_changes(comps: dict, changes: list[dict]) -> dict:
+    """Apply evidence-vetted include/exclude choices without fetching data."""
+    result = deepcopy(comps)
+    current_rows = [
+        dict(row) for row in result.get("peers") or [] if isinstance(row, dict)
+    ]
+    current_by_ticker = {
+        str(row.get("ticker") or "").upper(): row
+        for row in current_rows
+        if row.get("ticker")
+    }
+    candidate_rows = [
+        row
+        for key in ("candidate_rows", "peer_candidates", "peers")
+        for row in (result.get(key) or [])
+        if isinstance(row, dict)
+    ]
+    candidate_by_ticker = {
+        str(row.get("ticker") or "").upper(): dict(row)
+        for row in candidate_rows
+        if row.get("ticker")
+    }
+    candidate_pool = {
+        str(ticker).upper()
+        for ticker in [
+            *(result.get("candidate_pool") or []),
+            *(result.get("peer_list") or []),
+            *candidate_by_ticker.keys(),
+        ]
+        if ticker
+    }
+    warnings = list(result.get("clamp_warnings") or [])
+    applied: list[dict[str, Any]] = []
+
+    for change in changes or []:
+        if not isinstance(change, dict):
+            warnings.append("peer change ignored: change is not an object")
+            continue
+        ticker = str(change.get("ticker") or "").strip().upper()
+        action = change.get("action")
+        if not ticker or action not in {"include", "exclude"}:
+            warnings.append(f"peer change ignored: invalid change {change!r}")
+            continue
+        if action == "exclude":
+            if ticker not in current_by_ticker:
+                warnings.append(
+                    f"peer exclusion ignored: {ticker} is not in the active peer set"
+                )
+                continue
+            current_by_ticker.pop(ticker)
+            applied.append(dict(change))
+            continue
+        if ticker not in candidate_pool or ticker not in candidate_by_ticker:
+            warnings.append(
+                f"peer inclusion rejected: {ticker} is not an engine candidate "
+                "with an existing data row"
+            )
+            continue
+        current_by_ticker[ticker] = dict(candidate_by_ticker[ticker])
+        applied.append(dict(change))
+
+    ordered_tickers = [
+        str(row.get("ticker") or "").upper()
+        for row in current_rows
+        if str(row.get("ticker") or "").upper() in current_by_ticker
+    ]
+    for change in applied:
+        ticker = str(change.get("ticker") or "").upper()
+        if change.get("action") == "include" and ticker not in ordered_tickers:
+            ordered_tickers.append(ticker)
+    rows = [current_by_ticker[ticker] for ticker in ordered_tickers]
+    median_keys = (
+        "trailing_pe",
+        "forward_pe",
+        "ev_to_ebitda",
+        "price_to_sales",
+        "ev_to_revenue",
+        "price_to_book",
+    )
+    medians = {key: _median_from_rows(rows, key) for key in median_keys}
+    subject = result.get("subject") or {}
+    relative = {
+        "trailing_pe_vs_peers": _relative_label(
+            subject.get("trailing_pe"), medians["trailing_pe"]
+        ),
+        "forward_pe_vs_peers": _relative_label(
+            subject.get("forward_pe"), medians["forward_pe"]
+        ),
+        "ev_ebitda_vs_peers": _relative_label(
+            subject.get("ev_to_ebitda"), medians["ev_to_ebitda"]
+        ),
+        "ps_vs_peers": _relative_label(
+            subject.get("price_to_sales"), medians["price_to_sales"]
+        ),
+    }
+    votes = [
+        label.split()[0] for label in relative.values() if isinstance(label, str)
+    ]
+    result.update(
+        {
+            "peers": rows,
+            "peer_list": ordered_tickers,
+            "peer_medians": medians,
+            "relative_read": relative,
+            "overall_vs_peers": (
+                max(set(votes), key=votes.count) if votes else "insufficient_data"
+            ),
+            "relative_valuation_applicable": len(rows) >= 2,
+            "peer_changes_applied": applied,
+            "clamp_warnings": warnings,
+        }
+    )
+    return result
+
+
+def implied_value_from_multiple(
+    *,
+    metric: str,
+    multiple: float,
+    comps: dict,
+    state: dict,
+) -> dict:
+    """Compute per-share value from a clamped multiple and engine-derived base."""
+    if metric not in _MULTIPLE_ABSOLUTE_BOUNDS:
+        return {
+            "metric": metric,
+            "multiple": multiple,
+            "implied_value_per_share": None,
+            "forward_estimate_available": False,
+            "errors": [f"unsupported justified-multiple metric {metric!r}"],
+        }
+    try:
+        multiple_f = float(multiple)
+    except (TypeError, ValueError):
+        return {
+            "metric": metric,
+            "multiple": multiple,
+            "implied_value_per_share": None,
+            "forward_estimate_available": False,
+            "errors": ["multiple must be numeric"],
+        }
+
+    subject = comps.get("subject") or {}
+    price = subject.get("price")
+    try:
+        price_f = float(price)
+    except (TypeError, ValueError):
+        price_f = 0.0
+    result: dict[str, Any] = {
+        "metric": metric,
+        "multiple": multiple_f,
+        "implied_value_per_share": None,
+        "forward_estimate_available": False,
+        "estimate_basis": None,
+        "estimate_per_share": None,
+        "errors": [],
+    }
+    if price_f <= 0:
+        result["errors"].append("subject price unavailable")
+        return result
+
+    if metric in {"forward_pe", "trailing_pe"}:
+        forward_pe = subject.get("forward_pe")
+        if metric == "forward_pe" and isinstance(forward_pe, (int, float)) and forward_pe > 0:
+            estimate = price_f / float(forward_pe)
+            result["forward_estimate_available"] = True
+            result["estimate_basis"] = "consensus_forward_eps_from_price_over_forward_pe"
+        else:
+            trailing_pe = subject.get("trailing_pe")
+            if isinstance(trailing_pe, (int, float)) and trailing_pe > 0:
+                estimate = price_f / float(trailing_pe)
+            else:
+                estimate = extract_income_basics(
+                    state.get("income_statement") or {}
+                ).get("eps_diluted_current")
+            if estimate is None or float(estimate) <= 0:
+                result["errors"].append("trailing EPS fallback unavailable")
+                return result
+            result["estimate_basis"] = "trailing_eps_fallback"
+        result["estimate_per_share"] = float(estimate)
+        result["implied_value_per_share"] = float(estimate) * multiple_f
+        return result
+
+    market_cap = subject.get("market_cap")
+    enterprise_value = subject.get("enterprise_value")
+    try:
+        shares = float(market_cap) / price_f if float(market_cap) > 0 else None
+    except (TypeError, ValueError):
+        shares = None
+
+    if metric == "ev_ebitda":
+        current_multiple = subject.get("ev_to_ebitda")
+        if (
+            not isinstance(enterprise_value, (int, float))
+            or not isinstance(current_multiple, (int, float))
+            or current_multiple <= 0
+            or not shares
+        ):
+            result["errors"].append(
+                "enterprise value, EV/EBITDA, or share count unavailable"
+            )
+            return result
+        ebitda = float(enterprise_value) / float(current_multiple)
+        net_debt = float(enterprise_value) - float(market_cap)
+        implied_equity = ebitda * multiple_f - net_debt
+        result["estimate_basis"] = "engine_derived_ebitda_per_share"
+        result["estimate_per_share"] = ebitda / shares
+        result["implied_value_per_share"] = implied_equity / shares
+        return result
+
+    current_ps = subject.get("price_to_sales")
+    if isinstance(current_ps, (int, float)) and current_ps > 0:
+        revenue_per_share = price_f / float(current_ps)
+    else:
+        revenue = extract_income_basics(
+            state.get("income_statement") or {}
+        ).get("revenue_current")
+        if revenue is None or not shares:
+            result["errors"].append("revenue-per-share basis unavailable")
+            return result
+        revenue_per_share = float(revenue) / shares
+    result["estimate_basis"] = "trailing_revenue_per_share"
+    result["estimate_per_share"] = revenue_per_share
+    result["implied_value_per_share"] = revenue_per_share * multiple_f
+    return result
 
 
 def format_comps_for_prompt(comps: dict[str, Any]) -> str:
