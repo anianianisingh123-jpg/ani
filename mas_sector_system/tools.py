@@ -682,7 +682,7 @@ def _extract_line(
     obs = _pick_period(series, annual=annual, rank=rank)
     if not obs:
         kind = "annual" if annual else "quarterly"
-        which = "current" if rank == 0 else "prior"
+        which = {0: "current", 1: "prior"}.get(rank, f"rank-{rank}")
         return _null_line(f"no {which} {kind} observation found")
 
     return {
@@ -707,6 +707,7 @@ def _extract_statement_block(
         "prior_annual": {},
         "current_quarter": {},
         "prior_quarter": {},
+        "annual_series": [],
     }
     for label, aliases in concept_map.items():
         block["current_annual"][label] = _extract_line(
@@ -721,18 +722,40 @@ def _extract_statement_block(
         block["prior_quarter"][label] = _extract_line(
             facts, aliases, annual=False, rank=1
         )
+    for rank in range(5):
+        labels = {
+            label: _extract_line(facts, aliases, annual=True, rank=rank)
+            for label, aliases in concept_map.items()
+        }
+        observed = [
+            cell
+            for cell in labels.values()
+            if isinstance(cell, dict) and cell.get("value") is not None
+        ]
+        if not observed:
+            continue
+        fy = next((cell.get("fy") for cell in observed if cell.get("fy") is not None), None)
+        block["annual_series"].append({"rank": rank, "fy": fy, **labels})
     return block
 
 
 def _compute_fcf(cash_flow: dict[str, Any]) -> None:
     """Add FreeCashFlow = Operating CF − CapEx for each period sub-block."""
-    for period_key in (
+    period_blocks = [
+        (period_key, cash_flow.get(period_key) or {})
+        for period_key in (
         "current_annual",
         "prior_annual",
         "current_quarter",
         "prior_quarter",
-    ):
-        period = cash_flow.get(period_key) or {}
+        )
+    ]
+    period_blocks.extend(
+        (None, period)
+        for period in (cash_flow.get("annual_series") or [])
+        if isinstance(period, dict)
+    )
+    for period_key, period in period_blocks:
         ocf = (period.get("NetCashFromOperatingActivities") or {}).get("value")
         capex = (period.get("CapitalExpenditures") or {}).get("value")
         if ocf is None or capex is None:
@@ -750,7 +773,8 @@ def _compute_fcf(cash_flow: dict[str, Any]) -> None:
                 "filed": (period.get("NetCashFromOperatingActivities") or {}).get("filed"),
                 "note": "computed as NetCashFromOperatingActivities − |CapitalExpenditures|",
             }
-        cash_flow[period_key] = period
+        if period_key is not None:
+            cash_flow[period_key] = period
 
 
 def _friendly_income_aliases(income: dict[str, Any]) -> None:
