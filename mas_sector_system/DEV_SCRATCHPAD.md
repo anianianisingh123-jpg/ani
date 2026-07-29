@@ -150,6 +150,23 @@ Existing: `test_market_structure.py`, `test_memory.py`, `test_structural_phases.
 | TEST-06 | Mock-LLM harness: a fake `_invoke` returning canned text per node so the full deep-dive graph can run end-to-end in CI with no API spend, asserting state keys are populated at every phase. | _unassigned_ | TODO |
 | TEST-07 | Cost-accounting test: assert `finalize_run_cost` is called exactly once per run on all three terminal paths (`docx_export`, `qc_halt`, `validation_halt`) and that `outputs/cost_log.jsonl` gets exactly one line. | _unassigned_ | TODO |
 
+### Epic V — Valuation In-Context Learning (`VALUATION_ICL_DESIGN.md`)
+
+| ID | Task | Assignee | Status |
+|----|------|----------|--------|
+| VAL-00 | `state.py` contract: add `dcf_judgment`, `comps_judgment`, `valuation_critique`, `relative_critique`, `valuation_grade`. Shared contract — announce before editing. Must land before A/B/C start. | Claude/Opus-5 | TODO |
+| VAL-01 | L0 doctrine + L1 archetype cards → `valuation_doctrine.py`. Pure data. | Gemini | TODO |
+| VAL-02 | Rubric + grader + held-out harness → `valuation_rubric.py`. **Part 1 (rubric/grader) done on `val-track-c`. Part 2 baseline (8 live E2E runs) blocked on spend sign-off.** | Grok | IN_PROGRESS (part 1 DONE) |
+| VAL-03a | Peer mutation + justified-multiple → implied value, incl. forward-estimate chain (§5.3). `valuation_engine.py`. | Codex | BLOCKED (see handoff) |
+| VAL-03b | Relative critique + narrative calls, in-node. `agents.py`. Blocked on VAL-01/02/03a. | Claude/Opus-5 | TODO |
+| VAL-04 | Exemplar library per §11 → `exemplars/`. Extract moves, filter §11.3 patterns. | Gemini | TODO |
+| VAL-05a | Argued-input validation + clamps + DCF re-run. `valuation_engine.py`. | Codex | BLOCKED (see handoff) |
+| VAL-05b | Fundamental critique + narrative calls, in-node. `agents.py`. Blocked on VAL-05a. | Claude/Opus-5 | TODO |
+| VAL-06 | Reconciliation section + `CLAUDE.md` §5 tiering update (critique = Opus). | Claude/Opus-5 | TODO |
+| VAL-07 | Calibration loop — prior call vs realized price. `memory.py`. | _unassigned_ | TODO |
+| VAL-08 | Clean memo schema 1.2 + disclosure routing (§8). `artifacts.py`. | _unassigned_ | TODO |
+| VAL-09 | Football-field bars (§8). `pdf_generator.py`. | _unassigned_ | TODO |
+
 ---
 
 ## 📝 Agent Activity & Handoff Logs
@@ -209,3 +226,27 @@ Existing: `test_market_structure.py`, `test_memory.py`, `test_structural_phases.
   5. **Preserved through the refactor:** the `artifact != "clean_memo"` rejection, `_EXCLUDED_TITLE_RE`, stale-omission, `_pick_side` fallback, the `_column_markdown` overflow fix, and schema-1.0 graceful degradation.
 - **Verification:** `python3 -m pytest tests/ -q` → **77 passed** (70 prior + 7 new), no regressions. Rendered report re-inspected page by page via `pypdf` split + `qlmanage`: **0 residual `filer FY`, 0 ISO dates, 0 stray `---` rules**, all six themes present, page count 9 core / 18 with `--appendix`. That visual pass caught the `_page_title` overprint, which the tests did not. Samples: `outputs/NVDA_2026-07-28_research_report.pdf` and `..._research_report_full.pdf` (both fixture-driven).
 - **Status:** COMPLETED
+
+### [2026-07-28] - [Codex/GPT-5] - [VAL-03a / VAL-05a]
+- What I changed: No engine code changed. Created and restored the dedicated `val-track-b` branch, read `VALUATION_ICL_DESIGN.md`, `AGENTS.md`, and this scratchpad in full, then stopped on a frozen-contract gap.
+- Files modified: `mas_sector_system/DEV_SCRATCHPAD.md` (this BLOCKED handoff only).
+- Notes / Handoff for next agent: Section 4 permits `base_fcf_method` values `avg_3y`, `avg_5y`, and `mid_cycle`, and requires Python to compute the resulting filing-derived base FCF. The current `ResearchState`/engine statement shape exposes only `current_annual` and `prior_annual`; §4 does not define a multi-year FCF-history field, period-selection rules, or `mid_cycle` calculation. Implementing these methods would require inventing a shared schema or silently changing their meaning. The user's instruction says to stop rather than improvise when §4 does not cover a case. A product/architecture decision must define the history source and normalization rule before VAL-05a can be completed. No LLM calls were made and `valuation_engine.py` remains untouched.
+- Status: BLOCKED
+
+### [2026-07-28] - [Grok] - [VAL-02 part 1: rubric + grader]
+- What I changed: Built Track C measurement surface on branch `val-track-c`. New `valuation_rubric.py` exports `RUBRIC` (11 binary criteria per §10.1), `grade_valuation(state, *, judge=None)`, `format_rubric_for_prompt()`, and `HELD_OUT_TICKERS` (§10.2). Criteria 3/5/7/9/11 are fully mechanical from state + text; 2/4/6/10 are mechanical against critique/engine fields (vacuous-pass when pre-ICL objects are absent so baseline runs still score). Criteria 1 and 8 take an injectable `judge(criterion_id, state, text) -> (passed, detail)` and mark `judged: true` when used; without a judge they use conservative heuristics with `judged: false`. No `state.py`, `agents.py`, `main.py`, or engine edits. Part 2 (8 live held-out E2E baseline scores) **not started** — needs explicit spend sign-off.
+- Files modified: `mas_sector_system/valuation_rubric.py` (new), `tests/test_valuation_rubric.py` (new, 31 tests), `mas_sector_system/DEV_SCRATCHPAD.md` (Epic V queue + this log).
+- Notes / Handoff for next agent:
+  1. **API:** `grade = grade_valuation(state, judge=fn)` → `{score, max_score: 11, criteria: [...], notes, ticker}`. Each criterion result has `passed`, `judged`, `method`, `detail`.
+  2. **Pre-ICL baseline expectations:** without `dcf_judgment`/`comps_judgment`, criterion 9 fails; point-only price targets fail 5; YTD+1y mixing fails 7. Criterion 2 vacuous-passes when no critiques exist (correct: zero argued inputs all have evidence).
+  3. **§4 was not hit as a blocker for part 1** — grader *reads* optional future fields (`valuation_critique`, `relative_critique`, `dcf_judgment`, `comps_judgment`) but does not invent schema. VAL-00 still needs to land those on `ResearchState` before wiring grades into the graph.
+  4. **Part 2 spend:** 8 full deep-dives (NVDA, QCOM, CRM, JPM, PLD, PGR, XOM, KO) at Opus+Sonnet pricing. Do not run without user approval. After runs, call `grade_valuation` on each final state (inject an LLM judge for 1 and 8) and record per-criterion baselines.
+  5. **Branch:** all work is on `val-track-c` only — not committed to `main`.
+- Verification: `python3 -m pytest tests/test_valuation_rubric.py -q` → 31 passed; full `python3 -m pytest tests/ -q` → **108 passed**.
+- Status: COMPLETED (part 1 only; part 2 awaiting spend sign-off)
+
+### [2026-07-28] - [Gemini] - [VAL-01, VAL-04]
+- What I changed: Created valuation doctrine with L0 and L1 archetype cards, enforcing defensible parameter bands per §4.3. Created exemplars library extracting reasoning moves from NVDA, QCOM, CRM memos per §11, filtering out patterns per §11.3, and establishing the graceful degradation loading function per §3.
+- Files modified: `mas_sector_system/valuation_doctrine.py`, `mas_sector_system/exemplars/__init__.py`
+- Notes / Handoff for next agent: ICL architecture is ready for Track B/C. The doctrine and exemplars are pure data/functions with no dependencies.
+- Status: COMPLETED
