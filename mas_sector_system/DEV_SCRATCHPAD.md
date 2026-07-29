@@ -39,12 +39,12 @@ Quick reference for all agents. **Authoritative spec is `CLAUDE.md`; this is the
 
 ```
 entry → deep_dive_start
-          ├─> data_gatherer → metrics_compute → validation_gate ─┬─> validation_halt → END
-          │                                                      └─> post_validation ─┐
+          ├─> data_gatherer → metrics_compute ─────────────────────────────────────────┐
           ├─> business_overview ───────────────────────────────────────────────────────┤
           ├─> macro_regime ────────────────────────────────────────────────────────────┼─> capital_ready (defer=True)
           └─> management_track_record ─────────────────────────────────────────────────┘
-                → capital_allocation → bull_agent
+                → validation_gate ─┬─> validation_halt → END
+                                   └─> capital_allocation → bull_agent
                      ├─> bear_agent ────────────┐
                      ├─> fundamental_valuation ─┼─> synthesis_ready (defer=True) → synthesis → qc
                      └─> relative_valuation ────┘                                              │
@@ -63,6 +63,7 @@ Screener branch: `entry → screener → END`.
 5. **Valuation math is deterministic Python.** Agents narrate `valuation_engine` + `canonical_metrics`; they never invent peer multiples or fair values from training memory.
 6. **Market-structure data is free-source only** (yfinance chains, SEC Form 4 counts). No paid vendors.
 7. **Thesis and compliance ship as two artifacts** (`artifacts.py`). `clean_memo.json` carries thesis only; `compliance_audit_log.md` carries every data-quality disclosure, QC finding, and stale-tag warning. Do not merge them back into one document, and do not append QC notes to the memo body.
+8. **Validation is the sole route into capital/analysis.** All four foundation branches join at `capital_ready`, then pass through `validation_gate`; no parallel foundation edge may enter `capital_allocation` downstream of the gate.
 
 ### Data contracts
 
@@ -327,3 +328,9 @@ Tracks A / B / C have **zero file overlap** by construction. **Note:** in round 
   5. **Acceptance check, free and repeatable:** re-grading `outputs/val02_baseline/NVDA_state_slice.json` with the judgment fields populated moves it 10/11 → 11/11 with criterion 9 flipping True. That proves the wiring emits the shape the grader expects. It does **not** prove the arguing is any good — that needs a live run and an after-baseline.
 - **Verification:** `python3 -m pytest tests/ -q` → **134 passed** (120 prior + 14 new). No graph node added; `main.py` and `routing.py` untouched.
 - **Status:** COMPLETED
+
+### [2026-07-29] - [Codex/GPT-5] - [Validation fail-stop cascade]
+- What I changed: Made core-metric validation archetype-aware by treating an explicit `applicable: false` as structurally unavailable rather than missing data. Rewired the graph so all foundation branches join before `validation_gate`, making validation the only route into `capital_allocation`; removed the bypassing `post_validation` node.
+- Files modified: `mas_sector_system/validate.py`, `mas_sector_system/main.py`, `tests/test_structural_phases.py`, `mas_sector_system/DEV_SCRATCHPAD.md`.
+- Notes / Handoff for next agent: The JPM failure was one root cause with a cascade: a valid bank suppression triggered FAIL, while three ungated foundation parents still released the deferred join. The fix addresses both ends. A FAIL now terminates at `validation_halt`; PASS/WARN alone reaches capital allocation. Tests assert the exact predecessor/successor sets, not just node presence.
+- Status: COMPLETED

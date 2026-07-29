@@ -247,9 +247,16 @@ def validate_inputs(state: dict[str, Any]) -> dict[str, Any]:
         "gross_margin__current_annual",
     )
     core_missing = []
+    core_not_applicable = []
     for cid in core_ids:
         m = get_metric(cm, cid) if cm else None
-        if not m or not m.get("applicable") or m.get("value") is None:
+        if m and m.get("applicable") is False:
+            # Archetype suppression is an affirmative result, not missing data.
+            # Example: banks structurally have no gross margin and correctly
+            # mark that metric inapplicable in archetype.py.
+            core_not_applicable.append(cid)
+            continue
+        if not m or m.get("value") is None:
             # revenue may be under slightly different path
             if cid == "revenue__current_annual":
                 # try any revenue annual
@@ -281,7 +288,15 @@ def validate_inputs(state: dict[str, Any]) -> dict[str, Any]:
             checks,
             name="metrics_coverage",
             status="PASS",
-            detail=f"applicable_with_value={n_app}",
+            detail=(
+                f"applicable_with_value={n_app}"
+                + (
+                    "; structurally not applicable: "
+                    + ", ".join(core_not_applicable)
+                    if core_not_applicable
+                    else ""
+                )
+            ),
         )
 
     # ── Archetype noted (informational) ──────────────────────────────────

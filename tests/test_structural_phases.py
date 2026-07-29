@@ -245,6 +245,45 @@ def test_bank_suppresses_net_cash_and_no_fcf_dcf():
     assert dcf.get("method") != "multi_stage_fcf_dcf"
 
 
+def test_bank_validation_skips_structurally_inapplicable_gross_margin():
+    income, balance, cash = _synthetic_bank()
+    cm = compute_canonical_metrics(
+        income_statement=income,
+        balance_sheet=balance,
+        cash_flow_statement=cash,
+        live_market=income["current_annual"]["live_market"],
+        ticker="JPM",
+        sector="Banks",
+    )
+    gross_margin = get_metric(cm, "gross_margin__current_annual")
+    assert gross_margin is not None
+    assert gross_margin.get("applicable") is False
+
+    report = validate_inputs(
+        {
+            "ticker": "JPM",
+            "sector": "Banks",
+            "income_statement": income,
+            "balance_sheet": balance,
+            "cash_flow_statement": cash,
+            "canonical_metrics": cm,
+            "macro_context": "",
+            "macro_regime_assessment": "",
+            "sec_filing_summary": "",
+        }
+    )
+
+    assert report["status"] in {"PASS", "WARN"}, report
+    assert not any(
+        check["name"] == "metrics_core" and check["status"] == "FAIL"
+        for check in report["checks"]
+    )
+    assert not any(
+        "gross_margin__current_annual" in failure
+        for failure in report["failures"]
+    )
+
+
 def test_reit_valuation_not_fcf_dcf():
     state = {
         "ticker": "PLD",
@@ -382,6 +421,7 @@ def test_graph_imports():
     assert "analysis_ready" not in nodes
     assert "qc_style_check" not in nodes
     assert "qc_style_halt" not in nodes
+    assert "post_validation" not in nodes
     s = empty_state(
         ticker="NVDA",
         sector="Semiconductors",
@@ -391,6 +431,29 @@ def test_graph_imports():
     assert "canonical_metrics" in s
     assert "validation_report" in s
     assert "query_type" in s
+
+
+def test_validation_is_the_only_path_from_foundation_to_capital():
+    from mas_sector_system.main import app
+
+    incoming = {}
+    outgoing = {}
+    for edge in app.get_graph().edges:
+        incoming.setdefault(edge.target, set()).add(edge.source)
+        outgoing.setdefault(edge.source, set()).add(edge.target)
+
+    assert incoming["capital_ready"] == {
+        "metrics_compute",
+        "business_overview",
+        "macro_regime",
+        "management_track_record",
+    }
+    assert outgoing["capital_ready"] == {"validation_gate"}
+    assert incoming["capital_allocation"] == {"validation_gate"}
+    assert outgoing["validation_gate"] == {
+        "capital_allocation",
+        "validation_halt",
+    }
 
 
 def test_sector_peers_preferred_for_semiconductors():
