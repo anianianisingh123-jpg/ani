@@ -1305,6 +1305,18 @@ Rules that are enforced in code — violating them silently discards your work:
    mid_cycle. Use it when the base year is unrepresentative of mid-cycle.
 5. If a default is genuinely defensible, say so with verdict "defensible" —
    do not manufacture disagreement.
+6. DIRECTION IS NOT A FREE VARIABLE. Arguing every parameter against the
+   stock — growth down AND discount rate up AND the growth period shortened —
+   is a bias, not analysis. It is also self-marking: it produces a valuation
+   far below the default without any single defensible reason for it, and the
+   sensitivity table will show it plainly.
+   Before you finalise, look at your own arguments as a set. If they all push
+   the same way, either (a) mark the weakest ones "defensible" and leave the
+   defaults alone, or (b) state in method_reasoning the single company-specific
+   fact that genuinely justifies moving everything in one direction.
+   A real view is usually one or two strong departures plus several defaults
+   left alone. Five simultaneous conservative nudges is not conviction, it is
+   a thumb on the scale.
 
 You can see the current share price. Do not reason backwards from it. Argue the
 assumptions from company evidence, and let the value land where it lands.
@@ -1463,6 +1475,18 @@ def _format_judgment_case(dcf_judgment: dict) -> str:
                 f"  {s.get('parameter'):18} {s.get('engine_default')} → "
                 f"{s.get('argued_midpoint')}   fv {fv_txt} ({d_txt})"
             )
+
+    bias = dcf_judgment.get("directional_bias") or {}
+    if bias.get("one_sided"):
+        lines.append(
+            f"  ⚠ DIRECTIONAL BIAS: {bias.get('dominant_share', 0):.0%} of the argued "
+            f"movement across {bias.get('material_arguments')} material arguments "
+            f"pushes fair value {bias.get('dominant_direction')}. Do not present "
+            "this as high conviction. Either name the single company-specific "
+            "fact that justifies moving everything one way, or say plainly that "
+            "the argued case reflects a uniformly conservative reading of "
+            "assumptions rather than one decisive insight."
+        )
 
     if rng.get("low") is not None and rng.get("high") is not None:
         lines.append(

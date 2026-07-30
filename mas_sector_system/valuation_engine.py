@@ -1570,6 +1570,49 @@ def compute_dcf_with_argued_inputs(state: dict, argued: dict) -> dict[str, Any]:
         reverse=True,
     )
 
+    # Directional bias: are all material arguments pushing the same way?
+    #
+    # Observed live 2026-07-30 on NVDA — growth −$145, discount rate −$77,
+    # high-growth years −$63, every one against the stock. That produces a
+    # valuation far below the default without any single defensible reason for
+    # it. A real view is usually one or two strong departures with the rest
+    # left at default; five simultaneous conservative nudges is a thumb on the
+    # scale. The sensitivity deltas already measure this, so surface it rather
+    # than leaving a reader to notice.
+    _material = [
+        s
+        for s in sensitivities
+        if isinstance(s.get("delta_vs_default"), (int, float))
+        and isinstance(default_fv, (int, float))
+        and default_fv
+        and abs(s["delta_vs_default"]) >= abs(default_fv) * 0.02
+    ]
+    # Unanimity is the wrong test. NVDA's live set was three arguments down
+    # (−$145, −$77, −$63) and one up (+$37): not unanimous, but 88% of the
+    # total movement pointed one way. Measure net imbalance instead — the share
+    # of total absolute movement running in the dominant direction.
+    _down = sum(-s["delta_vs_default"] for s in _material if s["delta_vs_default"] < 0)
+    _up = sum(s["delta_vs_default"] for s in _material if s["delta_vs_default"] > 0)
+    _total = _down + _up
+    _share = (max(_down, _up) / _total) if _total else 0.0
+    directional_bias: dict[str, Any] = {
+        "material_arguments": len(_material),
+        "dominant_direction": (
+            ("below default" if _down >= _up else "above default") if _total else None
+        ),
+        "dominant_share": round(_share, 3),
+        "one_sided": False,
+    }
+    if len(_material) >= 3 and _share >= 0.80:
+        directional_bias["one_sided"] = True
+        normalization_warnings.append(
+            f"DIRECTIONAL BIAS: {_share:.0%} of the argued movement across "
+            f"{len(_material)} material arguments pushes fair value "
+            f"{directional_bias['dominant_direction']}. A view is normally one "
+            "or two departures with the rest left at default; a one-sided set "
+            "warrants a single stated reason or it is a thumb on the scale."
+        )
+
     values = [
         case.get("fair_value_per_share")
         for case in cases
@@ -1583,6 +1626,7 @@ def compute_dcf_with_argued_inputs(state: dict, argued: dict) -> dict[str, Any]:
             "base_engine": base,
             "central_case": central_case,
             "sensitivities": sensitivities,
+            "directional_bias": directional_bias,
             "low_case": low_case,
             "high_case": high_case,
             "fair_value_per_share": None,
