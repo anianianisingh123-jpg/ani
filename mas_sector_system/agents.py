@@ -1280,16 +1280,22 @@ Return ONE JSON object and nothing else:
 }
 
 Rules that are enforced in code — violating them silently discards your work:
-1. EVERY argument needs a non-empty "evidence" list naming real fields from the
-   packet (e.g. "balance_sheet.current_annual.NetDebt",
-   "canonical_metrics.revenue_growth", "dcf_engine.terminal_value_pv"). An
-   argument with no resolvable evidence is REJECTED and the engine default
-   stands. Do not cite a field you were not shown.
-2. Argue a RANGE, not a point. The engine runs both corners.
-3. "base_fcf_method" is an enum, not a number: its argued_range must be
+
+1. ALL RATES ARE DECIMALS, NEVER PERCENTAGES. An 11% WACC is `0.11`, not `11`.
+   A 25% growth rate is `0.25`, not `25`. A 2.5% terminal growth rate is
+   `0.025`. Anything above 1.0 is treated as a unit error. This applies to
+   wacc, g_high and g_terminal. Integer-year parameters (high_growth_years,
+   fade_years) are plain counts: 5 means five years.
+2. EVERY argument needs a non-empty "evidence" list naming field ids EXACTLY as
+   they appear in the evidence-vocabulary block attached to this request. An
+   argument whose evidence does not resolve is REJECTED and the engine default
+   stands. Do not invent a plausible-looking id — if the field you want is not
+   in the vocabulary, cite a different one or drop the argument.
+3. Argue a RANGE, not a point. The engine runs both corners.
+4. "base_fcf_method" is an enum, not a number: its argued_range must be
    ["<method>", "<method>"] where method is one of ttm, avg_3y, avg_5y,
    mid_cycle. Use it when the base year is unrepresentative of mid-cycle.
-4. If a default is genuinely defensible, say so with verdict "defensible" —
+5. If a default is genuinely defensible, say so with verdict "defensible" —
    do not manufacture disagreement.
 
 You can see the current share price. Do not reason backwards from it. Argue the
@@ -1371,6 +1377,88 @@ def _icl_blocks(archetype: str) -> list[str]:
     if available and exemplars:
         blocks.append(exemplars)
     return blocks
+
+
+def _evidence_vocabulary(state: ResearchState, limit: int = 60) -> str:
+    """The field ids the critique is allowed to cite.
+
+    Without this the model invents plausible-looking ids — observed live:
+    `canonical_metrics.fcf_yoy`, `canonical_metrics.gross_margin_yoy_bps`,
+    `cash_flow.current_annual.derived.payout_ratio_total_pct`. None exist, so
+    the §4.4 evidence check rejected the argument and reverted a genuinely
+    reasoned parameter to its default. Showing the real vocabulary turns a
+    guessing game into a lookup.
+    """
+    ids: list[str] = []
+    cm = state.get("canonical_metrics")
+    if isinstance(cm, dict):
+        by_id = cm.get("by_id")
+        if isinstance(by_id, dict):
+            ids.extend(f"canonical_metrics.{k}" for k in sorted(by_id)[:limit])
+    for stmt in ("income_statement", "balance_sheet", "cash_flow_statement"):
+        blk = state.get(stmt)
+        if isinstance(blk, dict) and isinstance(blk.get("current_annual"), dict):
+            ids.extend(
+                f"{stmt}.current_annual.{k}"
+                for k in sorted(blk["current_annual"])[:12]
+            )
+    for scalar in (
+        "business_overview",
+        "macro_regime_assessment",
+        "management_assessment",
+        "capital_allocation_assessment",
+    ):
+        if state.get(scalar):
+            ids.append(scalar)
+    if not ids:
+        return ""
+    return (
+        "=== EVIDENCE FIELD IDS YOU MAY CITE (exact strings; anything else is "
+        "rejected and your argument is discarded) ===\n" + "\n".join(ids)
+    )
+
+
+def _format_judgment_case(dcf_judgment: dict) -> str:
+    """Render the argued case as an explicit range.
+
+    `format_dcf_for_prompt` reads `fair_value_per_share`, which the argued case
+    deliberately leaves None (it is a range, not a point), so routing the
+    judgment case through it rendered an empty block.
+    """
+    rng = dcf_judgment.get("fair_value_range") or {}
+    lines = ["=== JUDGMENT CASE (same engine, argued inputs) ==="]
+    if rng.get("low") is not None and rng.get("high") is not None:
+        lines.append(
+            f"Argued fair value range: {rng['low']:.2f} – {rng['high']:.2f} "
+            f"(midpoint {rng.get('base'):.2f})"
+            if isinstance(rng.get("base"), (int, float))
+            else f"Argued fair value range: {rng['low']:.2f} – {rng['high']:.2f}"
+        )
+    else:
+        lines.append(
+            "No argued fair value produced — see disclosures below; present the "
+            "sector-default case alone and say why the argued case did not apply."
+        )
+    for corner in ("low_case", "high_case"):
+        case = dcf_judgment.get(corner)
+        if isinstance(case, dict):
+            a = case.get("assumptions") or {}
+            lines.append(
+                f"  {corner}: fv={case.get('fair_value_per_share')} "
+                f"wacc={a.get('wacc')} g_high={a.get('g_high')} "
+                f"g_terminal={a.get('g_terminal')} "
+                f"base_fcf_method={a.get('base_fcf_method')}"
+            )
+    for d in dcf_judgment.get("band_dissents") or []:
+        if isinstance(d, dict):
+            lines.append(
+                f"  DISSENT {d.get('parameter')}: argued {d.get('argued_range')} "
+                f"vs archetype band {d.get('archetype_band')} — "
+                f"{str(d.get('reasoning'))[:180]}"
+            )
+    for w in dcf_judgment.get("clamp_warnings") or []:
+        lines.append(f"  DISCLOSURE: {w}")
+    return "\n".join(lines)
 
 
 def _run_critique(
@@ -1459,11 +1547,12 @@ def fundamental_valuation_node(state: ResearchState) -> dict:
     archetype = _archetype_for(state, dcf)
     icl = _icl_blocks(archetype)
 
+    vocab = _evidence_vocabulary(state)
     critique = _run_critique(
         CRITIQUE_SYSTEM_PROMPT,
         packet,
         dcf_block,
-        icl,
+        ([*icl, vocab] if vocab else icl),
         archetype=archetype,
         label="fundamental:critique",
     )
@@ -1482,12 +1571,17 @@ def fundamental_valuation_node(state: ResearchState) -> dict:
             dcf_judgment = compute_dcf_with_argued_inputs(dict(state), accepted)
             if isinstance(dcf_judgment, dict):
                 dcf_judgment["input_source"] = "argued"
-                dcf_judgment["clamp_warnings"] = clamp_warnings
+                # MERGE, never overwrite. The engine emits its own disclosures
+                # here — notably "Argued FCF inputs not applied: the archetype
+                # does not use an FCF DCF" for banks/REITs/insurers. Assigning
+                # over the list destroyed that disclosure, which made a no-op
+                # judgment case look like considered agreement with the default.
+                dcf_judgment["clamp_warnings"] = [
+                    *(dcf_judgment.get("clamp_warnings") or []),
+                    *clamp_warnings,
+                ]
                 dcf_judgment["band_dissents"] = accepted.get("band_dissents") or []
-                judgment_block = (
-                    "=== JUDGMENT CASE (same engine, argued inputs) ===\n"
-                    + format_dcf_for_prompt(dcf_judgment)
-                )
+                judgment_block = _format_judgment_case(dcf_judgment)
         print(
             f"[valuation:dcf:argued] archetype={archetype} "
             f"accepted={argued_params} clamps={len(clamp_warnings)} "
@@ -1628,11 +1722,12 @@ def relative_valuation_node(state: ResearchState) -> dict:
     comps_judgment: Optional[dict] = None
     judgment_block = ""
     if comps_block:
+        vocab = _evidence_vocabulary(state)
         relative_critique = _run_critique(
             RELATIVE_CRITIQUE_SYSTEM_PROMPT,
             packet,
             comps_block,
-            icl,
+            ([*icl, vocab] if vocab else icl),
             archetype=archetype,
             label="relative:critique",
         )
