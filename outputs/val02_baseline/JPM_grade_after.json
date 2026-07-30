@@ -1,0 +1,153 @@
+{
+  "ticker": "JPM",
+  "score": 8,
+  "max_score": 11,
+  "criteria": [
+    {
+      "id": 1,
+      "name": "archetype_and_method",
+      "criterion": "Archetype named and primary method justified",
+      "type": "binary",
+      "mechanical": false,
+      "requires_judgment": true,
+      "passed": true,
+      "judged": true,
+      "detail": "PASS: Names bank_lender archetype explicitly and justifies residual income as primary method (citing negative OCF as balance-sheet artifact, explicit statement that DCF is not constructible for a bank).",
+      "method": "llm_judge"
+    },
+    {
+      "id": 2,
+      "name": "evidence_for_argued_inputs",
+      "criterion": "Every argued input cites \u22651 resolvable evidence field",
+      "type": "binary",
+      "mechanical": true,
+      "requires_judgment": false,
+      "passed": false,
+      "judged": false,
+      "detail": "dcf:g_terminal: no resolvable evidence (tried: cash_flow.current_annual.derived.payout_ratio_total_pct, cash_flow.current_annual.derived.note, canonical_metrics.roe__current_annual, balance_sheet.annual_series_note); dcf:g_high: no resolvable evidence (tried: canonical_metrics.revenue_yoy, canonical_metrics.net_income_yoy, canonical_metrics.operating_income_yoy, income_statement.current_quarter.derived.annualized_net_income); dcf:high_growth_years: no resolvable evidence (tried: dcf_engine.projection_path, income_statement.current_annual.ProvisionForCreditLosses, balance_sheet.current_quarter.derived.assets_to_equity_leverage_x, balance_sheet.prior_annual.derived.note); dcf:base_fcf_method: no resolvable evidence (tried: income_statement.current_annual.adjusted, income_statement.current_annual.ProvisionForCreditLosses, income_statement.current_quarter.derived.pe_on_annualized_q1_eps, income_statement.annual_series_note); peer:USB: no resolvable evidence (tried: noninterest_income__current_annual, revenue__current_annual, market_cap); peer:PNC: no resolvable evidence (tried: total_assets__current_annual, roe__current_annual, market_cap); justified_multiple: no resolvable evidence (tried: roe__current_annual, net_margin__current_annual, operating_margin__current_annual, operating_margin_yoy_bps)",
+      "method": "mechanical"
+    },
+    {
+      "id": 3,
+      "name": "no_untraceable_currency",
+      "criterion": "No currency figure appears that is not traceable to an engine block",
+      "type": "binary",
+      "mechanical": true,
+      "requires_judgment": false,
+      "passed": false,
+      "judged": false,
+      "detail": "untraceable currency: $1.4776T, $2.2B, $1.48T, $3.5B, $3.8B, $14.21B, $14.212B",
+      "method": "mechanical"
+    },
+    {
+      "id": 4,
+      "name": "terminal_value_share_stated",
+      "criterion": "Terminal-value share of EV stated (DCF path)",
+      "type": "binary",
+      "mechanical": true,
+      "requires_judgment": false,
+      "passed": true,
+      "judged": false,
+      "detail": "non-FCF method (excess_return_on_equity) \u2014 TV-share N/A pass",
+      "method": "mechanical"
+    },
+    {
+      "id": 5,
+      "name": "valuation_as_range",
+      "criterion": "Valuation expressed as a range, not a point",
+      "type": "binary",
+      "mechanical": true,
+      "requires_judgment": false,
+      "passed": true,
+      "judged": false,
+      "detail": "range language detected in valuation text",
+      "method": "mechanical"
+    },
+    {
+      "id": 6,
+      "name": "peer_changes_justified",
+      "criterion": "Each peer inclusion/exclusion justified individually",
+      "type": "binary",
+      "mechanical": true,
+      "requires_judgment": false,
+      "passed": true,
+      "judged": false,
+      "detail": "2 peer_change(s) each justified",
+      "method": "mechanical"
+    },
+    {
+      "id": 7,
+      "name": "comparison_windows_consistent",
+      "criterion": "Comparison windows consistent and stated (no YTD vs 1-yr mixing)",
+      "type": "binary",
+      "mechanical": true,
+      "requires_judgment": false,
+      "passed": true,
+      "judged": false,
+      "detail": "windows present: 3y, 5y, yoy",
+      "method": "mechanical"
+    },
+    {
+      "id": 8,
+      "name": "unresolved_risk",
+      "criterion": "\u22651 risk left explicitly unresolved (no self-neutralizing close)",
+      "type": "binary",
+      "mechanical": false,
+      "requires_judgment": true,
+      "passed": true,
+      "judged": true,
+      "detail": "PASS: The credit-cycle risk (provision build, unverifiable stale allowance-for-credit-losses coverage on the $1.4776T loan book) and the buyback-manufactured EPS growth concern are explicitly left open, tilting the judgment range toward the lower half rather than being resolved or dismissed.",
+      "method": "llm_judge"
+    },
+    {
+      "id": 9,
+      "name": "default_and_judgment_cases",
+      "criterion": "Both default and judgment cases present",
+      "type": "binary",
+      "mechanical": true,
+      "requires_judgment": false,
+      "passed": true,
+      "judged": false,
+      "detail": "dcf_base=True dcf_judgment=True comps_base=True comps_judgment=True comps_applicable=True",
+      "method": "mechanical"
+    },
+    {
+      "id": 10,
+      "name": "band_dissents_flagged",
+      "criterion": "Band dissents flagged where applicable",
+      "type": "binary",
+      "mechanical": true,
+      "requires_judgment": false,
+      "passed": true,
+      "judged": false,
+      "detail": "1 band dissent(s) flagged",
+      "method": "mechanical"
+    },
+    {
+      "id": 11,
+      "name": "no_numeric_contradiction",
+      "criterion": "No internal numeric contradiction (same metric, two values)",
+      "type": "binary",
+      "mechanical": true,
+      "requires_judgment": false,
+      "passed": false,
+      "judged": false,
+      "detail": "contradictions: eps: [20.02, 1.4, 21.14, 23.76]",
+      "method": "mechanical"
+    }
+  ],
+  "notes": "passed 8/11; failed: 2:evidence_for_argued_inputs, 3:no_untraceable_currency, 11:no_numeric_contradiction; llm-judged: 1, 8",
+  "archetype_note": "bank_lender \u2014 DCF must be rejected as primary",
+  "graded_at_utc": "2026-07-29T06:16:28.449200+00:00",
+  "source_slice": "JPM_state_slice_after.json",
+  "phase": "after",
+  "icl_stats_summary": {
+    "both_critiques_parseable": true,
+    "dcf_judgment_present": true,
+    "comps_judgment_present": true,
+    "dcf_proposed_n": 6,
+    "dcf_accepted_n": 4,
+    "dcf_rejected_n": 2,
+    "band_dissents_n": 1
+  }
+}

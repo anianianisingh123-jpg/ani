@@ -1,0 +1,295 @@
+{
+  "ticker": "CRM",
+  "extraction_archetype": "software_saas",
+  "fundamental": {
+    "critique_parseable": true,
+    "critique_keys": [
+      "archetype",
+      "arguments",
+      "method_appropriate",
+      "method_reasoning",
+      "overall_confidence"
+    ],
+    "method_appropriate": true,
+    "method_reasoning": "Multi-stage FCF DCF is appropriate for an asset-light, subscription-revenue business with 34.7% FCF margin and 1.4% capex intensity; the caveats are SBC (untagged, FCF/NI of 1.93x) and the fact that terminal value is 63% of EV, so terminal assumptions dominate.",
+    "arguments_proposed": [
+      "g_high",
+      "wacc",
+      "g_terminal",
+      "base_fcf_method",
+      "high_growth_years",
+      "fade_years"
+    ],
+    "arguments_accepted": [
+      "g_high",
+      "wacc",
+      "g_terminal",
+      "high_growth_years",
+      "fade_years"
+    ],
+    "arguments_rejected": [
+      "base_fcf_method"
+    ],
+    "clamp_warnings": [
+      "base_fcf_method rejected: None is not one of ['avg_3y', 'avg_5y', 'mid_cycle', 'ttm']"
+    ],
+    "band_dissents": [
+      {
+        "parameter": "g_high",
+        "argued_range": [
+          0.08,
+          0.11
+        ],
+        "archetype_band": [
+          0.1,
+          0.3
+        ],
+        "reasoning": "The engine anchors 5 years of 15.8% FCF growth on the single-year fcf_yoy print. That print reflects margin expansion (operating margin +105 bps, fcf margin 32.8%->34.7%) layered on only 9.6% revenue growth \u2014 a mix that cannot repeat for five years once margin gains exhaust. Management's own FY27 guide of $45.8-46.2B is ~10.8% revenue growth and the FY30 $63B target implies ~11% CAGR; billings growth averaged ~11.3%. Worse, the Q1 recap took total debt from $14.44B to $39.28B, and at a realistic ~5% coupon that is roughly $1.6B of incremental pre-tax interest, a direct cash-flow haircut the 15.8% path ignores. 8-11% brackets guided revenue growth with modest residual margin leverage.",
+        "evidence": [
+          "canonical_metrics.fcf_yoy",
+          "canonical_metrics.revenue_yoy",
+          "canonical_metrics.operating_margin_yoy_bps",
+          "canonical_metrics.fcf_margin__current_annual",
+          "canonical_metrics.fcf_margin__prior_annual",
+          "canonical_metrics.total_debt__current_quarter",
+          "canonical_metrics.interest_expense__current_annual",
+          "dcf_engine.assumptions.g_high"
+        ]
+      },
+      {
+        "parameter": "high_growth_years",
+        "argued_range": [
+          3,
+          5
+        ],
+        "archetype_band": [
+          5,
+          10
+        ],
+        "reasoning": "Five years of unfaded high growth is hard to defend when the growth engine is decelerating and the near-term evidence is soft: FY27 revenue guidance missed consensus, Q2 guidance was characterized as weak, and billings growth averaged ~11.3% and was described as underwhelming. Agentforce plus Data 360 at $2.9B is only ~7% of the $41.5B base and cannot arrest deceleration inside the explicit window. A 3-5 year high-growth stage with a longer fade is the more honest shape.",
+        "evidence": [
+          "canonical_metrics.revenue_yoy",
+          "canonical_metrics.revenue__current_annual",
+          "canonical_metrics.fcf_yoy",
+          "dcf_engine.assumptions.high_growth_years"
+        ]
+      },
+      {
+        "parameter": "fade_years",
+        "argued_range": [
+          5,
+          8
+        ],
+        "archetype_band": [
+          3,
+          7
+        ],
+        "reasoning": "A 5-year fade is reasonable for a business with high switching costs, 77.7% gross margin and deferred-revenue-funded negative working capital; extending toward 8 years is arguably fairer if the high-growth stage is shortened, since the platform should decay gradually rather than cliff to terminal. No basis to argue the default is wrong.",
+        "evidence": [
+          "canonical_metrics.gross_margin__current_annual",
+          "balance_sheet.current_quarter.derived.working_capital",
+          "dcf_engine.assumptions.fade_years"
+        ]
+      }
+    ],
+    "dcf_judgment_present": true,
+    "dcf_judgment_input_source": "argued",
+    "dcf_engine_method": "multi_stage_fcf_dcf",
+    "dcf_engine_fv": 610.915178780498,
+    "dcf_judgment_fv": null,
+    "dcf_judgment_range": {
+      "low": 298.29480158216455,
+      "base": null,
+      "high": 364.78522722287033,
+      "basis": "two argued-input range corners"
+    },
+    "accepted_detail": {
+      "g_high": {
+        "parameter": "g_high",
+        "argued_range": [
+          0.08,
+          0.11
+        ],
+        "verdict": "too_high",
+        "reasoning": "The engine anchors 5 years of 15.8% FCF growth on the single-year fcf_yoy print. That print reflects margin expansion (operating margin +105 bps, fcf margin 32.8%->34.7%) layered on only 9.6% revenue growth \u2014 a mix that cannot repeat for five years once margin gains exhaust. Management's own FY27 guide of $45.8-46.2B is ~10.8% revenue growth and the FY30 $63B target implies ~11% CAGR; billings growth averaged ~11.3%. Worse, the Q1 recap took total debt from $14.44B to $39.28B, and at a realistic ~5% coupon that is roughly $1.6B of incremental pre-tax interest, a direct cash-flow haircut the 15.8% path ignores. 8-11% brackets guided revenue growth with modest residual margin leverage.",
+        "evidence": [
+          "canonical_metrics.fcf_yoy",
+          "canonical_metrics.revenue_yoy",
+          "canonical_metrics.operating_margin_yoy_bps",
+          "canonical_metrics.fcf_margin__current_annual",
+          "canonical_metrics.fcf_margin__prior_annual",
+          "canonical_metrics.total_debt__current_quarter",
+          "canonical_metrics.interest_expense__current_annual",
+          "dcf_engine.assumptions.g_high"
+        ],
+        "engine_default": 0.15827569567315436
+      },
+      "wacc": {
+        "parameter": "wacc",
+        "argued_range": [
+          0.095,
+          0.11
+        ],
+        "verdict": "too_low",
+        "reasoning": "9.0% understates both the new capital structure and the idiosyncratic derating. Debt/equity went from 0.244 to 1.147 in one quarter and tangible book is roughly -$31.7B, so the equity is a levered claim on cash flow with zero asset backing; the legacy ~2.3% blended cost of debt ($324M on ~$14.4B) is not the marginal cost on the $39.28B stack, and post-raise interest expense is explicitly stale/unavailable. On the equity side, CRM is 33.8% below its 52-week high while the index and IT sector were up YTD \u2014 a company-specific terminal-value verdict, not a beta move. 9.5-11% is the defensible band.",
+        "evidence": [
+          "canonical_metrics.debt_to_equity__current_quarter",
+          "canonical_metrics.debt_to_equity__current_annual",
+          "balance_sheet.current_quarter.derived.tangible_book_equity",
+          "canonical_metrics.total_debt__current_quarter",
+          "canonical_metrics.interest_expense__current_annual",
+          "canonical_metrics.interest_coverage__current_quarter",
+          "canonical_metrics.pct_below_52w_high",
+          "dcf_engine.assumptions.wacc"
+        ],
+        "engine_default": 0.09
+      },
+      "g_terminal": {
+        "parameter": "g_terminal",
+        "argued_range": [
+          0.02,
+          0.03
+        ],
+        "verdict": "defensible",
+        "reasoning": "3.0% is at the top of a defensible range for a scaled software franchise but not indefensible: the CRM market is still growing and Agentforce/Data 360 at $2.9B ARR (+200%) shows some AI monetization. The downside case is real, however \u2014 the market is explicitly assigning a lower terminal growth rate to seat-based CRM, and NRR/CRPO (the archetype's thesis invalidator) is not in the extract. I would run 2.0% as the low corner rather than argue 3.0% is wrong.",
+        "evidence": [
+          "dcf_engine.assumptions.g_terminal",
+          "canonical_metrics.revenue_yoy",
+          "canonical_metrics.pct_below_52w_high"
+        ],
+        "engine_default": 0.03
+      },
+      "high_growth_years": {
+        "parameter": "high_growth_years",
+        "argued_range": [
+          3,
+          5
+        ],
+        "verdict": "too_high",
+        "reasoning": "Five years of unfaded high growth is hard to defend when the growth engine is decelerating and the near-term evidence is soft: FY27 revenue guidance missed consensus, Q2 guidance was characterized as weak, and billings growth averaged ~11.3% and was described as underwhelming. Agentforce plus Data 360 at $2.9B is only ~7% of the $41.5B base and cannot arrest deceleration inside the explicit window. A 3-5 year high-growth stage with a longer fade is the more honest shape.",
+        "evidence": [
+          "canonical_metrics.revenue_yoy",
+          "canonical_metrics.revenue__current_annual",
+          "canonical_metrics.fcf_yoy",
+          "dcf_engine.assumptions.high_growth_years"
+        ],
+        "engine_default": 5
+      },
+      "fade_years": {
+        "parameter": "fade_years",
+        "argued_range": [
+          5,
+          8
+        ],
+        "verdict": "defensible",
+        "reasoning": "A 5-year fade is reasonable for a business with high switching costs, 77.7% gross margin and deferred-revenue-funded negative working capital; extending toward 8 years is arguably fairer if the high-growth stage is shortened, since the platform should decay gradually rather than cliff to terminal. No basis to argue the default is wrong.",
+        "evidence": [
+          "canonical_metrics.gross_margin__current_annual",
+          "balance_sheet.current_quarter.derived.working_capital",
+          "dcf_engine.assumptions.fade_years"
+        ],
+        "engine_default": 5
+      }
+    }
+  },
+  "relative": {
+    "critique_parseable": true,
+    "critique_keys": [
+      "archetype",
+      "justified_multiple",
+      "multiple_reasoning",
+      "overall_confidence",
+      "peer_changes",
+      "primary_multiple"
+    ],
+    "primary_multiple": "forward_pe",
+    "peer_changes_proposed": [
+      {
+        "ticker": "SNOW",
+        "action": "exclude",
+        "has_evidence": true,
+        "has_reasoning": true
+      },
+      {
+        "ticker": "NOW",
+        "action": "exclude",
+        "has_evidence": true,
+        "has_reasoning": true
+      },
+      {
+        "ticker": "ADBE",
+        "action": "include",
+        "has_evidence": true,
+        "has_reasoning": true
+      },
+      {
+        "ticker": "ORCL",
+        "action": "include",
+        "has_evidence": true,
+        "has_reasoning": true
+      }
+    ],
+    "justified_multiple_present": true,
+    "comps_judgment_present": true,
+    "comps_judgment_input_source": "argued",
+    "clamp_warnings": [],
+    "band_dissents": null,
+    "implied_value_low": null,
+    "implied_value_high": null,
+    "overall_vs_peers_base": "cheap",
+    "justified_multiple": {
+      "metric": "forward_pe",
+      "argued_range": [
+        12.5,
+        15.5
+      ],
+      "has_evidence": true,
+      "evidence": [
+        "revenue_yoy",
+        "operating_margin__current_annual",
+        "operating_margin_yoy_bps",
+        "gross_margin__current_annual",
+        "gross_margin_yoy_bps",
+        "net_income_yoy",
+        "operating_income_yoy",
+        "fcf__current_annual",
+        "fcf_margin__current_annual",
+        "fcf_yoy",
+        "capex_pct_revenue__current_annual",
+        "operating_margin__current_quarter",
+        "total_debt__current_quarter",
+        "total_debt__current_annual",
+        "debt_to_equity__current_quarter",
+        "debt_to_equity__current_annual",
+        "net_cash_ex_st_investments__current_quarter",
+        "net_cash_ex_st_investments__prior_annual",
+        "interest_expense__current_annual",
+        "operating_income__current_annual",
+        "fcf_conversion__current_annual",
+        "eps_diluted__current_annual",
+        "goodwill_pct_assets__current_quarter",
+        "stockholders_equity__current_quarter",
+        "goodwill_increment_pct_assets__current_annual",
+        "receivables_yoy",
+        "shares_diluted__current_quarter"
+      ]
+    },
+    "judgment_peer_list": null,
+    "judgment_keys": [
+      "adjusted_comps",
+      "clamp_warnings",
+      "corners",
+      "input_source",
+      "metric"
+    ]
+  },
+  "summary": {
+    "both_critiques_parseable": true,
+    "dcf_judgment_present": true,
+    "comps_judgment_present": true,
+    "dcf_proposed_n": 6,
+    "dcf_accepted_n": 5,
+    "dcf_rejected_n": 1,
+    "band_dissents_n": 3
+  }
+}
