@@ -1216,6 +1216,35 @@ def _argued_corner(
     return default
 
 
+def _argued_midpoint(argued: dict, parameter: str, default: Any) -> Any:
+    """Midpoint of an argued range — the coherent central view.
+
+    The two corners are the *compounded* extremes: every parameter at its
+    pessimistic end simultaneously, then every parameter at its optimistic end.
+    Because discount-rate and growth effects multiply, that spread is far wider
+    than the analysis supports. Observed live 2026-07-29: NVDA's default case
+    was $318.63 and the low corner $88.24, a 72% haircut produced by stacking
+    five individually-defensible choices at once. That is a tail scenario, not
+    a base case, and presenting it as the argued value overstates conviction.
+
+    The midpoint of each argued range, taken together, is the central estimate
+    an analyst would actually defend.
+    """
+    entry = argued.get(parameter)
+    if isinstance(entry, dict):
+        values = entry.get("argued_range")
+        if isinstance(values, (list, tuple)) and len(values) == 2:
+            try:
+                lo, hi = float(values[0]), float(values[1])
+            except (TypeError, ValueError):
+                return default
+            mid = (lo + hi) / 2.0
+            if parameter in {"high_growth_years", "fade_years"}:
+                return int(round(mid))
+            return mid
+    return default
+
+
 def _normalized_base_fcf(
     state: dict, method: str
 ) -> tuple[Optional[float], str, list[str]]:
@@ -1471,30 +1500,111 @@ def compute_dcf_with_argued_inputs(state: dict, argued: dict) -> dict[str, Any]:
         )
 
     low_case, high_case = cases
+
+    # Central case: every argued parameter at the midpoint of its range. This is
+    # the coherent view and the one that anchors the deliverable. The corners
+    # remain available but are explicitly labelled compounded extremes — see
+    # _argued_midpoint() for why they must not be presented as the argued value.
+    _argued_params = [p for p in argued if p not in {"band_dissents", "base_fcf_method"}]
+    central_case = _recompute_dcf_case(
+        base,
+        base_fcf=normalized_fcf,
+        base_fcf_method=applied_method,
+        wacc=float(_argued_midpoint(argued, "wacc", assumptions.get("wacc"))),
+        g_high=float(_argued_midpoint(argued, "g_high", assumptions.get("g_high"))),
+        g_terminal=float(
+            _argued_midpoint(argued, "g_terminal", assumptions.get("g_terminal"))
+        ),
+        high_growth_years=int(
+            _argued_midpoint(
+                argued, "high_growth_years", assumptions.get("high_growth_years")
+            )
+        ),
+        fade_years=int(
+            _argued_midpoint(argued, "fade_years", assumptions.get("fade_years"))
+        ),
+    )
+
+    # One-at-a-time sensitivity: move a single parameter to its argued midpoint
+    # and hold everything else at the engine default. This answers the question
+    # a compounded range cannot — which assumption actually drives the value.
+    default_fv = base.get("fair_value_per_share")
+    sensitivities = []
+    for parameter in _argued_params:
+        kwargs = {
+            "wacc": float(assumptions.get("wacc") or 0.0),
+            "g_high": float(assumptions.get("g_high") or 0.0),
+            "g_terminal": float(assumptions.get("g_terminal") or 0.0),
+            "high_growth_years": int(assumptions.get("high_growth_years") or 0),
+            "fade_years": int(assumptions.get("fade_years") or 0),
+        }
+        if parameter not in kwargs:
+            continue
+        moved = _argued_midpoint(argued, parameter, kwargs[parameter])
+        kwargs[parameter] = (
+            int(moved) if parameter in {"high_growth_years", "fade_years"} else float(moved)
+        )
+        case = _recompute_dcf_case(
+            base,
+            base_fcf=normalized_fcf,
+            base_fcf_method=applied_method,
+            **kwargs,
+        )
+        fv = case.get("fair_value_per_share")
+        sensitivities.append(
+            {
+                "parameter": parameter,
+                "engine_default": assumptions.get(parameter),
+                "argued_midpoint": kwargs[parameter],
+                "fair_value_per_share": fv,
+                "delta_vs_default": (
+                    fv - default_fv
+                    if isinstance(fv, (int, float))
+                    and isinstance(default_fv, (int, float))
+                    else None
+                ),
+            }
+        )
+    sensitivities.sort(
+        key=lambda s: abs(s["delta_vs_default"]) if s["delta_vs_default"] else 0.0,
+        reverse=True,
+    )
+
     values = [
         case.get("fair_value_per_share")
         for case in cases
         if isinstance(case.get("fair_value_per_share"), (int, float))
     ]
+    central_fv = central_case.get("fair_value_per_share")
     result = deepcopy(base)
     result.update(
         {
             "input_source": "argued",
             "base_engine": base,
+            "central_case": central_case,
+            "sensitivities": sensitivities,
             "low_case": low_case,
             "high_case": high_case,
             "fair_value_per_share": None,
             "fair_value_range": (
                 {
                     "low": min(values),
-                    # Midpoint of the argued corners. `fair_value_per_share`
-                    # stays None on purpose — the argued case is a range, not a
-                    # point — but downstream consumers (memo renderer, football
-                    # field, rubric) need one scalar to anchor on, and leaving
-                    # this slot null meant the judgment case rendered blank.
-                    "base": sum(values) / len(values),
+                    # The central (all-midpoints) case, NOT the average of the
+                    # two compounded corners. `fair_value_per_share` stays None
+                    # on purpose — the argued case is a range — but consumers
+                    # need one defensible scalar to anchor on.
+                    "base": (
+                        central_fv
+                        if isinstance(central_fv, (int, float))
+                        else sum(values) / len(values)
+                    ),
                     "high": max(values),
-                    "basis": "midpoint of two argued-input range corners",
+                    "basis": (
+                        "base = central case, every argued parameter at its "
+                        "range midpoint; low/high = COMPOUNDED extremes (all "
+                        "parameters pessimistic / optimistic at once) and are "
+                        "wider than the analysis supports — not scenarios"
+                    ),
                 }
                 if values
                 else None
