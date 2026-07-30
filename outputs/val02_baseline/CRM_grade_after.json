@@ -1,6 +1,6 @@
 {
   "ticker": "CRM",
-  "score": 7,
+  "score": 8,
   "max_score": 11,
   "criteria": [
     {
@@ -12,7 +12,7 @@
       "requires_judgment": true,
       "passed": true,
       "judged": true,
-      "detail": "PASS: Names the SaaS archetype explicitly and justifies FCF DCF as primary method (asset-light recurring cash flow, not a bank/REIT/insurer), while also cross-checking with EPV and comps.",
+      "detail": "PASS: Both parts name the archetype (software_saas) with confidence and stated basis, and justify the primary method (multi-stage FCF DCF for an asset-light SaaS business; forward P/E/EV/EBITDA/P/S as relevant multiples given intangible-heavy, recurring-revenue model) with explicit reasoning, not just assertion.",
       "method": "llm_judge"
     },
     {
@@ -22,9 +22,9 @@
       "type": "binary",
       "mechanical": true,
       "requires_judgment": false,
-      "passed": false,
+      "passed": true,
       "judged": false,
-      "detail": "dcf:base_fcf_method: no resolvable evidence (tried: canonical_metrics.fcf__current_annual, canonical_metrics.fcf__prior_annual, cash_flow.annual_series_derived, canonical_metrics.fcf_conversion__current_annual); peer:SNOW: no resolvable evidence (tried: net_income__current_annual, net_margin__current_annual, fcf__current_annual, ev_to_ebitda); peer:NOW: no resolvable evidence (tried: revenue_yoy, trailing_pe, revenue__current_annual); peer:ADBE: no resolvable evidence (tried: gross_margin__current_annual, rd_pct_revenue__current_annual, revenue_yoy); peer:ORCL: no resolvable evidence (tried: total_debt__current_quarter, debt_to_equity__current_quarter, net_cash_ex_st_investments__current_quarter, net_cash_ex_st_investments__prior_annual); justified_multiple: no resolvable evidence (tried: revenue_yoy, operating_margin__current_annual, operating_margin_yoy_bps, gross_margin__current_annual)",
+      "detail": "11 argued input(s) each have \u22651 resolvable evidence field (resolver=11, engine_record=0)",
       "method": "mechanical"
     },
     {
@@ -36,7 +36,7 @@
       "requires_judgment": false,
       "passed": false,
       "judged": false,
-      "detail": "untraceable currency: $800M, $63B, $25B, $46.0B",
+      "detail": "untraceable currency: $69B",
       "method": "mechanical"
     },
     {
@@ -82,9 +82,9 @@
       "type": "binary",
       "mechanical": true,
       "requires_judgment": false,
-      "passed": false,
+      "passed": true,
       "judged": false,
-      "detail": "mixed comparison windows: ytd, 1y, 3y, 5y, yoy",
+      "detail": "windows present: 1y, 3y, 5y, yoy",
       "method": "mechanical"
     },
     {
@@ -94,9 +94,9 @@
       "type": "binary",
       "mechanical": false,
       "requires_judgment": true,
-      "passed": true,
+      "passed": false,
       "judged": true,
-      "detail": "PASS: The debt/recapitalization risk (new $39.28B stack, unverifiable terms, stale interest coverage) and CRPO/RPO data gap are explicitly left open as unresolved unknowns (\"load-bearing unknown,\" \"has not been re-run by the engine\") rather than neutralized by reassurance.",
+      "detail": "FAIL: The DCF section repeatedly reframes real risks (stale net debt, unsustainable g_high, SBC dilution, terminal value concentration) but each is 'resolved' via the judgment case or explicit numerical adjustment recommendation ('should be re-run with current-quarter net debt'), leaving no risk stated as genuinely open/unresolved \u2014 the write-up prescribes the fix rather than leaving it unsettled.",
       "method": "llm_judge"
     },
     {
@@ -120,7 +120,7 @@
       "requires_judgment": false,
       "passed": true,
       "judged": false,
-      "detail": "3 band dissent(s) flagged",
+      "detail": "2 band dissent(s) flagged",
       "method": "mechanical"
     },
     {
@@ -132,22 +132,11 @@
       "requires_judgment": false,
       "passed": false,
       "judged": false,
-      "detail": "contradictions: eps: [22.6, 7.8]; g_high: [0.158, 0.09]",
+      "detail": "contradictions: eps: [7.8, 22.6] (not explained by two-case set)",
       "method": "mechanical"
     }
   ],
-  "notes": "passed 7/11; failed: 2:evidence_for_argued_inputs, 3:no_untraceable_currency, 7:comparison_windows_consistent, 11:no_numeric_contradiction; llm-judged: 1, 8",
-  "archetype_note": "software_saas",
-  "graded_at_utc": "2026-07-29T06:16:23.977099+00:00",
-  "source_slice": "CRM_state_slice_after.json",
-  "phase": "after",
-  "icl_stats_summary": {
-    "both_critiques_parseable": true,
-    "dcf_judgment_present": true,
-    "comps_judgment_present": true,
-    "dcf_proposed_n": 6,
-    "dcf_accepted_n": 5,
-    "dcf_rejected_n": 1,
-    "band_dissents_n": 3
-  }
+  "notes": "passed 8/11; failed: 3:no_untraceable_currency, 8:unresolved_risk, 11:no_numeric_contradiction; llm-judged: 1, 8",
+  "note": "Offline re-grade after VAL-13 C2/C11 fixes; no new live run.",
+  "graded_at_utc": "2026-07-30T04:59:47.653026+00:00"
 }

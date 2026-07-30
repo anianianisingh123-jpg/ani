@@ -11,108 +11,78 @@
       "overall_confidence"
     ],
     "method_appropriate": true,
-    "method_reasoning": "NVDA is a fabless, essentially unlevered, cash-generative designer with capex at 2.8% of revenue and FCF conversion of 80.5% of net income, so a multi-stage unlevered FCF DCF is the right primary frame. The main structural caveat is terminal-value dominance (PV of terminal value $5.04T of a $7.72T E",
+    "method_reasoning": "NVDA is a fabless, asset-light, cash-generative operating company with FY2026 FCF of $96.68B on 2.8% capex intensity and essentially no leverage, so a multi-stage FCF DCF is the right primary frame. The caveat is that terminal value is ~65% of EV in this run, so the terminal inputs, not the explicit",
     "arguments_proposed": [
       "wacc",
       "g_high",
       "g_terminal",
-      "base_fcf_method",
-      "fade_years"
+      "high_growth_years",
+      "fade_years",
+      "base_fcf_method"
     ],
     "arguments_accepted": [
       "wacc",
       "g_high",
       "g_terminal",
-      "fade_years"
-    ],
-    "arguments_rejected": [
+      "high_growth_years",
+      "fade_years",
       "base_fcf_method"
     ],
-    "clamp_warnings": [
-      "wacc clamped from 11 to 0.2 within [0.05, 0.2]",
-      "wacc clamped from 13 to 0.2 within [0.05, 0.2]",
-      "g_high clamped from 20 to 0.4 within [-0.1, 0.4]",
-      "g_high clamped from 30 to 0.4 within [-0.1, 0.4]",
-      "g_terminal clamped from 2.25 to 0.035 within [0, 0.035]",
-      "g_terminal clamped from 3 to 0.035 within [0, 0.035]",
-      "base_fcf_method rejected: None is not one of ['avg_3y', 'avg_5y', 'mid_cycle', 'ttm']"
-    ],
+    "arguments_rejected": [],
+    "clamp_warnings": [],
     "band_dissents": [
       {
         "parameter": "wacc",
         "argued_range": [
-          0.2,
-          0.2
+          0.115,
+          0.135
         ],
         "archetype_band": [
           0.08,
           0.12
         ],
-        "reasoning": "A 10.0% WACC understates the risk of a business whose demand is an explicit derivative of hyperscaler capex (management's own capex\u2192compute\u2192revenue framing), with ~50% of data-center revenue from three hyperscalers, realized export-control loss (zero Hopper shipped to China vs $4.6B prior-year quarter), an unexplained ~$15.6B goodwill step-up (7.6% of assets) that has not been diligenced, and documented circular-financing/customer-backstop exposure. Balance-sheet risk is genuinely de minimis (debt/equity 0.043 at Q1 FY2027), so the premium belongs entirely in the equity risk premium for demand concentration and cyclicality, not in leverage. Also note macro commentary that the 10-year is the dominant multiple driver for this name; a discount rate at the sector default gives no cushion for that.",
+        "reasoning": "A 10.0% WACC understates the specific, named risks in this underwrite. (1) Export-control binarity: NVDA shipped zero Hopper to China in Q1 FY2027 versus $4.6B a year earlier \u2014 a single jurisdiction was switched off by policy with no warning, which is a permanent non-diversifiable hazard rather than a one-time event. (2) Customer-quality mix shift: hyperscaler revenue grew only ~12% while total grew ~85%, so the marginal buyer is increasingly the sovereign/neocloud/enterprise tier that funds capex with external capital, and the macro assessment identifies rising AI-datacenter financing costs as the live transmission channel. (3) The macro regime assessment names the 10-year yield above ~4.75% as the dominant valuation variable for this asset against a $38T debt / 123% debt-to-GDP fiscal backdrop with term-premium pressure. Note the balance sheet argues the other way \u2014 debt/equity of 0.043 at Q1 FY2027 and a net-cash position mean financial risk is nil \u2014 which is why we cap the argued range at 13.5% rather than higher.",
         "evidence": [
-          "dcf_engine.wacc",
-          "dcf_engine.terminal_value_pv",
+          "macro_regime_assessment",
+          "business_overview",
           "canonical_metrics.debt_to_equity__current_quarter",
-          "canonical_metrics.goodwill_increment__current_annual_vs_prior_annual",
-          "canonical_metrics.goodwill_increment_pct_assets__current_annual",
-          "sec_filing_summary",
-          "macro_context"
+          "canonical_metrics.enterprise_value_ex_st"
         ]
       },
       {
         "parameter": "g_high",
         "argued_range": [
-          0.4,
-          0.4
+          0.18,
+          0.28
         ],
         "archetype_band": [
           0.02,
           0.2
         ],
-        "reasoning": "35% compounded for five straight years takes FCF from $96.68B to $433.50B, which requires revenue several multiples of the current $326.46B annualized run-rate with no margin give. Two facts argue for a lower explicit-stage rate: FY2026 gross margin already compressed 392bps YoY and operating margin 204bps YoY while revenue grew 65.5%, and FCF growth (58.9%) already lagged revenue growth (65.5%) because of the working-capital build (inventory +112.3%, receivables +66.8%, AR+inventory = 81.5% of quarterly revenue). Trailing FCF growth is a poor extrapolant when the incremental dollar is being absorbed by inventory and the customer base is capex-derivative. 20\u201330% is still aggressive but does not require the base year's exceptional 59% to persist unbroken.",
+        "reasoning": "35% FCF growth held flat for five years compounds base FCF of $96.68B to $433.50B by Y5 \u2014 roughly 4.5x \u2014 and the engine's own warning concedes the cap may still be optimistic. Three pieces of company evidence argue the FCF ramp is already decelerating relative to revenue: FCF grew 58.9% versus revenue growth of 65.5%, FCF conversion of net income slipped from 83.5% to 80.5%, and the working-capital drag is real (accounts receivable of $38.47B, up 66.8%, and inventory of $21.40B, up 112.3% against 65.5% revenue growth, with ~115 days of inventory at Q1). Gross margin also contracted 392bp in FY2026 as cost of revenue grew 91.4% versus 65.5% revenue growth, so incremental FCF dollars are being earned at a lower rate than the FY2025 corporate level. An 18-28% five-year high-growth rate still embeds an extraordinary AI buildout \u2014 the sector-cycle tailwind and the ~$1T pipeline framing are real \u2014 without assuming the peak incremental economics of FY2025 persist for half a decade.",
         "evidence": [
-          "canonical_metrics.fcf_yoy",
-          "canonical_metrics.revenue_yoy",
+          "canonical_metrics.fcf__current_annual",
+          "canonical_metrics.fcf__prior_annual",
+          "canonical_metrics.fcf_conversion__current_annual",
+          "canonical_metrics.inventory__current_annual",
           "canonical_metrics.gross_margin_yoy_bps",
-          "canonical_metrics.operating_margin_yoy_bps",
-          "canonical_metrics.inventory_yoy",
-          "canonical_metrics.receivables_yoy",
-          "dcf_engine.g_high",
-          "balance_sheet.current_quarter.derived.ar_plus_inventory_pct_qtr_rev"
-        ]
-      },
-      {
-        "parameter": "g_terminal",
-        "argued_range": [
-          0.035,
-          0.035
-        ],
-        "archetype_band": [
-          0.01,
-          0.03
-        ],
-        "reasoning": "3.0% is at the upper end of a defensible nominal-GDP-anchored terminal rate but not indefensible given the company's software/ecosystem moat and asset-light capex profile (capex 2.8% of revenue). Because PV of terminal value is $5.04T against a $7.72T EV, the model is highly sensitive here, which argues for testing the low end at 2.25% rather than accepting 3.0% as the only case. Perpetual real growth above global GDP for a semiconductor franchise ten years out is the assumption most likely to be wrong in the bull direction.",
-        "evidence": [
-          "dcf_engine.g_terminal",
-          "dcf_engine.terminal_value_pv",
-          "canonical_metrics.capex_pct_revenue__current_annual"
+          "income_statement.current_annual.CostOfRevenue"
         ]
       },
       {
         "parameter": "fade_years",
         "argued_range": [
-          7,
-          10
+          6,
+          8
         ],
         "archetype_band": [
           3,
           7
         ],
-        "reasoning": "A 5-year fade from 35% to 3% is an abrupt glide path for a franchise whose competitive position (integrated hardware plus CUDA/software ecosystem, networking revenue +199% in Q1 FY2027) plausibly decays slowly even as growth normalizes. If the explicit-stage rate is lowered as argued above, a longer fade is the internally consistent offset: it lets growth decelerate gradually rather than concentrating the entire deceleration into five years and then dumping the residual into a terminal value that already carries ~65% of EV. Lengthening the fade also reduces the model's reliance on the single most fragile input (g_terminal).",
+        "reasoning": "If the high-growth stage is shortened, the fade should lengthen rather than the model snapping to terminal. A longer, gentler glide path is more faithful to a franchise with a genuine moat \u2014 full-stack hardware plus Mellanox-derived networking plus software \u2014 that is likely to grow above GDP for a long time even after the AI buildout normalizes. Six to eight fade years also reduces the share of value sitting in the terminal block, which is the correct response to the terminal-value-dominance red flag flagged in the doctrine.",
         "evidence": [
-          "dcf_engine.fade_years",
-          "dcf_engine.terminal_value_pv",
           "business_overview",
+          "canonical_metrics.gross_margin__current_annual",
           "canonical_metrics.rd_pct_revenue__current_annual"
         ]
       }
@@ -123,81 +93,110 @@
     "dcf_engine_fv": 318.62611476243546,
     "dcf_judgment_fv": null,
     "dcf_judgment_range": {
-      "low": 151.86038258444106,
-      "base": null,
-      "high": 193.41832454886853,
-      "basis": "two argued-input range corners"
+      "low": 88.24485737033585,
+      "base": 117.34503593100843,
+      "high": 146.445214491681,
+      "basis": "midpoint of two argued-input range corners"
     },
     "accepted_detail": {
       "wacc": {
         "parameter": "wacc",
         "argued_range": [
-          0.2,
-          0.2
+          0.115,
+          0.135
         ],
         "verdict": "too_low",
-        "reasoning": "A 10.0% WACC understates the risk of a business whose demand is an explicit derivative of hyperscaler capex (management's own capex\u2192compute\u2192revenue framing), with ~50% of data-center revenue from three hyperscalers, realized export-control loss (zero Hopper shipped to China vs $4.6B prior-year quarter), an unexplained ~$15.6B goodwill step-up (7.6% of assets) that has not been diligenced, and documented circular-financing/customer-backstop exposure. Balance-sheet risk is genuinely de minimis (debt/equity 0.043 at Q1 FY2027), so the premium belongs entirely in the equity risk premium for demand concentration and cyclicality, not in leverage. Also note macro commentary that the 10-year is the dominant multiple driver for this name; a discount rate at the sector default gives no cushion for that.",
+        "reasoning": "A 10.0% WACC understates the specific, named risks in this underwrite. (1) Export-control binarity: NVDA shipped zero Hopper to China in Q1 FY2027 versus $4.6B a year earlier \u2014 a single jurisdiction was switched off by policy with no warning, which is a permanent non-diversifiable hazard rather than a one-time event. (2) Customer-quality mix shift: hyperscaler revenue grew only ~12% while total grew ~85%, so the marginal buyer is increasingly the sovereign/neocloud/enterprise tier that funds capex with external capital, and the macro assessment identifies rising AI-datacenter financing costs as the live transmission channel. (3) The macro regime assessment names the 10-year yield above ~4.75% as the dominant valuation variable for this asset against a $38T debt / 123% debt-to-GDP fiscal backdrop with term-premium pressure. Note the balance sheet argues the other way \u2014 debt/equity of 0.043 at Q1 FY2027 and a net-cash position mean financial risk is nil \u2014 which is why we cap the argued range at 13.5% rather than higher.",
         "evidence": [
-          "dcf_engine.wacc",
-          "dcf_engine.terminal_value_pv",
+          "macro_regime_assessment",
+          "business_overview",
           "canonical_metrics.debt_to_equity__current_quarter",
-          "canonical_metrics.goodwill_increment__current_annual_vs_prior_annual",
-          "canonical_metrics.goodwill_increment_pct_assets__current_annual",
-          "sec_filing_summary",
-          "macro_context"
+          "canonical_metrics.enterprise_value_ex_st"
         ],
         "engine_default": 0.1
       },
       "g_high": {
         "parameter": "g_high",
         "argued_range": [
-          0.4,
-          0.4
+          0.18,
+          0.28
         ],
         "verdict": "too_high",
-        "reasoning": "35% compounded for five straight years takes FCF from $96.68B to $433.50B, which requires revenue several multiples of the current $326.46B annualized run-rate with no margin give. Two facts argue for a lower explicit-stage rate: FY2026 gross margin already compressed 392bps YoY and operating margin 204bps YoY while revenue grew 65.5%, and FCF growth (58.9%) already lagged revenue growth (65.5%) because of the working-capital build (inventory +112.3%, receivables +66.8%, AR+inventory = 81.5% of quarterly revenue). Trailing FCF growth is a poor extrapolant when the incremental dollar is being absorbed by inventory and the customer base is capex-derivative. 20\u201330% is still aggressive but does not require the base year's exceptional 59% to persist unbroken.",
+        "reasoning": "35% FCF growth held flat for five years compounds base FCF of $96.68B to $433.50B by Y5 \u2014 roughly 4.5x \u2014 and the engine's own warning concedes the cap may still be optimistic. Three pieces of company evidence argue the FCF ramp is already decelerating relative to revenue: FCF grew 58.9% versus revenue growth of 65.5%, FCF conversion of net income slipped from 83.5% to 80.5%, and the working-capital drag is real (accounts receivable of $38.47B, up 66.8%, and inventory of $21.40B, up 112.3% against 65.5% revenue growth, with ~115 days of inventory at Q1). Gross margin also contracted 392bp in FY2026 as cost of revenue grew 91.4% versus 65.5% revenue growth, so incremental FCF dollars are being earned at a lower rate than the FY2025 corporate level. An 18-28% five-year high-growth rate still embeds an extraordinary AI buildout \u2014 the sector-cycle tailwind and the ~$1T pipeline framing are real \u2014 without assuming the peak incremental economics of FY2025 persist for half a decade.",
         "evidence": [
-          "canonical_metrics.fcf_yoy",
-          "canonical_metrics.revenue_yoy",
+          "canonical_metrics.fcf__current_annual",
+          "canonical_metrics.fcf__prior_annual",
+          "canonical_metrics.fcf_conversion__current_annual",
+          "canonical_metrics.inventory__current_annual",
           "canonical_metrics.gross_margin_yoy_bps",
-          "canonical_metrics.operating_margin_yoy_bps",
-          "canonical_metrics.inventory_yoy",
-          "canonical_metrics.receivables_yoy",
-          "dcf_engine.g_high",
-          "balance_sheet.current_quarter.derived.ar_plus_inventory_pct_qtr_rev"
+          "income_statement.current_annual.CostOfRevenue"
         ],
         "engine_default": 0.35
       },
       "g_terminal": {
         "parameter": "g_terminal",
         "argued_range": [
-          0.035,
-          0.035
+          0.025,
+          0.03
         ],
         "verdict": "defensible",
-        "reasoning": "3.0% is at the upper end of a defensible nominal-GDP-anchored terminal rate but not indefensible given the company's software/ecosystem moat and asset-light capex profile (capex 2.8% of revenue). Because PV of terminal value is $5.04T against a $7.72T EV, the model is highly sensitive here, which argues for testing the low end at 2.25% rather than accepting 3.0% as the only case. Perpetual real growth above global GDP for a semiconductor franchise ten years out is the assumption most likely to be wrong in the bull direction.",
+        "reasoning": "3.0% terminal growth is at the upper end of a defensible nominal-GDP-linked range but not indefensible for a franchise with 71.1% gross margins and 60.4% operating margins that reinvests only 2.8% of revenue in capex. The binding problem is not the rate itself but the scale it is applied to: terminal FCF of $888.92B on a $13.08T terminal value means ~65% of EV sits beyond Y10, so the terminal assumption is load-bearing regardless of whether 2.5% or 3.0% is chosen. We argue 2.5-3.0% rather than pushing lower because the asset-light cost structure genuinely supports above-average steady-state economics.",
         "evidence": [
-          "dcf_engine.g_terminal",
-          "dcf_engine.terminal_value_pv",
-          "canonical_metrics.capex_pct_revenue__current_annual"
+          "canonical_metrics.gross_margin__current_annual",
+          "canonical_metrics.operating_margin__current_annual",
+          "canonical_metrics.capex_pct_revenue__current_annual",
+          "canonical_metrics.fcf_margin__current_annual"
         ],
         "engine_default": 0.03
+      },
+      "high_growth_years": {
+        "parameter": "high_growth_years",
+        "argued_range": [
+          3,
+          4
+        ],
+        "verdict": "too_high",
+        "reasoning": "Five years of undecayed hypergrowth is longer than the visible order book supports. The named forward evidence is management's ~$1T pipeline through 2027 and ~$119B of supply commitments \u2014 a two-to-three-year window, not five. Semiconductors are described in the research as historically cyclical, and the specific tells of a supply catch-up are already appearing on NVDA's own balance sheet: inventory of $25.80B at Q1 FY2027 (~115 days, seven days above the five-year average) after growing from $10.08B to $21.40B to $25.80B across three consecutive balance-sheet dates. Shortening the undecayed stage to 3-4 years and letting the fade do more work is the honest expression of contracted-visibility-then-uncertainty. The archetype card's own thesis invalidator is growth decelerating faster than the fade assumes.",
+        "evidence": [
+          "canonical_metrics.inventory__current_quarter",
+          "canonical_metrics.inventory__prior_annual",
+          "macro_regime_assessment",
+          "business_overview"
+        ],
+        "engine_default": 5
       },
       "fade_years": {
         "parameter": "fade_years",
         "argued_range": [
-          7,
-          10
+          6,
+          8
         ],
         "verdict": "too_low",
-        "reasoning": "A 5-year fade from 35% to 3% is an abrupt glide path for a franchise whose competitive position (integrated hardware plus CUDA/software ecosystem, networking revenue +199% in Q1 FY2027) plausibly decays slowly even as growth normalizes. If the explicit-stage rate is lowered as argued above, a longer fade is the internally consistent offset: it lets growth decelerate gradually rather than concentrating the entire deceleration into five years and then dumping the residual into a terminal value that already carries ~65% of EV. Lengthening the fade also reduces the model's reliance on the single most fragile input (g_terminal).",
+        "reasoning": "If the high-growth stage is shortened, the fade should lengthen rather than the model snapping to terminal. A longer, gentler glide path is more faithful to a franchise with a genuine moat \u2014 full-stack hardware plus Mellanox-derived networking plus software \u2014 that is likely to grow above GDP for a long time even after the AI buildout normalizes. Six to eight fade years also reduces the share of value sitting in the terminal block, which is the correct response to the terminal-value-dominance red flag flagged in the doctrine.",
         "evidence": [
-          "dcf_engine.fade_years",
-          "dcf_engine.terminal_value_pv",
           "business_overview",
+          "canonical_metrics.gross_margin__current_annual",
           "canonical_metrics.rd_pct_revenue__current_annual"
         ],
         "engine_default": 5
+      },
+      "base_fcf_method": {
+        "parameter": "base_fcf_method",
+        "argued_range": [
+          "ttm",
+          "ttm"
+        ],
+        "verdict": "defensible",
+        "reasoning": "The FY2026 base of $96.68B is the right anchor and should not be smoothed. A 3- or 5-year average would drag in FY2024 FCF of $27.02B from a pre-AI-scale business and materially understate the current earnings power of a company whose revenue tripled over that window. Critically, the FCF margin has been remarkably stable at 44.8% / 46.6% / 44.4% across three years of 3.5x revenue growth, so the current-year base is not a margin outlier requiring mid-cycle adjustment. We would explicitly reject annualizing Q1 FY2027 \u2014 the $194.35B run-rate is a naive x4 on a quarter whose 59.5% FCF margin reflects working-capital timing, and the same quarter's reported net income exceeds operating income on an untagged ~$16B non-operating item.",
+        "evidence": [
+          "cash_flow_statement.current_annual.FreeCashFlow",
+          "canonical_metrics.fcf_margin__current_annual",
+          "canonical_metrics.fcf_margin__prior_annual",
+          "canonical_metrics.fcf_annualized_from_current_quarter",
+          "canonical_metrics.fcf_margin__current_quarter"
+        ],
+        "value": "ttm",
+        "engine_default": "ttm"
       }
     }
   },
@@ -214,12 +213,6 @@
     "primary_multiple": "forward_pe",
     "peer_changes_proposed": [
       {
-        "ticker": "TSM",
-        "action": "exclude",
-        "has_evidence": true,
-        "has_reasoning": true
-      },
-      {
         "ticker": "INTC",
         "action": "exclude",
         "has_evidence": true,
@@ -233,12 +226,12 @@
       },
       {
         "ticker": "AAPL",
-        "action": "include",
+        "action": "exclude",
         "has_evidence": true,
         "has_reasoning": true
       },
       {
-        "ticker": "MSFT",
+        "ticker": "TSM",
         "action": "include",
         "has_evidence": true,
         "has_reasoning": true
@@ -255,29 +248,28 @@
     "justified_multiple": {
       "metric": "forward_pe",
       "argued_range": [
-        26.0,
-        32.0
+        22.0,
+        28.0
       ],
       "has_evidence": true,
       "evidence": [
-        "revenue_yoy",
-        "net_income_yoy",
-        "operating_margin__current_annual",
-        "gross_margin_yoy_bps",
-        "operating_margin_yoy_bps",
-        "fcf_margin__current_annual",
-        "fcf_conversion__current_annual",
-        "capex_pct_revenue__current_annual",
-        "debt_to_equity__current_annual",
-        "inventory_yoy",
-        "receivables_yoy",
-        "inventory__current_quarter",
-        "accounts_receivable__current_quarter",
-        "goodwill_increment__current_annual_vs_prior_annual",
-        "goodwill_increment_pct_assets__current_annual",
-        "buyback_dollars_per_pct_point__current_annual_vs_prior_annual",
-        "gross_margin__current_quarter",
-        "revenue_annualized_from_current_quarter"
+        "canonical_metrics.revenue_yoy",
+        "canonical_metrics.net_income_yoy",
+        "canonical_metrics.operating_margin__current_annual",
+        "canonical_metrics.fcf_margin__current_annual",
+        "canonical_metrics.fcf__current_annual",
+        "canonical_metrics.capex_pct_revenue__current_annual",
+        "canonical_metrics.debt_to_equity__current_quarter",
+        "canonical_metrics.net_cash_ex_st_investments__current_quarter",
+        "canonical_metrics.gross_margin_yoy_bps",
+        "canonical_metrics.inventory_yoy",
+        "canonical_metrics.receivables_yoy",
+        "canonical_metrics.goodwill_increment__current_annual_vs_prior_annual",
+        "canonical_metrics.goodwill_pct_assets__current_annual",
+        "canonical_metrics.buyback_dollars_per_pct_point__current_annual_vs_prior_annual",
+        "canonical_metrics.buyback_spend__current_annual",
+        "income_statement.current_annual.CostOfRevenue",
+        "income_statement.current_annual.OperatingIncomeLoss"
       ]
     },
     "judgment_peer_list": null,
@@ -293,9 +285,9 @@
     "both_critiques_parseable": true,
     "dcf_judgment_present": true,
     "comps_judgment_present": true,
-    "dcf_proposed_n": 5,
-    "dcf_accepted_n": 4,
-    "dcf_rejected_n": 1,
-    "band_dissents_n": 4
+    "dcf_proposed_n": 6,
+    "dcf_accepted_n": 6,
+    "dcf_rejected_n": 0,
+    "band_dissents_n": 3
   }
 }

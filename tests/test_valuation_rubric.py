@@ -486,6 +486,89 @@ def test_c11_passes_when_labels_consistent():
     assert by[11]["passed"] is True
 
 
+def test_c11_two_case_default_and_judgment_not_contradiction():
+    """VAL-13: base FV + judgment corners are the feature, not a fail."""
+    state = _good_state(
+        fundamental_valuation=(
+            "Engine base fair value $144.08 per share (WACC 10.5%, g_high 20%). "
+            "Judgment case: fair value $88.24 – $146.45 (WACC 11.5%–13.5%, "
+            "g_high 18%–28%). Risk remains open."
+        ),
+        relative_valuation="Comps only.",
+        final_memo="",
+        dcf_engine={
+            **_base_engines()["dcf_engine"],
+            "fair_value_per_share": 144.08,
+            "fair_value_range": {"low": 122.47, "base": 144.08, "high": 165.69},
+            "assumptions": {
+                "wacc": 0.105,
+                "g_high": 0.20,
+                "g_terminal": 0.03,
+            },
+        },
+        dcf_judgment={
+            "input_source": "argued",
+            "fair_value_per_share": None,
+            "fair_value_range": {
+                "low": 88.24,
+                "base": 117.34,
+                "high": 146.45,
+                "basis": "two argued-input corners",
+            },
+            "assumptions": {
+                "wacc": 0.125,
+                "g_high": 0.23,
+                "g_terminal": 0.03,
+            },
+            "clamp_warnings": [],
+            "band_dissents": [],
+        },
+        valuation_critique={
+            "archetype": "general",
+            "method_appropriate": True,
+            "method_reasoning": "DCF ok",
+            "arguments": [
+                {
+                    "parameter": "wacc",
+                    "engine_default": 0.105,
+                    "argued_range": [0.115, 0.135],
+                    "verdict": "too_low",
+                    "reasoning": "concentration risk",
+                    "evidence": ["dcf_engine.inputs.net_debt"],
+                },
+                {
+                    "parameter": "g_high",
+                    "engine_default": 0.20,
+                    "argued_range": [0.18, 0.28],
+                    "verdict": "defensible",
+                    "reasoning": "fade from peak",
+                    "evidence": ["canonical_metrics.revenue_growth"],
+                },
+            ],
+            "terminal_value_share_of_ev": 0.65,
+            "band_dissents": [],
+        },
+    )
+    by = _result_by_id(grade_valuation(state, judge=_always_pass_judge))
+    assert by[11]["passed"] is True, by[11]["detail"]
+    assert "two-case" in by[11]["detail"].lower() or "explained" in by[11]["detail"].lower()
+
+
+def test_c11_still_flags_true_within_case_contradiction():
+    """Patents 196k vs 300k is still a real contradiction."""
+    state = _good_state(
+        fundamental_valuation=(
+            "The company holds 196,000 patents. Later: over 300,000 patents. "
+            "Fair value $144.08. Range $122 – $166."
+        ),
+        relative_valuation="",
+        final_memo="",
+    )
+    by = _result_by_id(grade_valuation(state, judge=_always_pass_judge))
+    assert by[11]["passed"] is False
+    assert "patent" in by[11]["detail"].lower()
+
+
 # ── Criterion 2 — evidence ───────────────────────────────────────────────────
 
 def test_c2_vacuous_pass_without_critiques():
@@ -528,6 +611,8 @@ def test_c2_fails_on_empty_evidence():
 
 def test_c2_fails_on_unresolvable_evidence_field():
     state = _good_state(
+        # No judgment case → cannot fall back to engine accept record.
+        dcf_judgment=None,  # type: ignore[arg-type]
         valuation_critique={
             "archetype": "general",
             "method_appropriate": True,
@@ -546,9 +631,109 @@ def test_c2_fails_on_unresolvable_evidence_field():
             "band_dissents": [],
         },
     )
+    state.pop("dcf_judgment", None)
     by = _result_by_id(grade_valuation(state, judge=_always_pass_judge))
     assert by[2]["passed"] is False
-    assert "no resolvable evidence" in by[2]["detail"].lower()
+    assert "no resolvable evidence" in by[2]["detail"].lower() or "rejected" in by[2]["detail"].lower()
+
+
+def test_c2_uses_engine_resolver_for_canonical_by_id():
+    """VAL-13: metric keys live under canonical_metrics.by_id, not top-level."""
+    state = _good_state(
+        canonical_metrics={
+            "ticker": "NVDA",
+            "by_id": {
+                "fcf__current_annual": {
+                    "value": 14_402_000_000.0,
+                    "headline": "FCF $14.4B",
+                    "staleness": "",
+                },
+                "revenue_growth": {"value": 0.55, "headline": "rev +55%", "staleness": ""},
+            },
+        },
+        valuation_critique={
+            "archetype": "general",
+            "method_appropriate": True,
+            "method_reasoning": "DCF",
+            "arguments": [
+                {
+                    "parameter": "g_high",
+                    "engine_default": 0.20,
+                    "argued_range": [0.12, 0.15],
+                    "verdict": "too_high",
+                    "reasoning": "peak FCF",
+                    "evidence": ["canonical_metrics.fcf__current_annual"],
+                }
+            ],
+            "terminal_value_share_of_ev": 0.71,
+            "band_dissents": [],
+        },
+        # Drop other arguments so only this one is graded
+        relative_critique={
+            "archetype": "general",
+            "primary_multiple": "forward_pe",
+            "multiple_reasoning": "ok",
+            "peer_changes": [],
+            "justified_multiple": {
+                "metric": "forward_pe",
+                "subject_current": 28.0,
+                "peer_median": 22.0,
+                "argued_range": [26.0, 30.0],
+                "reasoning": "ok",
+                "evidence": ["canonical_metrics.revenue_growth"],
+            },
+            "band_dissents": [],
+        },
+    )
+    by = _result_by_id(grade_valuation(state, judge=_always_pass_judge))
+    assert by[2]["passed"] is True, by[2]["detail"]
+
+
+def test_c2_engine_accept_record_fallback_when_slice_incomplete():
+    """When statements are missing but the engine accepted the param, pass."""
+    state = _good_state(
+        # No cash_flow_statement in state (simulates thin slice)
+        valuation_critique={
+            "archetype": "general",
+            "method_appropriate": True,
+            "method_reasoning": "DCF",
+            "arguments": [
+                {
+                    "parameter": "base_fcf_method",
+                    "engine_default": "ttm",
+                    "argued_range": ["avg_3y", "avg_3y"],
+                    "verdict": "defensible",
+                    "reasoning": "mid-cycle",
+                    "evidence": ["cash_flow_statement.current_annual.FreeCashFlow"],
+                }
+            ],
+            "terminal_value_share_of_ev": 0.71,
+            "band_dissents": [],
+        },
+        dcf_judgment={
+            "input_source": "argued",
+            "assumptions": {"base_fcf_method": "avg_3y", "wacc": 0.10},
+            "fair_value_range": {"low": 100.0, "base": 110.0, "high": 120.0},
+            "clamp_warnings": [],  # no evidence rejection
+            "band_dissents": [],
+        },
+        relative_critique={
+            "archetype": "general",
+            "primary_multiple": "forward_pe",
+            "multiple_reasoning": "ok",
+            "peer_changes": [],
+            "justified_multiple": {
+                "metric": "forward_pe",
+                "argued_range": [26.0, 30.0],
+                "reasoning": "ok",
+                "evidence": ["canonical_metrics.revenue_growth"],
+            },
+            "band_dissents": [],
+        },
+    )
+    by = _result_by_id(grade_valuation(state, judge=_always_pass_judge))
+    assert by[2]["passed"] is True, by[2]["detail"]
+    assert "engine_record" in by[2]["detail"]
 
 
 # ── Criterion 4 — TV share ───────────────────────────────────────────────────

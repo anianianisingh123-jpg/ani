@@ -837,9 +837,17 @@ def data_gatherer_node(state: ResearchState) -> dict:
     def _stmt(key: str) -> dict:
         base = live.get(key) or {}
         if parsed and isinstance(parsed.get(key), dict):
-            out = parsed[key]
+            out = dict(parsed[key])
         else:
             out = dict(base) if isinstance(base, dict) else {}
+        # Multi-year history is deterministic filing data.  The model may
+        # enrich/normalize the four headline blocks, but it must neither drop
+        # nor originate annual_series.  Always restore it from the SEC/XBRL
+        # extraction path after choosing the model-vs-fallback statement.
+        filing_series = base.get("annual_series") if isinstance(base, dict) else None
+        out["annual_series"] = (
+            list(filing_series) if isinstance(filing_series, list) else []
+        )
         # Always attach live market under a clean key (not a _debug field).
         if isinstance(out, dict) and "live_market" not in out:
             out = {**out, "live_market": live.get("live_market") or {}}

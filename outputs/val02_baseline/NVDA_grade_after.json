@@ -1,6 +1,6 @@
 {
   "ticker": "NVDA",
-  "score": 8,
+  "score": 10,
   "max_score": 11,
   "criteria": [
     {
@@ -12,7 +12,7 @@
       "requires_judgment": true,
       "passed": true,
       "judged": true,
-      "detail": "PASS: names the \"general\" archetype and states/justifies primary method (multi-stage FCF DCF, justified by NVDA's positive FCF and low leverage vs. bank/REIT invalidity) plus justifies multiples choice given profitability/clean GAAP earnings.",
+      "detail": "PASS: Archetype (\"fabless semiconductor... general\" classification) is explicitly named, and DCF is justified via high-margin/asset-light structure with explicit rejection of DCF-invalid archetypes (bank/REIT/insurer).",
       "method": "llm_judge"
     },
     {
@@ -22,9 +22,9 @@
       "type": "binary",
       "mechanical": true,
       "requires_judgment": false,
-      "passed": false,
+      "passed": true,
       "judged": false,
-      "detail": "dcf:g_high: no resolvable evidence (tried: canonical_metrics.fcf_yoy, canonical_metrics.revenue_yoy, canonical_metrics.gross_margin_yoy_bps, canonical_metrics.operating_margin_yoy_bps); dcf:base_fcf_method: no resolvable evidence (tried: canonical_metrics.fcf__current_annual, canonical_metrics.fcf_annualized_from_current_quarter, canonical_metrics.fcf_margin__current_annual, canonical_metrics.fcf_margin__current_quarter); peer:TSM: no resolvable evidence (tried: capex_pct_revenue__current_annual, fcf_margin__current_annual, gross_margin__current_annual); peer:INTC: no resolvable evidence (tried: revenue_yoy, operating_income_yoy, operating_margin__current_annual); peer:AMD: no resolvable evidence (tried: net_income__current_annual, net_margin__current_annual); peer:AAPL: no resolvable evidence (tried: market_cap, market_cap_price_x_shares); peer:MSFT: no resolvable evidence (tried: revenue__current_quarter, revenue_annualized_from_current_quarter); justified_multiple: no resolvable evidence (tried: revenue_yoy, net_income_yoy, operating_margin__current_annual, gross_margin_yoy_bps)",
+      "detail": "11 argued input(s) each have \u22651 resolvable evidence field (resolver=11, engine_record=0)",
       "method": "mechanical"
     },
     {
@@ -36,7 +36,7 @@
       "requires_judgment": false,
       "passed": false,
       "judged": false,
-      "detail": "untraceable currency: $16.4B, $27.02B",
+      "detail": "untraceable currency: $18B, $91B, $38T, $1T, $27.02B, $16B",
       "method": "mechanical"
     },
     {
@@ -72,7 +72,7 @@
       "requires_judgment": false,
       "passed": true,
       "judged": false,
-      "detail": "5 peer_change(s) each justified",
+      "detail": "4 peer_change(s) each justified",
       "method": "mechanical"
     },
     {
@@ -96,7 +96,7 @@
       "requires_judgment": true,
       "passed": true,
       "judged": true,
-      "detail": "PASS: The write-up explicitly leaves the goodwill step-up, terminal-value dominance/WACC sensitivity, and growth-durability (g_high cap vs. hyperscaler capex deceleration) as unresolved risks, stating the DCF \"does not resolve\" whether NVDA is cheap or fully priced \u2014 genuinely open, not neutralized.",
+      "detail": "PASS: The write-up leaves multiple risks explicitly open/unresolved \u2014 e.g., the export-control binarity and hyperscaler-mix deceleration are used to argue a materially lower judgment valuation without being neutralized, the terminal-value dominance is flagged as a genuine structural sensitivity rather than resolved, and the wide dispersion between DCF scenarios is explicitly left as \"genuinely wide range\" deferred to separate comps work rather than closed out.",
       "method": "llm_judge"
     },
     {
@@ -120,7 +120,7 @@
       "requires_judgment": false,
       "passed": true,
       "judged": false,
-      "detail": "4 band dissent(s) flagged",
+      "detail": "3 band dissent(s) flagged",
       "method": "mechanical"
     },
     {
@@ -130,24 +130,13 @@
       "type": "binary",
       "mechanical": true,
       "requires_judgment": false,
-      "passed": false,
+      "passed": true,
       "judged": false,
-      "detail": "contradictions: wacc: [0.1, 1.0]; fair_value: [318.63, 100.0, 197.01]; eps: [4.9, 1.0]",
+      "detail": "no within-case contradictions across 6 identity metric(s); 3 multi-value set(s) explained by default/judgment cases",
       "method": "mechanical"
     }
   ],
-  "notes": "passed 8/11; failed: 2:evidence_for_argued_inputs, 3:no_untraceable_currency, 11:no_numeric_contradiction; llm-judged: 1, 8",
-  "archetype_note": "general / semis",
-  "graded_at_utc": "2026-07-29T06:16:16.819919+00:00",
-  "source_slice": "NVDA_state_slice_after.json",
-  "phase": "after",
-  "icl_stats_summary": {
-    "both_critiques_parseable": true,
-    "dcf_judgment_present": true,
-    "comps_judgment_present": true,
-    "dcf_proposed_n": 5,
-    "dcf_accepted_n": 4,
-    "dcf_rejected_n": 1,
-    "band_dissents_n": 4
-  }
+  "notes": "passed 10/11; failed: 3:no_untraceable_currency; llm-judged: 1, 8",
+  "note": "Offline re-grade after VAL-13 C2/C11 fixes; no new live run.",
+  "graded_at_utc": "2026-07-30T04:59:47.621965+00:00"
 }

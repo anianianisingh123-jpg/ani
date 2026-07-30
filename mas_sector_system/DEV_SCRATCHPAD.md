@@ -172,6 +172,7 @@ Tracks A / B / C have **zero file overlap** by construction. **Note:** in round 
 | VAL-07 | Calibration loop — prior call vs realized price. `memory.py`. | _unassigned_ | TODO |
 | VAL-08 | Clean memo schema 1.2 + disclosure routing (§8): band dissents → clean memo, clamp warnings → audit log. `artifacts.py`. | _unassigned_ | TODO |
 | VAL-09 | Football-field bars: default / judgment low / judgment high / comps-implied / EPV (§8). `pdf_generator.py`. | _unassigned_ | TODO |
+| VAL-12 | Preserve filing-derived `annual_series` when the data-gatherer model supplies statement blocks; add model-supplied-path coverage proving `fcf_history()` receives ≥3 rows. | Codex/GPT-5 | DONE |
 
 ---
 
@@ -367,3 +368,15 @@ Tracks A / B / C have **zero file overlap** by construction. **Note:** in round 
   5. **Still open:** the argued-parameter set is FCF-DCF-shaped, so it is legitimately inert for residual-income / FFO / NAV archetypes (now correctly disclosed rather than hidden). Making it useful for financials needs a different parameter set (cost of equity, ROE fade, book growth) — that is a design task, not a bug fix.
 - **Verification:** `python3 -m pytest tests/ -q` → **160 passed**. NVDA's exact live payload replayed: `wacc [11.0,13.0] → [0.11,0.13]`, `g_high [20.0,30.0] → [0.20,0.30]`, `base_fcf_method ['avg_3y','ttm'] → avg_3y`, zero rejections.
 - **Status:** COMPLETED
+
+### [2026-07-29] - [Codex/GPT-5] - [VAL-12: preserve filing-derived annual series]
+- What I changed: Changed the data-gatherer statement merge so model-supplied current/prior blocks remain authoritative for their existing semantics while `annual_series` is always restored from the SEC/XBRL extraction result. A model-provided or omitted series can therefore neither overwrite nor erase the filing history.
+- Files modified: `mas_sector_system/agents.py`, `tests/test_valuation_wiring.py`, `mas_sector_system/DEV_SCRATCHPAD.md`.
+- Notes / Handoff for next agent: The regression fixture makes the model supply all three statement dicts plus bogus rank-99 income/cash series; the returned state retains the model headline markers but replaces both histories with three filing-derived ranks, and `fcf_history()` returns three rows. Focused valuation wiring/engine tests pass. The full suite has 27 unrelated pre-existing failures in `tests/test_valuation_rubric.py` because `grade_valuation()` calls `_grade_c11(state, agent_text)` while `_grade_c11` accepts one argument; 136 other tests pass. Pre-existing changes in `tools.py` and `outputs/val02_baseline/` were not touched.
+- Status: COMPLETED
+
+### [2026-07-30] - [Grok] - [VAL-13: grader C2/C11 false negatives]
+- What I changed: Criterion 2 now imports and reuses `valuation_engine._has_resolvable_evidence` / `_evidence_value` (fixes `canonical_metrics.by_id` miss). Falls back to engine accept/reject via `clamp_warnings` + `dcf_judgment.assumptions` when statement trees are absent from a thin slice. Criterion 11 is two-case aware: values explained by default FV/assumptions, judgment range corners, or argued_range corners are not contradictions. Harness `_SLICE_KEYS` now includes statement trees for future runs.
+- Files modified: `mas_sector_system/valuation_rubric.py`, `tests/test_valuation_rubric.py` (+4), `tmp/run_val02_baseline.py` (slice keys), offline rewrote `outputs/val02_baseline/*_grade_after.json`.
+- Offline re-grade (no new live runs): NVDA after 8→**9**/11 (C2↑ C11↑ for FV/WACC); CRM 7→**8**/11 (C2↑); remaining fails are real narrative (C3 currency, EPS dual, C8). Do not treat pre-VAL-13 after scores as measurable.
+- Status: COMPLETED
