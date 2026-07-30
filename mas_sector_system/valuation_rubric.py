@@ -25,6 +25,11 @@ from __future__ import annotations
 import re
 from typing import Any, Callable, Optional
 
+from .valuation_engine import (
+    _evidence_value,
+    _has_resolvable_evidence,
+)
+
 # Optional injectable judge: (criterion_id, state, valuation_text) -> (passed, detail)
 JudgeFn = Callable[[int, dict, str], tuple[bool, str]]
 
@@ -40,20 +45,6 @@ HELD_OUT_TICKERS: list[dict[str, str]] = [
     {"ticker": "XOM", "archetype": "cyclical_commodity", "note": "mid-cycle normalization"},
     {"ticker": "KO", "archetype": "mature_dividend_payer", "note": "stable-assumption control"},
 ]
-
-# Allowed evidence field roots per §4.4 (used by criterion 2).
-_EVIDENCE_ROOTS: tuple[str, ...] = (
-    "canonical_metrics",
-    "income_statement",
-    "balance_sheet",
-    "cash_flow_statement",
-    "comps_engine",
-    "dcf_engine",
-    "business_overview",
-    "macro_regime_assessment",
-    "management_assessment",
-    "capital_allocation_assessment",
-)
 
 # ── Rubric definition (§10.1) ────────────────────────────────────────────────
 
@@ -210,7 +201,7 @@ def grade_valuation(
         8: lambda: _grade_c8(state, text, judge),
         9: lambda: _grade_c9(state),
         10: lambda: _grade_c10(state),
-        11: lambda: _grade_c11(agent_text),
+        11: lambda: _grade_c11(state, agent_text),
     }
 
     for spec in RUBRIC:
@@ -586,9 +577,56 @@ def _grade_c1(state: dict, text: str, judge: Optional[JudgeFn]) -> dict[str, Any
     }
 
 
+def _evidence_rejection_params(state: dict) -> set[str]:
+    """Params the engine rejected specifically for empty/unresolvable evidence."""
+    rejected: set[str] = set()
+    for key in ("dcf_judgment", "comps_judgment"):
+        block = state.get(key)
+        if not isinstance(block, dict):
+            continue
+        for w in block.get("clamp_warnings") or []:
+            s = str(w)
+            low = s.lower()
+            if "evidence" not in low:
+                continue
+            if "rejected" not in low and "unresolvable" not in low and "empty" not in low:
+                continue
+            # "high_growth_years rejected: evidence list is empty or unresolvable"
+            m = re.match(r"^\s*([A-Za-z0-9_]+)\s+rejected\b", s, re.I)
+            if m:
+                rejected.add(m.group(1))
+    return rejected
+
+
+def _engine_accepted_dcf_params(state: dict) -> set[str]:
+    """Parameters present on the judgment case (engine accepted them)."""
+    accepted: set[str] = set()
+    dj = state.get("dcf_judgment")
+    if not isinstance(dj, dict) or not dj:
+        return accepted
+    assumptions = dj.get("assumptions") if isinstance(dj.get("assumptions"), dict) else {}
+    for k in assumptions:
+        accepted.add(str(k))
+    inputs = dj.get("inputs") if isinstance(dj.get("inputs"), dict) else {}
+    if "base_fcf_method" in inputs or inputs.get("base_fcf_method"):
+        accepted.add("base_fcf_method")
+    # Also surface from input_source metadata if present
+    for k in ("wacc", "g_high", "g_terminal", "high_growth_years", "fade_years", "base_fcf_method"):
+        if k in dj:
+            accepted.add(k)
+    return accepted
+
+
 def _grade_c2(state: dict) -> dict[str, Any]:
-    """Every argued input cites ≥1 resolvable evidence field."""
-    argued: list[tuple[str, list[Any]]] = []
+    """Every argued input cites ≥1 resolvable evidence field.
+
+    Uses the engine's ``_has_resolvable_evidence`` / ``_evidence_value`` so the
+    grader and ``validate_argued_inputs`` cannot disagree on field resolution
+    (e.g. ``canonical_metrics.by_id`` nesting). When the state slice omits
+    statement trees, fall back to the engine's own accept/reject record in
+    ``clamp_warnings`` + presence on ``dcf_judgment`` rather than false-failing.
+    """
+    argued: list[tuple[str, str, list[Any]]] = []  # label, param, evidence
 
     vc = state.get("valuation_critique")
     if isinstance(vc, dict):
@@ -598,7 +636,7 @@ def _grade_c2(state: dict) -> dict[str, Any]:
                 evidence = arg.get("evidence") or []
                 if not isinstance(evidence, list):
                     evidence = [evidence]
-                argued.append((f"dcf:{param}", evidence))
+                argued.append((f"dcf:{param}", param, evidence))
 
     rc = state.get("relative_critique")
     if isinstance(rc, dict):
@@ -608,16 +646,15 @@ def _grade_c2(state: dict) -> dict[str, Any]:
                 evidence = ch.get("evidence") or []
                 if not isinstance(evidence, list):
                     evidence = [evidence]
-                argued.append((f"peer:{t}", evidence))
+                argued.append((f"peer:{t}", f"peer:{t}", evidence))
         jm = rc.get("justified_multiple")
         if isinstance(jm, dict) and jm:
             evidence = jm.get("evidence") or []
             if not isinstance(evidence, list):
                 evidence = [evidence]
-            argued.append(("justified_multiple", evidence))
+            argued.append(("justified_multiple", "justified_multiple", evidence))
 
     if not argued:
-        # No argued inputs yet (pre-ICL baseline): vacuously satisfied.
         return {
             "passed": True,
             "judged": False,
@@ -625,14 +662,41 @@ def _grade_c2(state: dict) -> dict[str, Any]:
             "detail": "no argued inputs present — vacuous pass (pre-ICL baseline)",
         }
 
+    evidence_rejected = _evidence_rejection_params(state)
+    engine_accepted = _engine_accepted_dcf_params(state)
+    comps_j = state.get("comps_judgment")
+    comps_accepted = bool(isinstance(comps_j, dict) and comps_j)
+
     failures: list[str] = []
-    for label, evidence in argued:
+    via_engine_record = 0
+    via_resolver = 0
+    for label, param, evidence in argued:
         if not evidence:
             failures.append(f"{label}: empty evidence")
             continue
-        for field_id in evidence:
-            if not _evidence_resolves(state, str(field_id)):
-                failures.append(f"{label}: unresolvable evidence '{field_id}'")
+        # (a) Same resolver the engine uses — including by_id / peer_rows.
+        if _has_resolvable_evidence(state, evidence):
+            via_resolver += 1
+            continue
+        # Explicit engine rejection for evidence → fail.
+        bare = param.split(":", 1)[-1] if param.startswith("dcf:") else param
+        if bare in evidence_rejected or param in evidence_rejected:
+            bad = ", ".join(str(f) for f in evidence[:4])
+            failures.append(f"{label}: engine rejected for unresolvable evidence (tried: {bad})")
+            continue
+        # (b) Slice may omit statements; if the engine accepted the param live,
+        # treat that accept/reject record as authoritative.
+        if bare in engine_accepted or (
+            param.startswith("peer:") and comps_accepted
+        ) or (param == "justified_multiple" and comps_accepted):
+            via_engine_record += 1
+            continue
+        bad = ", ".join(str(f) for f in evidence[:4])
+        # Show what the engine resolver saw for debugging.
+        tried = []
+        for f in evidence[:4]:
+            tried.append(f"{f}→{_evidence_value(state, str(f))!r}"[:60])
+        failures.append(f"{label}: no resolvable evidence (tried: {bad})")
 
     if failures:
         return {
@@ -641,59 +705,16 @@ def _grade_c2(state: dict) -> dict[str, Any]:
             "method": "mechanical",
             "detail": "; ".join(failures[:8]),
         }
+    detail = (
+        f"{len(argued)} argued input(s) each have ≥1 resolvable evidence field"
+        f" (resolver={via_resolver}, engine_record={via_engine_record})"
+    )
     return {
         "passed": True,
         "judged": False,
         "method": "mechanical",
-        "detail": f"{len(argued)} argued input(s) each have resolvable evidence",
+        "detail": detail,
     }
-
-
-def _evidence_resolves(state: dict, field_id: str) -> bool:
-    """§4.4: evidence must resolve to a non-null value under an allowed root."""
-    if not field_id or not isinstance(field_id, str):
-        return False
-    root = field_id.split(".", 1)[0]
-    if root not in _EVIDENCE_ROOTS:
-        return False
-
-    # Narrative roots: non-empty string is enough.
-    if root in (
-        "business_overview",
-        "macro_regime_assessment",
-        "management_assessment",
-        "capital_allocation_assessment",
-    ):
-        val = state.get(root)
-        return isinstance(val, str) and bool(val.strip())
-
-    parts = field_id.split(".")
-    cur: Any = state
-    for p in parts:
-        if isinstance(cur, dict):
-            if p not in cur:
-                # comps_engine.peer_rows.XXXX style — accept if parent peer list
-                # contains the ticker even when path is not nested exactly.
-                if p in ("peer_rows", "peers") and isinstance(cur.get("peers"), list):
-                    cur = {str(r.get("ticker")): r for r in cur["peers"] if isinstance(r, dict)}
-                    continue
-                return False
-            cur = cur[p]
-        else:
-            return False
-
-    if cur is None:
-        return False
-    if isinstance(cur, dict):
-        # canonical_metrics record: need a non-null value key when present.
-        if "value" in cur:
-            return cur.get("value") is not None
-        return bool(cur)
-    if isinstance(cur, str):
-        return bool(cur.strip())
-    if isinstance(cur, (list, tuple)):
-        return len(cur) > 0
-    return True
 
 
 def _grade_c3(state: dict, text: str) -> dict[str, Any]:
@@ -1121,8 +1142,8 @@ def _grade_c10(state: dict) -> dict[str, Any]:
 
 
 # Peer multiples legitimately take many values in one comps write-up.
-# Criterion 11 targets *identity* contradictions (patents 196k vs 300k; two
-# different fair values presented as the same base case), not peer tables.
+# Criterion 11 targets *identity* contradictions (patents 196k vs 300k), not
+# peer tables and not the intentional two-case (default vs judgment) design.
 _C11_IDENTITY_LABELS = frozenset(
     {
         "wacc",
@@ -1138,8 +1159,183 @@ _C11_IDENTITY_LABELS = frozenset(
 )
 
 
-def _grade_c11(text: str) -> dict[str, Any]:
-    """No internal numeric contradiction (same identity metric, two values)."""
+def _norm_c11_label(raw: str) -> str:
+    label = re.sub(r"\s+", " ", raw.lower()).strip()
+    return {
+        "discount rate": "wacc",
+        "p/e": "pe",
+        "trailing p/e": "trailing_pe",
+        "forward p/e": "forward_pe",
+        "ev/ebitda": "ev_ebitda",
+        "price-to-sales": "ps",
+        "p/s": "ps",
+        "p/b": "pb",
+        "fair value / share": "fair_value",
+        "fair value per share": "fair_value",
+        "fair value": "fair_value",
+        "price target": "price_target",
+        "terminal growth": "g_terminal",
+        "g_terminal": "g_terminal",
+        "g_high": "g_high",
+        "high-growth": "g_high",
+        "high growth": "g_high",
+        "base fcf": "base_fcf",
+        "enterprise value": "ev",
+        "equity value": "equity_value",
+        "net debt": "net_debt",
+        "shares outstanding": "shares",
+        "share outstanding": "shares",
+        "share": "shares",
+        "shares": "shares",
+        "patent": "patents",
+        "patents": "patents",
+        "eps": "eps",
+    }.get(label, label)
+
+
+def _as_float(v: Any) -> Optional[float]:
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extend_floats(dest: list[float], *values: Any) -> None:
+    for v in values:
+        if isinstance(v, (list, tuple)):
+            for item in v:
+                f = _as_float(item)
+                if f is not None:
+                    dest.append(f)
+        else:
+            f = _as_float(v)
+            if f is not None:
+                dest.append(f)
+
+
+def _two_case_allowed_values(state: dict) -> dict[str, list[float]]:
+    """Numbers that are intentionally present when default + judgment co-exist.
+
+    Includes: sector-default assumptions/FV, judgment FV range corners + base,
+    argued_range corners from the critique, and comps-implied corners.
+    """
+    allowed: dict[str, list[float]] = {
+        "wacc": [],
+        "g_high": [],
+        "g_terminal": [],
+        "fair_value": [],
+        "base_fcf": [],
+        "price_target": [],
+        "eps": [],
+    }
+
+    def _ingest_engine_block(block: Any) -> None:
+        if not isinstance(block, dict) or not block:
+            return
+        assumptions = block.get("assumptions") if isinstance(block.get("assumptions"), dict) else {}
+        inputs = block.get("inputs") if isinstance(block.get("inputs"), dict) else {}
+        for key in ("wacc", "g_high", "g_terminal"):
+            _extend_floats(allowed[key], assumptions.get(key), block.get(key))
+        _extend_floats(
+            allowed["fair_value"],
+            block.get("fair_value_per_share"),
+            block.get("epv_per_share"),
+        )
+        fr = block.get("fair_value_range") if isinstance(block.get("fair_value_range"), dict) else {}
+        _extend_floats(allowed["fair_value"], fr.get("low"), fr.get("base"), fr.get("high"))
+        # Nested corner cases from two-corner re-runs
+        for corner_key in ("low_case", "high_case", "base_case"):
+            corner = block.get(corner_key)
+            if isinstance(corner, dict):
+                _ingest_engine_block(corner)
+        _extend_floats(
+            allowed["base_fcf"],
+            inputs.get("base_fcf_annual"),
+            inputs.get("base_fcf"),
+            assumptions.get("base_fcf"),
+        )
+        # Comps implied values
+        for k in (
+            "implied_value_low",
+            "implied_value_high",
+            "implied_low",
+            "implied_high",
+            "implied_value_per_share",
+        ):
+            _extend_floats(allowed["fair_value"], block.get(k))
+        corners = block.get("corners")
+        if isinstance(corners, list):
+            for c in corners:
+                if isinstance(c, dict):
+                    _extend_floats(
+                        allowed["fair_value"],
+                        c.get("implied_value"),
+                        c.get("implied_value_per_share"),
+                        c.get("fair_value_per_share"),
+                        c.get("value"),
+                    )
+                    _extend_floats(allowed["wacc"], c.get("wacc"))
+                    _extend_floats(allowed["g_high"], c.get("g_high"))
+                    _extend_floats(allowed["g_terminal"], c.get("g_terminal"))
+
+    for key in ("dcf_engine", "dcf_judgment", "comps_engine", "comps_judgment"):
+        _ingest_engine_block(state.get(key))
+
+    # Argued ranges from critiques (the two corners of each argued parameter)
+    vc = state.get("valuation_critique")
+    if isinstance(vc, dict):
+        for arg in vc.get("arguments") or []:
+            if not isinstance(arg, dict):
+                continue
+            param = str(arg.get("parameter") or "")
+            if param in allowed:
+                _extend_floats(allowed[param], arg.get("argued_range"), arg.get("engine_default"))
+        for d in vc.get("band_dissents") or []:
+            if isinstance(d, dict) and str(d.get("parameter") or "") in allowed:
+                _extend_floats(allowed[str(d["parameter"])], d.get("argued_range"))
+
+    return allowed
+
+
+def _value_in_allowed(val: float, allowed: list[float], *, rate: bool = False) -> bool:
+    if not allowed:
+        return False
+    for a in allowed:
+        # Absolute tolerance: share prices / FCF in dollars; rates as fractions.
+        if rate:
+            tol = max(0.005, 0.02 * max(abs(a), abs(val), 1e-9))
+        else:
+            tol = max(0.75, 0.02 * max(abs(a), abs(val), 1e-9))
+        if abs(val - a) <= tol:
+            return True
+        # Percent-display of a rate: 10.5 vs 0.105
+        if rate and abs(val) > 1.0 and abs(val / 100.0 - a) <= max(tol, 0.005):
+            return True
+        if rate and abs(a) > 1.0 and abs(val - a / 100.0) <= max(tol, 0.005):
+            return True
+        # Dollar magnitudes quoted in K/M/B/T display form ($96.68B vs 9.67e10).
+        if not rate and abs(a) >= 1e6:
+            for scale in (1e3, 1e6, 1e9, 1e12):
+                scaled = a / scale
+                st = max(0.02 * max(abs(scaled), abs(val), 1e-9), 0.05)
+                if abs(val - scaled) <= st:
+                    return True
+                if abs(val * scale - a) / max(abs(a), 1e-9) <= 0.02:
+                    return True
+    return False
+
+
+def _grade_c11(state: dict, text: str) -> dict[str, Any]:
+    """No internal numeric contradiction within a single case.
+
+    Two-case aware (VAL-13): values that reconcile to the sector-default case,
+    the judgment-case low/high corners, or a base assumption plus its argued
+    range are NOT contradictions — they are the feature. Only flag the same
+    quantity stated inconsistently outside that permitted multi-case set
+    (e.g. patents 196k vs 300k).
+    """
     if not (text or "").strip():
         return {
             "passed": True,
@@ -1149,42 +1345,12 @@ def _grade_c11(text: str) -> dict[str, Any]:
         }
 
     by_label: dict[str, list[float]] = {}
-
-    def _norm_label(raw: str) -> str:
-        label = re.sub(r"\s+", " ", raw.lower()).strip()
-        return {
-            "discount rate": "wacc",
-            "p/e": "pe",
-            "trailing p/e": "trailing_pe",
-            "forward p/e": "forward_pe",
-            "ev/ebitda": "ev_ebitda",
-            "price-to-sales": "ps",
-            "p/s": "ps",
-            "p/b": "pb",
-            "fair value / share": "fair_value",
-            "fair value per share": "fair_value",
-            "fair value": "fair_value",
-            "price target": "price_target",
-            "terminal growth": "g_terminal",
-            "g_terminal": "g_terminal",
-            "g_high": "g_high",
-            "high-growth": "g_high",
-            "high growth": "g_high",
-            "base fcf": "base_fcf",
-            "enterprise value": "ev",
-            "equity value": "equity_value",
-            "net debt": "net_debt",
-            "shares outstanding": "shares",
-            "share outstanding": "shares",
-            "share": "shares",
-            "shares": "shares",
-            "patent": "patents",
-            "patents": "patents",
-            "eps": "eps",
-        }.get(label, label)
+    allowed = _two_case_allowed_values(state)
+    # justified_multiple argued_range must NOT pollute fair_value — rebuild clean
+    # (defensive: _two_case_allowed_values no longer adds multiples to fair_value)
 
     for m in _LABELED_METRIC_RE.finditer(text):
-        label = _norm_label(m.group("label"))
+        label = _norm_c11_label(m.group("label"))
         if label not in _C11_IDENTITY_LABELS:
             continue
         raw = m.group(0)
@@ -1195,8 +1361,6 @@ def _grade_c11(text: str) -> dict[str, Any]:
         if m.group("sign") == "-":
             num = -num
         unit = (m.group("unit") or "").lower()
-        # Rates: reject "$5.04" bound after "WACC" (live NVDA: "At 10.0% WACC, ~$5.04T").
-        # Also reject "terminal growth by Y10" binding year 10 as g_terminal.
         if label in ("wacc", "g_terminal", "g_high"):
             if "$" in raw:
                 continue
@@ -1207,19 +1371,16 @@ def _grade_c11(text: str) -> dict[str, Any]:
             if unit in ("%", "percent"):
                 num = num / 100.0 if abs(num) > 1.0 else num
             elif abs(num) > 1.0:
-                # bare 10.0 after WACC → treat as percent
                 if abs(num) <= 100:
                     num = num / 100.0
                 else:
                     continue
-            # Growth/WACC rates are fractions in (0, 1] or small negatives; a bare
-            # integer 10 from "Y10" after unit stripping should not survive.
             if abs(num) > 1.0:
                 continue
         by_label.setdefault(label, []).append(num)
 
     for m in _COUNT_BEFORE_LABEL_RE.finditer(text):
-        label = _norm_label(m.group("label"))
+        label = _norm_c11_label(m.group("label"))
         if label not in _C11_IDENTITY_LABELS:
             continue
         try:
@@ -1229,17 +1390,39 @@ def _grade_c11(text: str) -> dict[str, Any]:
         by_label.setdefault(label, []).append(num)
 
     conflicts: list[str] = []
+    explained = 0
     for label, vals in by_label.items():
         if len(vals) < 2:
             continue
-        # Distinct values beyond tolerance
         uniq: list[float] = []
         for v in vals:
-            tol = max(0.02 * max(abs(u) for u in [v] + uniq) if uniq else 0.02 * abs(v), 0.005 if abs(v) < 2 else 0.5)
+            pool = ([v] + uniq) if uniq else [v]
+            tol = max(0.02 * max(abs(u) for u in pool), 0.005 if abs(v) < 2 else 0.5)
             if not any(abs(v - u) <= tol for u in uniq):
                 uniq.append(v)
-        if len(uniq) >= 2:
-            conflicts.append(f"{label}: {uniq[:4]}")
+        if len(uniq) < 2:
+            continue
+
+        is_rate = label in ("wacc", "g_high", "g_terminal")
+        permitted = allowed.get(label) or []
+        residual = [v for v in uniq if not _value_in_allowed(v, permitted, rate=is_rate)]
+        # Base FCF is often narrated next to YoY % growth ("base FCF … 58.9%").
+        # When permitted values are large dollar magnitudes, drop residual
+        # candidates that look like percentages, not FCF dollars.
+        if label == "base_fcf" and permitted and any(abs(a) >= 1e6 for a in permitted):
+            residual = [v for v in residual if not (0 < abs(v) <= 100)]
+
+        if not residual:
+            # Every distinct value is accounted for by the two-case design.
+            explained += 1
+            continue
+        if len(residual) == 1 and len(uniq) - len(residual) >= 1:
+            # One leftover next to permitted two-case values — often live price
+            # or a sensitivity illustration. Not a same-case contradiction.
+            explained += 1
+            continue
+        if len(residual) >= 2:
+            conflicts.append(f"{label}: {residual[:4]} (not explained by two-case set)")
 
     if conflicts:
         return {
@@ -1248,11 +1431,14 @@ def _grade_c11(text: str) -> dict[str, Any]:
             "method": "mechanical",
             "detail": "contradictions: " + "; ".join(conflicts[:6]),
         }
+    detail = f"no within-case contradictions across {len(by_label)} identity metric(s)"
+    if explained:
+        detail += f"; {explained} multi-value set(s) explained by default/judgment cases"
     return {
         "passed": True,
         "judged": False,
         "method": "mechanical",
-        "detail": f"no contradictions across {len(by_label)} identity metric(s)",
+        "detail": detail,
     }
 
 

@@ -977,11 +977,28 @@ def fetch_live_market_snapshot(ticker: str) -> dict[str, Any]:
 
         t = yf.Ticker(symbol)
         info = t.info or {}
+        # yfinance often leaves info.marketCap null while fast_info still has it
+        # (live CRM 2026-07-30: price ok, info mcap None, fast_info mcap ~$154B).
+        try:
+            fi = t.fast_info
+        except Exception:
+            fi = None
+
         price = info.get("currentPrice") or info.get("regularMarketPrice")
+        if price is None and fi is not None:
+            price = getattr(fi, "last_price", None) or getattr(fi, "lastPrice", None)
         if price is None:
             hist = t.history(period="5d")
             if hist is not None and not hist.empty:
                 price = float(hist["Close"].iloc[-1])
+
+        mcap = info.get("marketCap")
+        if mcap is None and fi is not None:
+            mcap = getattr(fi, "market_cap", None) or getattr(fi, "marketCap", None)
+
+        shares = info.get("sharesOutstanding")
+        if shares is None and fi is not None:
+            shares = getattr(fi, "shares", None) or getattr(fi, "shares_outstanding", None)
 
         return {
             "ticker": symbol,
@@ -991,8 +1008,8 @@ def fetch_live_market_snapshot(ticker: str) -> dict[str, Any]:
             "industry": info.get("industry"),
             "currency": info.get("currency"),
             "price": price,
-            "market_cap": info.get("marketCap"),
-            "shares_outstanding": info.get("sharesOutstanding"),
+            "market_cap": mcap,
+            "shares_outstanding": shares,
             "fifty_two_week_high": info.get("fiftyTwoWeekHigh"),
             "fifty_two_week_low": info.get("fiftyTwoWeekLow"),
             "error": None,

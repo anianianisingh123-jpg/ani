@@ -1,0 +1,276 @@
+{
+  "generated_at_utc": "2026-07-30T03:04:09.574892+00:00",
+  "scores": [
+    {
+      "ticker": "NVDA",
+      "before": 10,
+      "after": 8,
+      "delta": -2,
+      "before_excl_c9": 10,
+      "after_excl_c9": 7,
+      "quality_delta": -3
+    },
+    {
+      "ticker": "CRM",
+      "before": 7,
+      "after": 7,
+      "delta": 0,
+      "before_excl_c9": 7,
+      "after_excl_c9": 6,
+      "quality_delta": -1
+    },
+    {
+      "ticker": "JPM",
+      "before": 9,
+      "after": 8,
+      "delta": -1,
+      "before_excl_c9": 9,
+      "after_excl_c9": 7,
+      "quality_delta": -2
+    }
+  ],
+  "after_grades": [
+    {
+      "ticker": "NVDA",
+      "score": 8,
+      "max_score": 11,
+      "criteria": [
+        {
+          "id": 1,
+          "passed": true,
+          "detail": "PASS: Archetype (\"fabless semiconductor... general\" classification) is explicitly named, and DCF is justified via high-margin/asset-light structure with explicit rejection of DCF-invalid archetypes (bank/REIT/insurer)."
+        },
+        {
+          "id": 2,
+          "passed": false,
+          "detail": "dcf:g_high: no resolvable evidence (tried: canonical_metrics.fcf__current_annual, canonical_metrics.fcf__prior_annual, canonical_metrics.fcf_conversion__current_annual, canonical_metrics.inventory__current_annual); dcf:g_terminal: no resolvable evidence (tried: canonical_metrics.gross_margin__current_annual, canonical_metrics.operating_margin__current_annual, canonical_metrics.capex_pct_revenue__current_annual, canonical_metrics.fcf_margin__current_annual); dcf:base_fcf_method: no resolvable evidence (tried: cash_flow_statement.current_annual.FreeCashFlow, canonical_metrics.fcf_margin__current_annual, canonical_metrics.fcf_margin__prior_annual, canonical_metrics.fcf_annualized_from_current_quarter); peer:INTC: no resolvable evidence (tried: canonical_metrics.capex_pct_revenue__current_annual, canonical_metrics.capex__current_annual); justified_multiple: no resolvable evidence (tried: canonical_metrics.revenue_yoy, canonical_metrics.net_income_yoy, canonical_metrics.operating_margin__current_annual, canonical_metrics.fcf_margin__current_annual)"
+        },
+        {
+          "id": 3,
+          "passed": false,
+          "detail": "untraceable currency: $18B, $91B, $38T, $1T, $27.02B, $16B"
+        },
+        {
+          "id": 4,
+          "passed": true,
+          "detail": "terminal-value share language found in valuation text"
+        },
+        {
+          "id": 5,
+          "passed": true,
+          "detail": "range language detected in valuation text"
+        },
+        {
+          "id": 6,
+          "passed": true,
+          "detail": "4 peer_change(s) each justified"
+        },
+        {
+          "id": 7,
+          "passed": true,
+          "detail": "windows present: 1y, 3y, 5y, yoy"
+        },
+        {
+          "id": 8,
+          "passed": true,
+          "detail": "PASS: The write-up leaves multiple risks explicitly open/unresolved \u2014 e.g., the export-control binarity and hyperscaler-mix deceleration are used to argue a materially lower judgment valuation without being neutralized, the terminal-value dominance is flagged as a genuine structural sensitivity rather than resolved, and the wide dispersion between DCF scenarios is explicitly left as \"genuinely wide range\" deferred to separate comps work rather than closed out."
+        },
+        {
+          "id": 9,
+          "passed": true,
+          "detail": "dcf_base=True dcf_judgment=True comps_base=True comps_judgment=True comps_applicable=True"
+        },
+        {
+          "id": 10,
+          "passed": true,
+          "detail": "3 band dissent(s) flagged"
+        },
+        {
+          "id": 11,
+          "passed": false,
+          "detail": "contradictions: g_high: [0.35, 0.05]; fair_value: [318.63, 88.24]; base_fcf: [4.5, 58.9, 96.68]"
+        }
+      ],
+      "icl_stats_summary": {
+        "both_critiques_parseable": true,
+        "dcf_judgment_present": true,
+        "comps_judgment_present": true,
+        "dcf_proposed_n": 6,
+        "dcf_accepted_n": 6,
+        "dcf_rejected_n": 0,
+        "band_dissents_n": 3
+      }
+    },
+    {
+      "ticker": "CRM",
+      "score": 7,
+      "max_score": 11,
+      "criteria": [
+        {
+          "id": 1,
+          "passed": true,
+          "detail": "PASS: Both parts name the archetype (software_saas) with confidence and stated basis, and justify the primary method (multi-stage FCF DCF for an asset-light SaaS business; forward P/E/EV/EBITDA/P/S as relevant multiples given intangible-heavy, recurring-revenue model) with explicit reasoning, not just assertion."
+        },
+        {
+          "id": 2,
+          "passed": false,
+          "detail": "dcf:g_high: no resolvable evidence (tried: canonical_metrics.fcf__current_annual, canonical_metrics.fcf__prior_annual, income_statement.current_annual.Revenues, canonical_metrics.fcf_margin__current_annual); dcf:base_fcf_method: no resolvable evidence (tried: canonical_metrics.fcf__current_annual, canonical_metrics.fcf__prior_annual, canonical_metrics.fcf_conversion__current_annual, canonical_metrics.accounts_receivable__current_annual); dcf:high_growth_years: no resolvable evidence (tried: canonical_metrics.gross_margin__current_annual, canonical_metrics.rd_pct_revenue__current_annual, canonical_metrics.revenue_yoy); peer:SNOW: no resolvable evidence (tried: canonical_metrics.fcf_conversion__current_annual, canonical_metrics.capex_pct_revenue__current_annual, income_statement.current_annual.NetIncomeLoss, income_statement.current_annual.OperatingIncomeLoss); peer:NOW: no resolvable evidence (tried: canonical_metrics.fcf__current_annual, canonical_metrics.fcf_conversion__current_annual, income_statement.current_annual.Revenues, income_statement.current_annual.OperatingIncomeLoss); peer:ORCL: no resolvable evidence (tried: canonical_metrics.debt_to_equity__current_annual, canonical_metrics.debt_to_equity__current_quarter, canonical_metrics.buyback_spend__current_annual, canonical_metrics.buyback_spend__current_quarter); peer:ADBE: no resolvable evidence (tried: canonical_metrics.capex_pct_revenue__current_annual, canonical_metrics.fcf__current_annual, income_statement.current_annual.GrossProfit, income_statement.current_annual.Revenues)"
+        },
+        {
+          "id": 3,
+          "passed": false,
+          "detail": "untraceable currency: $69B"
+        },
+        {
+          "id": 4,
+          "passed": true,
+          "detail": "terminal-value share language found in valuation text"
+        },
+        {
+          "id": 5,
+          "passed": true,
+          "detail": "range language detected in valuation text"
+        },
+        {
+          "id": 6,
+          "passed": true,
+          "detail": "4 peer_change(s) each justified"
+        },
+        {
+          "id": 7,
+          "passed": true,
+          "detail": "windows present: 1y, 3y, 5y, yoy"
+        },
+        {
+          "id": 8,
+          "passed": false,
+          "detail": "FAIL: The DCF section repeatedly reframes real risks (stale net debt, unsustainable g_high, SBC dilution, terminal value concentration) but each is 'resolved' via the judgment case or explicit numerical adjustment recommendation ('should be re-run with current-quarter net debt'), leaving no risk stated as genuinely open/unresolved \u2014 the write-up prescribes the fix rather than leaving it unsettled."
+        },
+        {
+          "id": 9,
+          "passed": true,
+          "detail": "dcf_base=True dcf_judgment=True comps_base=True comps_judgment=True comps_applicable=True"
+        },
+        {
+          "id": 10,
+          "passed": true,
+          "detail": "2 band dissent(s) flagged"
+        },
+        {
+          "id": 11,
+          "passed": false,
+          "detail": "contradictions: fair_value: [610.92, 285.94]; wacc: [0.09, 0.095, 0.11]; g_high: [0.158, 0.05, 0.07, 0.1]; g_terminal: [0.03, 0.02, 0.15]; eps: [7.8, 22.6]"
+        }
+      ],
+      "icl_stats_summary": {
+        "both_critiques_parseable": true,
+        "dcf_judgment_present": true,
+        "comps_judgment_present": true,
+        "dcf_proposed_n": 6,
+        "dcf_accepted_n": 6,
+        "dcf_rejected_n": 0,
+        "band_dissents_n": 2
+      }
+    },
+    {
+      "ticker": "JPM",
+      "score": 8,
+      "max_score": 11,
+      "criteria": [
+        {
+          "id": 1,
+          "passed": true,
+          "detail": "PASS: Names bank_lender archetype explicitly and justifies residual income as primary method (citing negative OCF as balance-sheet artifact, explicit statement that DCF is not constructible for a bank)."
+        },
+        {
+          "id": 2,
+          "passed": false,
+          "detail": "dcf:g_terminal: no resolvable evidence (tried: cash_flow.current_annual.derived.payout_ratio_total_pct, cash_flow.current_annual.derived.note, canonical_metrics.roe__current_annual, balance_sheet.annual_series_note); dcf:g_high: no resolvable evidence (tried: canonical_metrics.revenue_yoy, canonical_metrics.net_income_yoy, canonical_metrics.operating_income_yoy, income_statement.current_quarter.derived.annualized_net_income); dcf:high_growth_years: no resolvable evidence (tried: dcf_engine.projection_path, income_statement.current_annual.ProvisionForCreditLosses, balance_sheet.current_quarter.derived.assets_to_equity_leverage_x, balance_sheet.prior_annual.derived.note); dcf:base_fcf_method: no resolvable evidence (tried: income_statement.current_annual.adjusted, income_statement.current_annual.ProvisionForCreditLosses, income_statement.current_quarter.derived.pe_on_annualized_q1_eps, income_statement.annual_series_note); peer:USB: no resolvable evidence (tried: noninterest_income__current_annual, revenue__current_annual, market_cap); peer:PNC: no resolvable evidence (tried: total_assets__current_annual, roe__current_annual, market_cap); justified_multiple: no resolvable evidence (tried: roe__current_annual, net_margin__current_annual, operating_margin__current_annual, operating_margin_yoy_bps)"
+        },
+        {
+          "id": 3,
+          "passed": false,
+          "detail": "untraceable currency: $1.4776T, $2.2B, $1.48T, $3.5B, $3.8B, $14.21B, $14.212B"
+        },
+        {
+          "id": 4,
+          "passed": true,
+          "detail": "non-FCF method (excess_return_on_equity) \u2014 TV-share N/A pass"
+        },
+        {
+          "id": 5,
+          "passed": true,
+          "detail": "range language detected in valuation text"
+        },
+        {
+          "id": 6,
+          "passed": true,
+          "detail": "2 peer_change(s) each justified"
+        },
+        {
+          "id": 7,
+          "passed": true,
+          "detail": "windows present: 3y, 5y, yoy"
+        },
+        {
+          "id": 8,
+          "passed": true,
+          "detail": "PASS: The credit-cycle risk (provision build, unverifiable stale allowance-for-credit-losses coverage on the $1.4776T loan book) and the buyback-manufactured EPS growth concern are explicitly left open, tilting the judgment range toward the lower half rather than being resolved or dismissed."
+        },
+        {
+          "id": 9,
+          "passed": true,
+          "detail": "dcf_base=True dcf_judgment=True comps_base=True comps_judgment=True comps_applicable=True"
+        },
+        {
+          "id": 10,
+          "passed": true,
+          "detail": "1 band dissent(s) flagged"
+        },
+        {
+          "id": 11,
+          "passed": false,
+          "detail": "contradictions: eps: [20.02, 1.4, 21.14, 23.76]"
+        }
+      ],
+      "icl_stats_summary": {
+        "both_critiques_parseable": true,
+        "dcf_judgment_present": true,
+        "comps_judgment_present": true,
+        "dcf_proposed_n": 6,
+        "dcf_accepted_n": 4,
+        "dcf_rejected_n": 2,
+        "band_dissents_n": 1
+      }
+    }
+  ],
+  "icl_by_ticker": {
+    "NVDA": {
+      "both_critiques_parseable": true,
+      "dcf_judgment_present": true,
+      "comps_judgment_present": true,
+      "dcf_proposed_n": 6,
+      "dcf_accepted_n": 6,
+      "dcf_rejected_n": 0,
+      "band_dissents_n": 3
+    },
+    "CRM": {
+      "both_critiques_parseable": true,
+      "dcf_judgment_present": true,
+      "comps_judgment_present": true,
+      "dcf_proposed_n": 6,
+      "dcf_accepted_n": 6,
+      "dcf_rejected_n": 0,
+      "band_dissents_n": 2
+    },
+    "JPM": {
+      "both_critiques_parseable": true,
+      "dcf_judgment_present": true,
+      "comps_judgment_present": true,
+      "dcf_proposed_n": 6,
+      "dcf_accepted_n": 4,
+      "dcf_rejected_n": 2,
+      "band_dissents_n": 1
+    }
+  }
+}

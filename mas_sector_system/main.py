@@ -7,11 +7,12 @@ input at the entry point:
     entry ──(mode == 'screener')──> screener ──────────────────────────────> END
 
     entry ──(mode == 'deep_dive')──> deep_dive_start
-              ├─> data_gatherer → metrics → validation ──┐
-              ├─> business_overview ─────────────────────┤
-              ├─> macro_regime ──────────────────────────┼─> capital_ready (defer)
-              └─> management_track_record ───────────────┘
-                    → capital_allocation → bull
+              ├─> data_gatherer → metrics ────────────────┐
+              ├─> business_overview ──────────────────────┤
+              ├─> macro_regime ───────────────────────────┼─> capital_ready (defer)
+              └─> management_track_record ────────────────┘
+                    → validation ─┬─ PASS/WARN → capital_allocation → bull
+                                  └─ FAIL → validation_halt → END
                          → bear / fundamental / relative  (parallel)
                          → synthesis_ready (defer) → synthesis → qc → style → docx
                                       │ FAIL
@@ -211,13 +212,15 @@ def build_graph():
     Double-execution fix (LangGraph multi-parent fan-in):
     Analysis used to re-fire when overview/macro completed in one wave and
     capital_allocation in a later wave. We now:
-      1. Fold overview + macro into the *same* deferred capital_ready join as
-         validation + management (all foundation work joins once).
-      2. Give bull a *single* parent (capital_allocation) — no multi-parent
+      1. Fold statements + overview + macro + management into the same deferred
+         capital_ready join (all foundation work joins once).
+      2. Route that single joined path through validation before capital. A FAIL
+         therefore has no alternate parent that can bypass the hard stop.
+      3. Give bull a *single* parent (capital_allocation) — no multi-parent
          analysis_ready barrier on the critical path.
-      3. Join synthesis only from the three parallel analysis children
+      4. Join synthesis only from the three parallel analysis children
          (bear / fundamental / relative), not also from bull directly.
-      4. Agents also skip if their output field is already populated
+      5. Agents also skip if their output field is already populated
          (idempotency belt-and-suspenders).
 
     Style QC layer removed: style_pass → docx_export directly.
@@ -231,7 +234,6 @@ def build_graph():
     workflow.add_node("metrics_compute", metrics_compute_node)
     workflow.add_node("validation_gate", validation_gate_node)
     workflow.add_node("validation_halt", validation_halt_node)
-    workflow.add_node("post_validation", _passthrough_barrier)
     workflow.add_node("business_overview", business_overview_node)
     workflow.add_node("macro_regime", macro_regime_node)
     workflow.add_node("management_track_record", management_track_record_node)
@@ -265,27 +267,27 @@ def build_graph():
     workflow.add_edge("deep_dive_start", "macro_regime")
     workflow.add_edge("deep_dive_start", "management_track_record")
 
-    # Metrics contract: compute once from statements before any number-using agent.
+    # Metrics contract: compute once from statements before validation.
     workflow.add_edge("data_gatherer", "metrics_compute")
-    # Phase 3: validation gate after metrics, before capital/analysis spend.
-    workflow.add_edge("metrics_compute", "validation_gate")
+
+    # Join all four foundation branches before validation. This placement makes
+    # validation the sole path into capital/analysis: a FAIL cannot be bypassed
+    # by business_overview, macro_regime, or management_track_record arriving
+    # at the deferred join independently.
+    workflow.add_edge("metrics_compute", "capital_ready")
+    workflow.add_edge("management_track_record", "capital_ready")
+    workflow.add_edge("business_overview", "capital_ready")
+    workflow.add_edge("macro_regime", "capital_ready")
+    workflow.add_edge("capital_ready", "validation_gate")
     workflow.add_conditional_edges(
         "validation_gate",
         route_after_validation,
         {
             "validation_halt": "validation_halt",
-            "continue": "post_validation",
+            "continue": "capital_allocation",
         },
     )
     workflow.add_edge("validation_halt", END)
-
-    # Capital only after validation PASS/WARN *and* the three parallel foundation
-    # writers, via one deferred join. Single downstream edge into analysis.
-    workflow.add_edge("post_validation", "capital_ready")
-    workflow.add_edge("management_track_record", "capital_ready")
-    workflow.add_edge("business_overview", "capital_ready")
-    workflow.add_edge("macro_regime", "capital_ready")
-    workflow.add_edge("capital_ready", "capital_allocation")
 
     # Cache-friendly analysis order (single parent into bull):
     #   capital_allocation → bull (writes the shared-prefix cache)

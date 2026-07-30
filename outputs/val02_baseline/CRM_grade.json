@@ -1,0 +1,143 @@
+{
+  "ticker": "CRM",
+  "score": 7,
+  "max_score": 11,
+  "criteria": [
+    {
+      "id": 1,
+      "name": "archetype_and_method",
+      "criterion": "Archetype named and primary method justified",
+      "type": "binary",
+      "mechanical": false,
+      "requires_judgment": true,
+      "passed": true,
+      "judged": true,
+      "detail": "PASS: Names the archetype explicitly (software_saas, enterprise SaaS with high margins/asset-light/recurring revenue) and justifies DCF as primary method based on those characteristics (\"this is not a bank, REIT, or insurer where DCF is a poor fit\"), satisfying both (a) and (b).",
+      "method": "llm_judge"
+    },
+    {
+      "id": 2,
+      "name": "evidence_for_argued_inputs",
+      "criterion": "Every argued input cites \u22651 resolvable evidence field",
+      "type": "binary",
+      "mechanical": true,
+      "requires_judgment": false,
+      "passed": true,
+      "judged": false,
+      "detail": "no argued inputs present \u2014 vacuous pass (pre-ICL baseline)",
+      "method": "mechanical"
+    },
+    {
+      "id": 3,
+      "name": "no_untraceable_currency",
+      "criterion": "No currency figure appears that is not traceable to an engine block",
+      "type": "binary",
+      "mechanical": true,
+      "requires_judgment": false,
+      "passed": false,
+      "judged": false,
+      "detail": "untraceable currency: $23B, $46.0B, $57,000, $57.94B",
+      "method": "mechanical"
+    },
+    {
+      "id": 4,
+      "name": "terminal_value_share_stated",
+      "criterion": "Terminal-value share of EV stated (DCF path)",
+      "type": "binary",
+      "mechanical": true,
+      "requires_judgment": false,
+      "passed": true,
+      "judged": false,
+      "detail": "terminal-value share language found in valuation text",
+      "method": "mechanical"
+    },
+    {
+      "id": 5,
+      "name": "valuation_as_range",
+      "criterion": "Valuation expressed as a range, not a point",
+      "type": "binary",
+      "mechanical": true,
+      "requires_judgment": false,
+      "passed": true,
+      "judged": false,
+      "detail": "range language detected in valuation text",
+      "method": "mechanical"
+    },
+    {
+      "id": 6,
+      "name": "peer_changes_justified",
+      "criterion": "Each peer inclusion/exclusion justified individually",
+      "type": "binary",
+      "mechanical": true,
+      "requires_judgment": false,
+      "passed": true,
+      "judged": false,
+      "detail": "no peer include/exclude actions \u2014 vacuous pass",
+      "method": "mechanical"
+    },
+    {
+      "id": 7,
+      "name": "comparison_windows_consistent",
+      "criterion": "Comparison windows consistent and stated (no YTD vs 1-yr mixing)",
+      "type": "binary",
+      "mechanical": true,
+      "requires_judgment": false,
+      "passed": false,
+      "judged": false,
+      "detail": "mixed comparison windows: ytd, 1y, 5y, yoy",
+      "method": "mechanical"
+    },
+    {
+      "id": 8,
+      "name": "unresolved_risk",
+      "criterion": "\u22651 risk left explicitly unresolved (no self-neutralizing close)",
+      "type": "binary",
+      "mechanical": false,
+      "requires_judgment": true,
+      "passed": true,
+      "judged": true,
+      "detail": "PASS: Multiple risks are left explicitly unresolved \u2014 e.g., the net debt vintage gap ($7.11B vs $30.34B) is flagged as \"a real, material gap...should be treated as a known limitation,\" the durability of the 15.8% FCF growth assumption is repeatedly questioned without resolution, and the missing peer comps data is stated as \"a genuine data gap\" \u2014 none of these are neutralized with reassurances.",
+      "method": "llm_judge"
+    },
+    {
+      "id": 9,
+      "name": "default_and_judgment_cases",
+      "criterion": "Both default and judgment cases present",
+      "type": "binary",
+      "mechanical": true,
+      "requires_judgment": false,
+      "passed": false,
+      "judged": false,
+      "detail": "missing: dcf_judgment, comps_judgment",
+      "method": "mechanical"
+    },
+    {
+      "id": 10,
+      "name": "band_dissents_flagged",
+      "criterion": "Band dissents flagged where applicable",
+      "type": "binary",
+      "mechanical": true,
+      "requires_judgment": false,
+      "passed": true,
+      "judged": false,
+      "detail": "no band_dissents recorded \u2014 N/A pass (nothing to flag)",
+      "method": "mechanical"
+    },
+    {
+      "id": 11,
+      "name": "no_numeric_contradiction",
+      "criterion": "No internal numeric contradiction (same metric, two values)",
+      "type": "binary",
+      "mechanical": true,
+      "requires_judgment": false,
+      "passed": false,
+      "judged": false,
+      "detail": "contradictions: g_high: [0.158, 0.05]; eps: [7.8, 11.7]",
+      "method": "mechanical"
+    }
+  ],
+  "notes": "passed 7/11; failed: 3:no_untraceable_currency, 7:comparison_windows_consistent, 9:default_and_judgment_cases, 11:no_numeric_contradiction; llm-judged: 1, 8",
+  "archetype_note": "software_saas",
+  "graded_at_utc": "2026-07-29T05:16:01.952357+00:00",
+  "source_slice": "CRM_state_slice.json"
+}

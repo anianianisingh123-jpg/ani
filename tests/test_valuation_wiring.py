@@ -9,6 +9,7 @@ run exactly as it was before this feature existed. A valuation must never
 hard-fail because the judgment layer did.
 """
 
+import json
 import os
 import sys
 
@@ -17,6 +18,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from mas_sector_system import agents  # noqa: E402
+from mas_sector_system.valuation_engine import fcf_history  # noqa: E402
 
 
 PACKET = "=== PACKET ==="
@@ -126,3 +128,81 @@ def test_archetype_falls_back_to_engine_then_general():
 
 def test_archetype_ignores_non_dict_canonical_metrics():
     assert agents._archetype_for({"canonical_metrics": "junk"}, None) == "general"
+
+
+def test_model_supplied_statements_retain_filing_annual_series(monkeypatch):
+    """VAL-12: model statement blocks must not erase XBRL history."""
+
+    def _cell(value):
+        return {"value": value}
+
+    income_series = [
+        {"rank": rank, "fy": str(2025 - rank), "Revenues": _cell(revenue)}
+        for rank, revenue in enumerate((1000.0, 900.0, 800.0))
+    ]
+    cash_series = [
+        {
+            "rank": rank,
+            "fy": str(2025 - rank),
+            "FreeCashFlow": _cell(fcf),
+        }
+        for rank, fcf in enumerate((200.0, 150.0, 100.0))
+    ]
+    live = {
+        "entity_name": "Fixture Corp",
+        "cik": "0000000001",
+        "sic": "7372",
+        "extraction_archetype": "software_saas",
+        "income_statement": {
+            "current_annual": {"Revenues": _cell(1000.0)},
+            "annual_series": income_series,
+        },
+        "balance_sheet": {
+            "current_annual": {},
+            "annual_series": [],
+        },
+        "cash_flow_statement": {
+            "current_annual": {"FreeCashFlow": _cell(200.0)},
+            "annual_series": cash_series,
+        },
+        "live_market": {"price": 100.0},
+        "web_research": "",
+        "queries_run": [],
+        "statements_incomplete": False,
+        "statements_error": None,
+        "gathered_at_utc": "2026-07-29T00:00:00+00:00",
+    }
+    model_payload = {
+        "sec_filing_summary": "Model-supplied filing summary.",
+        "macro_context": "Model-supplied macro context.",
+        "income_statement": {
+            "current_annual": {"model_marker": True},
+            "annual_series": [{"rank": 99, "model_originated": True}],
+        },
+        "balance_sheet": {
+            "current_annual": {"model_marker": True},
+        },
+        "cash_flow_statement": {
+            "current_annual": {"model_marker": True},
+            "annual_series": [{"rank": 99, "model_originated": True}],
+        },
+    }
+
+    monkeypatch.setattr(agents, "gather_live_research_context", lambda **_: live)
+    _stub(returns=json.dumps(model_payload))
+
+    result = agents.data_gatherer_node(
+        {
+            "mode": "deep_dive",
+            "query_type": "full_underwrite",
+            "ticker": "FIX",
+            "sector": "Software",
+            "user_query": "Fixture valuation",
+        }
+    )
+
+    assert result["income_statement"]["current_annual"]["model_marker"] is True
+    assert result["cash_flow_statement"]["current_annual"]["model_marker"] is True
+    assert result["income_statement"]["annual_series"] == income_series
+    assert result["cash_flow_statement"]["annual_series"] == cash_series
+    assert len(fcf_history(result)) >= 3

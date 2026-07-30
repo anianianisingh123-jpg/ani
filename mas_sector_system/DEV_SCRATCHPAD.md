@@ -39,12 +39,12 @@ Quick reference for all agents. **Authoritative spec is `CLAUDE.md`; this is the
 
 ```
 entry → deep_dive_start
-          ├─> data_gatherer → metrics_compute → validation_gate ─┬─> validation_halt → END
-          │                                                      └─> post_validation ─┐
+          ├─> data_gatherer → metrics_compute ─────────────────────────────────────────┐
           ├─> business_overview ───────────────────────────────────────────────────────┤
           ├─> macro_regime ────────────────────────────────────────────────────────────┼─> capital_ready (defer=True)
           └─> management_track_record ─────────────────────────────────────────────────┘
-                → capital_allocation → bull_agent
+                → validation_gate ─┬─> validation_halt → END
+                                   └─> capital_allocation → bull_agent
                      ├─> bear_agent ────────────┐
                      ├─> fundamental_valuation ─┼─> synthesis_ready (defer=True) → synthesis → qc
                      └─> relative_valuation ────┘                                              │
@@ -63,6 +63,7 @@ Screener branch: `entry → screener → END`.
 5. **Valuation math is deterministic Python.** Agents narrate `valuation_engine` + `canonical_metrics`; they never invent peer multiples or fair values from training memory.
 6. **Market-structure data is free-source only** (yfinance chains, SEC Form 4 counts). No paid vendors.
 7. **Thesis and compliance ship as two artifacts** (`artifacts.py`). `clean_memo.json` carries thesis only; `compliance_audit_log.md` carries every data-quality disclosure, QC finding, and stale-tag warning. Do not merge them back into one document, and do not append QC notes to the memo body.
+8. **Validation is the sole route into capital/analysis.** All four foundation branches join at `capital_ready`, then pass through `validation_gate`; no parallel foundation edge may enter `capital_allocation` downstream of the gate.
 
 ### Data contracts
 
@@ -160,7 +161,7 @@ Tracks A / B / C have **zero file overlap** by construction. **Note:** in round 
 |----|------|----------|--------|
 | VAL-00 | `state.py` contract: `valuation_critique`, `relative_critique`, `dcf_judgment`, `comps_judgment`, `valuation_grade`. Additive only — `dcf_engine`/`comps_engine` semantics unchanged, they remain the anchor case. | Claude/Opus-5 | DONE |
 | VAL-01 | L0 doctrine + L1 archetype cards for every id in `archetype.py::ARCHETYPES`, incl. defensible bands (§4.3) → `valuation_doctrine.py`. Pure data + pure functions. | Gemini | DONE — verified: 16 cards, all 4 required symbols, `exemplar_block_for` returns `(block, available)` and degrades correctly |
-| VAL-02 | **Part 1:** rubric + grader → `valuation_rubric.py`, `tests/test_valuation_rubric.py`. **Part 2:** limited baseline (user-approved 3 tickers, not full 8). | Grok | PART 1 DONE · PART 2 DONE (NVDA 10/11, CRM 7/11, JPM 9/11) — see handoff + `outputs/val02_baseline/` |
+| VAL-02 | Rubric + grader + baselines + after-ICL re-score (NVDA/CRM/JPM). | Grok | PART 1–3 DONE — after: NVDA 8/11, CRM 7/11, JPM 8/11 (quality excl-C9 down; C9 plumbing flip only; see handoff) |
 | VAL-10 | `annual_series` producer (§4.6): extend `_extract_statement_block` to ranks 0–4, newest-first, gaps omitted not null-padded; `_compute_fcf` must cover series entries; fix the misleading null-reason label at `tools.py:685`. **Explicit one-file lane widening into `tools.py`** — additive, `current_annual`/`prior_annual` semantics unchanged. **Do this before VAL-05a.** | Codex | DONE — verified: clamps, evidence rejection, Gordon check, margin-based mid_cycle. NO TESTS SHIPPED (see review) |
 | VAL-03a | Peer-set mutation + justified-multiple → implied value, incl. consensus forward-estimate chain (§5.3). `valuation_engine.py`. Extend only — do not change `compute_dcf()` / `fetch_peer_multiples()` signatures. | Codex | DONE — verified: clamps, evidence rejection, Gordon check, margin-based mid_cycle. NO TESTS SHIPPED (see review) |
 | VAL-03b | Relative critique call + narrative call, in-node. `agents.py`. Blocked on VAL-01/02/03a. | Claude/Opus-5 | DONE |
@@ -171,6 +172,7 @@ Tracks A / B / C have **zero file overlap** by construction. **Note:** in round 
 | VAL-07 | Calibration loop — prior call vs realized price. `memory.py`. | _unassigned_ | TODO |
 | VAL-08 | Clean memo schema 1.2 + disclosure routing (§8): band dissents → clean memo, clamp warnings → audit log. `artifacts.py`. | _unassigned_ | TODO |
 | VAL-09 | Football-field bars: default / judgment low / judgment high / comps-implied / EPV (§8). `pdf_generator.py`. | _unassigned_ | TODO |
+| VAL-12 | Preserve filing-derived `annual_series` when the data-gatherer model supplies statement blocks; add model-supplied-path coverage proving `fcf_history()` receives ≥3 rows. | Codex/GPT-5 | DONE |
 
 ---
 
@@ -328,6 +330,12 @@ Tracks A / B / C have **zero file overlap** by construction. **Note:** in round 
 - **Verification:** `python3 -m pytest tests/ -q` → **134 passed** (120 prior + 14 new). No graph node added; `main.py` and `routing.py` untouched.
 - **Status:** COMPLETED
 
+### [2026-07-29] - [Codex/GPT-5] - [Validation fail-stop cascade]
+- What I changed: Made core-metric validation archetype-aware by treating an explicit `applicable: false` as structurally unavailable rather than missing data. Rewired the graph so all foundation branches join before `validation_gate`, making validation the only route into `capital_allocation`; removed the bypassing `post_validation` node.
+- Files modified: `mas_sector_system/validate.py`, `mas_sector_system/main.py`, `tests/test_structural_phases.py`, `mas_sector_system/DEV_SCRATCHPAD.md`.
+- Notes / Handoff for next agent: The JPM failure was one root cause with a cascade: a valid bank suppression triggered FAIL, while three ungated foundation parents still released the deferred join. The fix addresses both ends. A FAIL now terminates at `validation_halt`; PASS/WARN alone reaches capital allocation. Tests assert the exact predecessor/successor sets, not just node presence.
+- Status: COMPLETED
+
 ### [2026-07-29] - [Claude/Opus-5] - [COST-01: run cost under-reported after an early finalize]
 - **What I changed:** `mark_finalized()` no longer returns a first-wins boolean; it returns `"write" | "rewrite" | "skip"` based on whether a later finalize saw strictly more nodes. `append_cost_log()` gained `replace_last=` so the correction rewrites the run's own trailing line instead of appending a second, conflicting one. Exactly one line per run is preserved.
 - **Files modified:** `mas_sector_system/cost.py`, `tests/test_cost_finalize.py` (new, 6 tests).
@@ -338,6 +346,17 @@ Tracks A / B / C have **zero file overlap** by construction. **Note:** in round 
 - **Verification:** `python3 -m pytest tests/ -q` → **140 passed** (134 prior + 6 new).
 - **Status:** COMPLETED
 
+### [2026-07-29] - [Grok] - [VAL-02 part 3: after-baseline re-score NVDA/CRM/JPM]
+- What I changed: Merged wiring commit `d0d3f45` (was on worktree-valuation-icl-design, not yet on origin/main when pulled). Re-ran live deep-dives for NVDA/CRM/JPM with critique→validate→judgment path. Artifacts with `_after` suffix in `outputs/val02_baseline/`. Grader C2 tightened to ≥1 resolvable evidence field (matches validate semantics).
+- Files modified: `mas_sector_system/valuation_rubric.py` (C2), `tests/test_valuation_rubric.py`, `tmp/run_val02_after.py`, `outputs/val02_baseline/*_after*`, `comparison.md`, this log. (Also local fast-forward of main to d0d3f45 for the runs.)
+- Scores before → after: **NVDA 10→8**, **CRM 7→7**, **JPM 9→8**. Excl-C9 quality: NVDA 10/10→7/10, CRM 7/10→6/10, JPM 9/10→7/10. **C9 flipped PASS on all three** (plumbing only).
+- Focus criteria: **C3 did not drop** (CRM still has $46.0B; JPM still has $14.21B family; NVDA regressed PASS→FAIL). **C11 did not clear** on CRM (g_high dual values remain; eps dual). **C7 still FAIL on CRM** (ytd/1y/3y/5y/yoy).
+- ICL plumbing (all three critiques parseable JSON):
+  - NVDA: proposed 5 / accepted 4 / rejected 1 (`base_fcf_method`); **4 band dissents**; **unit bug**: critique emitted wacc [11,13] and g_high [20,30] as percents → clamped to 0.20/0.40 bounds; judgment FV range $152–$193 is an artifact of that clamp.
+  - CRM: proposed 6 / accepted 5 / rejected 1; 3 band dissents; ranges in fractions; judgment FV $298–$365 vs engine $611 (real argument).
+  - JPM: method still `excess_return_on_equity`, method_appropriate=True; proposed 6 / accepted 4 / rejected 2; 1 band dissent; residual-income path intact.
+- Notes / Handoff: (1) Quality metrics did **not** improve; the project’s target defects (C3/C7/C11) are sticky. (2) Prompt must require **decimal rates** (0.11 not 11) — NVDA clamps prove it. (3) Evidence field paths often invent names (`canonical_metrics.fcf_yoy`, `dcf_engine.wacc`) — grader C2 fails while validate may still accept siblings; align allowed field list in critique prompt with real metric keys. (4) `base_fcf_method` repeatedly rejected as `None` — schema/parse bug on enum argued_range. (5) JPM improving on method selection was already true pre-ICL; after-run does not show transferable narrative gains. (6) Spend ~$3.3–3.6/run with two extra Opus critiques.
+- Status: COMPLETED
 ### [2026-07-29] - [Claude/Opus-5] - [VAL-11: fixes from the first live argued-input run]
 - **What I changed:** Four fixes at the LLM↔engine seam, plus the archetype-aware core-metric gate. (1) `_normalize_rate_scale()` in `valuation_engine.py` converts percent-scale rates to decimals before clamping. (2) `base_fcf_method` now also resolves from `argued_range`, preferring the normalised corner. (3) `fair_value_range["base"]` is populated with the corner midpoint so downstream consumers have a scalar to anchor on. (4) `agents.py` MERGES engine `clamp_warnings` instead of overwriting them, and renders the judgment case via a new `_format_judgment_case()`. Also added `_evidence_vocabulary()` so the critique is shown the real field ids, and made the critique prompt state that rates are decimals. Separately, `validate.py` no longer treats an archetype-suppressed core metric as missing data.
 - **Files modified:** `mas_sector_system/valuation_engine.py`, `mas_sector_system/agents.py`, `mas_sector_system/validate.py`, `tests/test_argued_input_units.py` (new, 16), `tests/test_validate_archetype_core.py` (new).
@@ -360,3 +379,14 @@ Tracks A / B / C have **zero file overlap** by construction. **Note:** in round 
   4. **Sensitivities need `base_fcf`.** They call `_recompute_dcf_case`, so on a state with no `cash_flow_statement` (e.g. Grok's `*_state_slice.json`, which omits raw statements) every fair value comes back None while the parameters and midpoints are still correct. That is a lossy-fixture artifact, not a regression — verify against a full state.
 - **Verification:** `python3 -m pytest tests/ -q` → **169 passed** (162 prior + 9 new, minus overlap). NVDA's live argued ranges replayed: wacc 0.115–0.135 → central 0.125, g_high 0.18–0.28 → 0.23, g_terminal 0.025–0.03 → 0.0275.
 - **Status:** COMPLETED
+### [2026-07-29] - [Codex/GPT-5] - [VAL-12: preserve filing-derived annual series]
+- What I changed: Changed the data-gatherer statement merge so model-supplied current/prior blocks remain authoritative for their existing semantics while `annual_series` is always restored from the SEC/XBRL extraction result. A model-provided or omitted series can therefore neither overwrite nor erase the filing history.
+- Files modified: `mas_sector_system/agents.py`, `tests/test_valuation_wiring.py`, `mas_sector_system/DEV_SCRATCHPAD.md`.
+- Notes / Handoff for next agent: The regression fixture makes the model supply all three statement dicts plus bogus rank-99 income/cash series; the returned state retains the model headline markers but replaces both histories with three filing-derived ranks, and `fcf_history()` returns three rows. Focused valuation wiring/engine tests pass. The full suite has 27 unrelated pre-existing failures in `tests/test_valuation_rubric.py` because `grade_valuation()` calls `_grade_c11(state, agent_text)` while `_grade_c11` accepts one argument; 136 other tests pass. Pre-existing changes in `tools.py` and `outputs/val02_baseline/` were not touched.
+- Status: COMPLETED
+
+### [2026-07-30] - [Grok] - [VAL-13: grader C2/C11 false negatives]
+- What I changed: Criterion 2 now imports and reuses `valuation_engine._has_resolvable_evidence` / `_evidence_value` (fixes `canonical_metrics.by_id` miss). Falls back to engine accept/reject via `clamp_warnings` + `dcf_judgment.assumptions` when statement trees are absent from a thin slice. Criterion 11 is two-case aware: values explained by default FV/assumptions, judgment range corners, or argued_range corners are not contradictions. Harness `_SLICE_KEYS` now includes statement trees for future runs.
+- Files modified: `mas_sector_system/valuation_rubric.py`, `tests/test_valuation_rubric.py` (+4), `tmp/run_val02_baseline.py` (slice keys), offline rewrote `outputs/val02_baseline/*_grade_after.json`.
+- Offline re-grade (no new live runs): NVDA after 8→**9**/11 (C2↑ C11↑ for FV/WACC); CRM 7→**8**/11 (C2↑); remaining fails are real narrative (C3 currency, EPS dual, C8). Do not treat pre-VAL-13 after scores as measurable.
+- Status: COMPLETED
