@@ -390,3 +390,13 @@ Tracks A / B / C have **zero file overlap** by construction. **Note:** in round 
 - Files modified: `mas_sector_system/valuation_rubric.py`, `tests/test_valuation_rubric.py` (+4), `tmp/run_val02_baseline.py` (slice keys), offline rewrote `outputs/val02_baseline/*_grade_after.json`.
 - Offline re-grade (no new live runs): NVDA after 8→**9**/11 (C2↑ C11↑ for FV/WACC); CRM 7→**8**/11 (C2↑); remaining fails are real narrative (C3 currency, EPS dual, C8). Do not treat pre-VAL-13 after scores as measurable.
 - Status: COMPLETED
+
+### [2026-07-30] - [Claude/Opus-5] - [VAL-16: detect and disclose one-sided argument sets]
+- **What I changed:** Added `directional_bias` to the argued DCF output, computed from the existing sensitivity deltas, plus a prompt rule (#6) telling the critique that direction is not a free variable. `_format_judgment_case` surfaces the flag so it reaches the memo rather than sitting in a field.
+- **Files modified:** `mas_sector_system/valuation_engine.py`, `mas_sector_system/agents.py`, `tests/test_directional_bias.py` (new, 5).
+- **Notes / Handoff for next agent:** Three things.
+  1. **Unanimity is the wrong test — measure net imbalance.** My first cut flagged only argument sets where every material sensitivity pointed the same way. Replaying NVDA's live confirming-run payload showed it missing the real case: growth −$145, WACC −$77, high-growth-years −$63, fade-years **+$37**. Not unanimous, so the check passed, yet **89% of total absolute movement ran downward**. The metric is now the dominant direction's share of total movement, flagged at ≥80% with ≥3 material arguments. Do not "simplify" this back to a sign check.
+  2. **Material means ≥2% of the default fair value.** Without a materiality floor, a trivial ±$1 counter-argument would clear the imbalance test and hide a genuine thumb on the scale.
+  3. **This is a bias detector, not a correctness check.** A one-sided set can be right — a company genuinely deteriorating on several axes at once. The control is that it must be *stated as such* rather than presented as high conviction. The prompt asks for one company-specific fact justifying the uniform move; the engine discloses when that justification is missing.
+- **Verification:** `python3 -m pytest tests/ -q` → **181 passed** (176 prior + 5). Live NVDA payload replayed → `dominant_share 0.895, one_sided true`.
+- **Status:** COMPLETED
