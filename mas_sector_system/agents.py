@@ -1427,28 +1427,43 @@ def _format_judgment_case(dcf_judgment: dict) -> str:
     """
     rng = dcf_judgment.get("fair_value_range") or {}
     lines = ["=== JUDGMENT CASE (same engine, argued inputs) ==="]
-    if rng.get("low") is not None and rng.get("high") is not None:
+    central = rng.get("base")
+    if isinstance(central, (int, float)):
         lines.append(
-            f"Argued fair value range: {rng['low']:.2f} – {rng['high']:.2f} "
-            f"(midpoint {rng.get('base'):.2f})"
-            if isinstance(rng.get("base"), (int, float))
-            else f"Argued fair value range: {rng['low']:.2f} – {rng['high']:.2f}"
+            f"ARGUED CENTRAL CASE: {central:.2f} per share — every argued "
+            "parameter at the midpoint of its range. THIS is the argued value; "
+            "quote it as the judgment case."
         )
-    else:
+    elif rng.get("low") is None:
         lines.append(
             "No argued fair value produced — see disclosures below; present the "
             "sector-default case alone and say why the argued case did not apply."
         )
-    for corner in ("low_case", "high_case"):
-        case = dcf_judgment.get(corner)
-        if isinstance(case, dict):
-            a = case.get("assumptions") or {}
+
+    sens = dcf_judgment.get("sensitivities") or []
+    if sens:
+        lines.append(
+            "Sensitivity — one parameter moved to its argued midpoint, all "
+            "others left at the engine default (most impactful first):"
+        )
+        for s in sens[:6]:
+            fv = s.get("fair_value_per_share")
+            delta = s.get("delta_vs_default")
+            fv_txt = f"{fv:.2f}" if isinstance(fv, (int, float)) else "n/a"
+            d_txt = f"{delta:+.2f}" if isinstance(delta, (int, float)) else "n/a"
             lines.append(
-                f"  {corner}: fv={case.get('fair_value_per_share')} "
-                f"wacc={a.get('wacc')} g_high={a.get('g_high')} "
-                f"g_terminal={a.get('g_terminal')} "
-                f"base_fcf_method={a.get('base_fcf_method')}"
+                f"  {s.get('parameter'):18} {s.get('engine_default')} → "
+                f"{s.get('argued_midpoint')}   fv {fv_txt} ({d_txt})"
             )
+
+    if rng.get("low") is not None and rng.get("high") is not None:
+        lines.append(
+            f"Compounded extremes: {rng['low']:.2f} – {rng['high']:.2f}. These "
+            "stack EVERY parameter pessimistic, then every parameter "
+            "optimistic, so the spread is wider than the analysis supports. "
+            "They are not scenarios. Do NOT headline these as the argued "
+            "range — cite the central case and the sensitivity drivers."
+        )
     for d in dcf_judgment.get("band_dissents") or []:
         if isinstance(d, dict):
             lines.append(
