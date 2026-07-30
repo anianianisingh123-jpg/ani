@@ -247,8 +247,17 @@ def validate_inputs(state: dict[str, Any]) -> dict[str, Any]:
         "gross_margin__current_annual",
     )
     core_missing = []
+    core_not_applicable = []
     for cid in core_ids:
         m = get_metric(cm, cid) if cm else None
+        # A metric the archetype deliberately suppresses is NOT missing data —
+        # it is structurally meaningless for this business. Banks have no gross
+        # margin; `archetype.py::_SUPPRESS_PREFIXES` already marks it
+        # applicable=False. Conflating the two failed every bank, insurer and
+        # REIT at the gate for behaving exactly as designed.
+        if m is not None and m.get("applicable") is False:
+            core_not_applicable.append(cid)
+            continue
         if not m or not m.get("applicable") or m.get("value") is None:
             # revenue may be under slightly different path
             if cid == "revenue__current_annual":
@@ -267,6 +276,18 @@ def validate_inputs(state: dict[str, Any]) -> dict[str, Any]:
                     core_missing.append(cid)
             else:
                 core_missing.append(cid)
+
+    if core_not_applicable:
+        # Recorded, not penalised — the archetype router is working.
+        _check(
+            checks,
+            name="metrics_core_not_applicable",
+            status="PASS",
+            detail=(
+                f"not applicable for this archetype (excluded from the core "
+                f"check): {', '.join(core_not_applicable)}"
+            ),
+        )
 
     if core_missing:
         msg = f"Core metrics missing: {', '.join(core_missing)}"

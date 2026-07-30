@@ -247,6 +247,36 @@ def _default_value(engine_default: dict, parameter: str) -> Any:
     return engine_default.get(parameter)
 
 
+# Parameters expressed as decimal rates (0.11 == 11%). An LLM asked for "a
+# defensible WACC" will sometimes answer 11 and sometimes 0.11 — observed live
+# on 2026-07-29, where NVDA returned wacc=[11,13] and g_high=[20,30] while CRM
+# and JPM returned proper decimals in the same batch. Clamping 11 to the 0.20
+# ceiling silently produced a 20% WACC and a 40% growth rate, destroying every
+# argument in that run. Normalising is strictly better than clamping: a rate
+# above 1.0 cannot be a real discount or growth rate, so it is a unit error.
+_RATE_PARAMETERS = frozenset({"wacc", "g_high", "g_terminal"})
+
+
+def _normalize_rate_scale(
+    value: Any, *, parameter: str, warnings: list[str]
+) -> Any:
+    """Convert a percent-scale rate (11) to decimal (0.11); pass others through."""
+    if parameter not in _RATE_PARAMETERS:
+        return value
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return value
+    if number != number or abs(number) <= 1.0:
+        return value
+    converted = number / 100.0
+    warnings.append(
+        f"{parameter} interpreted as a percentage: {number} → {converted} "
+        "(rates must be decimals; a value above 1.0 cannot be a real rate)"
+    )
+    return converted
+
+
 def _clamp_number(
     value: Any,
     *,
@@ -255,6 +285,7 @@ def _clamp_number(
     integer: bool,
     warnings: list[str],
 ) -> Optional[float | int]:
+    value = _normalize_rate_scale(value, parameter=parameter, warnings=warnings)
     try:
         number = float(value)
     except (TypeError, ValueError):
@@ -316,7 +347,22 @@ def validate_argued_inputs(
             continue
 
         if parameter == "base_fcf_method":
+            # The enum may arrive as `value`, `argued_value`, or — because the
+            # critique prompt asks for a uniform shape across all parameters —
+            # inside `argued_range` as ["<method>", "<method>"]. Accept all
+            # three: a schema divergence here silently disabled cash-flow
+            # normalisation on every live run of 2026-07-29.
             method = raw.get("value", raw.get("argued_value"))
+            if method is None:
+                rng = raw.get("argued_range")
+                if isinstance(rng, (list, tuple)) and rng:
+                    candidates = [m for m in rng if isinstance(m, str)]
+                    # Prefer the more conservative (normalised) method when the
+                    # two corners disagree, e.g. ["avg_3y", "ttm"] → avg_3y.
+                    for preferred in ("mid_cycle", "avg_5y", "avg_3y", "ttm"):
+                        if preferred in candidates:
+                            method = preferred
+                            break
             if method not in _BASE_FCF_METHODS:
                 warnings.append(
                     f"base_fcf_method rejected: {method!r} is not one of "
@@ -1441,9 +1487,14 @@ def compute_dcf_with_argued_inputs(state: dict, argued: dict) -> dict[str, Any]:
             "fair_value_range": (
                 {
                     "low": min(values),
-                    "base": None,
+                    # Midpoint of the argued corners. `fair_value_per_share`
+                    # stays None on purpose — the argued case is a range, not a
+                    # point — but downstream consumers (memo renderer, football
+                    # field, rubric) need one scalar to anchor on, and leaving
+                    # this slot null meant the judgment case rendered blank.
+                    "base": sum(values) / len(values),
                     "high": max(values),
-                    "basis": "two argued-input range corners",
+                    "basis": "midpoint of two argued-input range corners",
                 }
                 if values
                 else None
