@@ -487,22 +487,24 @@ def test_c11_passes_when_labels_consistent():
 
 
 def test_c11_two_case_default_and_judgment_not_contradiction():
-    """VAL-13: base FV + judgment corners are the feature, not a fail."""
+    """VAL-13/15: default + central + corners + sensitivities are the feature."""
     state = _good_state(
         fundamental_valuation=(
-            "Engine base fair value $144.08 per share (WACC 10.5%, g_high 20%). "
-            "Judgment case: fair value $88.24 – $146.45 (WACC 11.5%–13.5%, "
-            "g_high 18%–28%). Risk remains open."
+            "Engine base fair value $318.63 per share (WACC 10.5%, g_high 35%). "
+            "Central case $117.56. Compounded corners $85.37 – $148.62. "
+            "Sensitivities: g_high alone → $173.46; wacc alone → $242.11; "
+            "high_growth_years alone → $255.65; g_terminal alone → $292.69. "
+            "Risk remains open."
         ),
         relative_valuation="Comps only.",
         final_memo="",
         dcf_engine={
             **_base_engines()["dcf_engine"],
-            "fair_value_per_share": 144.08,
-            "fair_value_range": {"low": 122.47, "base": 144.08, "high": 165.69},
+            "fair_value_per_share": 318.63,
+            "fair_value_range": {"low": 270.83, "base": 318.63, "high": 366.42},
             "assumptions": {
-                "wacc": 0.105,
-                "g_high": 0.20,
+                "wacc": 0.10,
+                "g_high": 0.35,
                 "g_terminal": 0.03,
             },
         },
@@ -510,15 +512,24 @@ def test_c11_two_case_default_and_judgment_not_contradiction():
             "input_source": "argued",
             "fair_value_per_share": None,
             "fair_value_range": {
-                "low": 88.24,
-                "base": 117.34,
-                "high": 146.45,
-                "basis": "two argued-input corners",
+                "low": 85.37,
+                "base": 117.56,
+                "high": 148.62,
+                "basis": "base = central case; low/high = compounded extremes",
             },
+            "central_case": {"fair_value_per_share": 117.56},
+            "low_case": {"fair_value_per_share": 85.37},
+            "high_case": {"fair_value_per_share": 148.62},
+            "sensitivities": [
+                {"parameter": "g_high", "fair_value_per_share": 173.46, "delta_vs_default": -145.17},
+                {"parameter": "wacc", "fair_value_per_share": 242.11, "delta_vs_default": -76.52},
+                {"parameter": "high_growth_years", "fair_value_per_share": 255.65, "delta_vs_default": -62.98},
+                {"parameter": "g_terminal", "fair_value_per_share": 292.69, "delta_vs_default": -25.94},
+            ],
             "assumptions": {
-                "wacc": 0.125,
+                "wacc": 0.1175,
                 "g_high": 0.23,
-                "g_terminal": 0.03,
+                "g_terminal": 0.0225,
             },
             "clamp_warnings": [],
             "band_dissents": [],
@@ -530,15 +541,15 @@ def test_c11_two_case_default_and_judgment_not_contradiction():
             "arguments": [
                 {
                     "parameter": "wacc",
-                    "engine_default": 0.105,
-                    "argued_range": [0.115, 0.135],
+                    "engine_default": 0.10,
+                    "argued_range": [0.11, 0.125],
                     "verdict": "too_low",
                     "reasoning": "concentration risk",
                     "evidence": ["dcf_engine.inputs.net_debt"],
                 },
                 {
                     "parameter": "g_high",
-                    "engine_default": 0.20,
+                    "engine_default": 0.35,
                     "argued_range": [0.18, 0.28],
                     "verdict": "defensible",
                     "reasoning": "fade from peak",
@@ -551,7 +562,9 @@ def test_c11_two_case_default_and_judgment_not_contradiction():
     )
     by = _result_by_id(grade_valuation(state, judge=_always_pass_judge))
     assert by[11]["passed"] is True, by[11]["detail"]
-    assert "two-case" in by[11]["detail"].lower() or "explained" in by[11]["detail"].lower()
+    # Sensitivity FVs must not appear as residual contradictions.
+    assert "173.46" not in by[11]["detail"]
+    assert "242.11" not in by[11]["detail"]
 
 
 def test_c11_still_flags_true_within_case_contradiction():

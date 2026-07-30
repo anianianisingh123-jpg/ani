@@ -1215,11 +1215,21 @@ def _extend_floats(dest: list[float], *values: Any) -> None:
                 dest.append(f)
 
 
-def _two_case_allowed_values(state: dict) -> dict[str, list[float]]:
-    """Numbers that are intentionally present when default + judgment co-exist.
+def _argued_shape_allowed_values(state: dict) -> dict[str, list[float]]:
+    """Numbers that are intentionally present under the full argued-output shape.
 
-    Includes: sector-default assumptions/FV, judgment FV range corners + base,
-    argued_range corners from the critique, and comps-implied corners.
+    VAL-15 four-value (plus sensitivities) shape, read from structured state
+    rather than prose:
+
+    * ``dcf_engine.fair_value_per_share`` — sector-default case
+    * ``dcf_judgment.fair_value_range.base`` / ``central_case`` — central case
+      (every argued parameter at its range midpoint)
+    * ``fair_value_range.low`` / ``low_case`` — compounded pessimistic corner
+    * ``fair_value_range.high`` / ``high_case`` — compounded optimistic corner
+    * ``sensitivities[*].fair_value_per_share`` — one parameter moved alone
+
+    Also absorbs rate assumptions at each of those points, critique
+    ``argued_range`` corners, and comps-implied values.
     """
     allowed: dict[str, list[float]] = {
         "wacc": [],
@@ -1231,10 +1241,17 @@ def _two_case_allowed_values(state: dict) -> dict[str, list[float]]:
         "eps": [],
     }
 
-    def _ingest_engine_block(block: Any) -> None:
-        if not isinstance(block, dict) or not block:
+    def _ingest_engine_block(block: Any, *, depth: int = 0) -> None:
+        if not isinstance(block, dict) or not block or depth > 4:
             return
         assumptions = block.get("assumptions") if isinstance(block.get("assumptions"), dict) else {}
+        # low/high cases store assumptions nested under low/high keys in some shapes
+        if "wacc" not in assumptions and isinstance(assumptions.get("low"), dict):
+            for side in ("low", "high"):
+                side_a = assumptions.get(side)
+                if isinstance(side_a, dict):
+                    for key in ("wacc", "g_high", "g_terminal"):
+                        _extend_floats(allowed[key], side_a.get(key))
         inputs = block.get("inputs") if isinstance(block.get("inputs"), dict) else {}
         for key in ("wacc", "g_high", "g_terminal"):
             _extend_floats(allowed[key], assumptions.get(key), block.get(key))
@@ -1244,17 +1261,53 @@ def _two_case_allowed_values(state: dict) -> dict[str, list[float]]:
             block.get("epv_per_share"),
         )
         fr = block.get("fair_value_range") if isinstance(block.get("fair_value_range"), dict) else {}
-        _extend_floats(allowed["fair_value"], fr.get("low"), fr.get("base"), fr.get("high"))
-        # Nested corner cases from two-corner re-runs
-        for corner_key in ("low_case", "high_case", "base_case"):
+        _extend_floats(
+            allowed["fair_value"],
+            fr.get("low"),
+            fr.get("base"),
+            fr.get("high"),
+        )
+        # Nested structured cases (VAL-14/15 shape)
+        for corner_key in (
+            "low_case",
+            "high_case",
+            "base_case",
+            "central_case",
+            "base_engine",
+        ):
             corner = block.get(corner_key)
             if isinstance(corner, dict):
-                _ingest_engine_block(corner)
+                _ingest_engine_block(corner, depth=depth + 1)
+        # One-at-a-time sensitivity table — each FV is a legitimate design output
+        sens = block.get("sensitivities")
+        if isinstance(sens, list):
+            for row in sens:
+                if not isinstance(row, dict):
+                    continue
+                _extend_floats(
+                    allowed["fair_value"],
+                    row.get("fair_value_per_share"),
+                    row.get("fair_value"),
+                )
+                param = str(row.get("parameter") or "")
+                if param in ("wacc", "g_high", "g_terminal"):
+                    _extend_floats(
+                        allowed[param],
+                        row.get("engine_default"),
+                        row.get("argued_midpoint"),
+                    )
         _extend_floats(
             allowed["base_fcf"],
             inputs.get("base_fcf_annual"),
             inputs.get("base_fcf"),
             assumptions.get("base_fcf"),
+        )
+        _extend_floats(
+            allowed["eps"],
+            inputs.get("eps_diluted_current"),
+            inputs.get("eps_basic_current"),
+            block.get("eps_diluted"),
+            block.get("eps"),
         )
         # Comps implied values
         for k in (
@@ -1299,6 +1352,10 @@ def _two_case_allowed_values(state: dict) -> dict[str, list[float]]:
     return allowed
 
 
+# Back-compat alias used by older tests / call sites.
+_two_case_allowed_values = _argued_shape_allowed_values
+
+
 def _value_in_allowed(val: float, allowed: list[float], *, rate: bool = False) -> bool:
     if not allowed:
         return False
@@ -1330,11 +1387,19 @@ def _value_in_allowed(val: float, allowed: list[float], *, rate: bool = False) -
 def _grade_c11(state: dict, text: str) -> dict[str, Any]:
     """No internal numeric contradiction within a single case.
 
-    Two-case aware (VAL-13): values that reconcile to the sector-default case,
-    the judgment-case low/high corners, or a base assumption plus its argued
-    range are NOT contradictions — they are the feature. Only flag the same
-    quantity stated inconsistently outside that permitted multi-case set
-    (e.g. patents 196k vs 300k).
+    Argued-shape aware (VAL-13/15): values that reconcile to any of
+
+    * sector default (``dcf_engine``),
+    * central case (``fair_value_range.base`` / ``central_case``),
+    * compounded corners (``low`` / ``high`` / ``low_case`` / ``high_case``),
+    * single-parameter sensitivities (``sensitivities[*].fair_value_per_share``),
+    * critique ``argued_range`` corners for rate inputs,
+
+    are NOT contradictions — they are the design. Only flag the same quantity
+    stated inconsistently outside that permitted set (e.g. patents 196k vs 300k).
+
+    Allowed values are read from structured ``dcf_judgment`` / engine dicts,
+    not pattern-matched from prose.
     """
     if not (text or "").strip():
         return {
@@ -1345,9 +1410,7 @@ def _grade_c11(state: dict, text: str) -> dict[str, Any]:
         }
 
     by_label: dict[str, list[float]] = {}
-    allowed = _two_case_allowed_values(state)
-    # justified_multiple argued_range must NOT pollute fair_value — rebuild clean
-    # (defensive: _two_case_allowed_values no longer adds multiples to fair_value)
+    allowed = _argued_shape_allowed_values(state)
 
     for m in _LABELED_METRIC_RE.finditer(text):
         label = _norm_c11_label(m.group("label"))
@@ -1422,7 +1485,10 @@ def _grade_c11(state: dict, text: str) -> dict[str, Any]:
             explained += 1
             continue
         if len(residual) >= 2:
-            conflicts.append(f"{label}: {residual[:4]} (not explained by two-case set)")
+            conflicts.append(
+                f"{label}: {residual[:4]} (not explained by argued shape: "
+                f"default/central/corners/sensitivities)"
+            )
 
     if conflicts:
         return {
@@ -1433,7 +1499,10 @@ def _grade_c11(state: dict, text: str) -> dict[str, Any]:
         }
     detail = f"no within-case contradictions across {len(by_label)} identity metric(s)"
     if explained:
-        detail += f"; {explained} multi-value set(s) explained by default/judgment cases"
+        detail += (
+            f"; {explained} multi-value set(s) explained by "
+            f"default/central/corners/sensitivities"
+        )
     return {
         "passed": True,
         "judged": False,

@@ -390,3 +390,17 @@ Tracks A / B / C have **zero file overlap** by construction. **Note:** in round 
   4. **Sensitivities need `base_fcf`.** They call `_recompute_dcf_case`, so on a state with no `cash_flow_statement` (e.g. Grok's `*_state_slice.json`, which omits raw statements) every fair value comes back None while the parameters and midpoints are still correct. That is a lossy-fixture artifact, not a regression — verify against a full state.
 - **Verification:** `python3 -m pytest tests/ -q` → **169 passed** (162 prior + 9 new, minus overlap). NVDA's live argued ranges replayed: wacc 0.115–0.135 → central 0.125, g_high 0.18–0.28 → 0.23, g_terminal 0.025–0.03 → 0.0275.
 - **Status:** COMPLETED
+
+### [2026-07-30] - [Grok] - [VAL-02 part 4: confirming run NVDA/CRM]
+- What I changed: Confirming live deep-dives with suffix `_confirm`. Compared only to fixed-grader after baselines (NVDA 10/11, CRM 8/11). Did not re-score old buggy after runs.
+- Artifacts: `outputs/val02_baseline/{NVDA,CRM}_{state_slice,grade,icl_stats}_confirm.json`, `comparison_confirm.md`, `summary_confirm.json`.
+- **NVDA (full ICL path, second attempt after unparseable critique on attempt 1):** score **8/11** (Δ −2 vs fixed baseline). Plumbing: `fcf_history` **5 rows**; no ttm-fallback warning; base_fcf_method requested `ttm` (not avg_3y); central FV **$117.56** (low/high corners present); **5 sensitivities** sorted by impact; **0** percent-unit warnings; critique 6/6 accepted, 2 band dissents, 0 clamps. Rubric fails: C3 currency, C8 judge, C11 (sensitivity FVs + dual EPS).
+- **CRM:** score **9/11** (Δ +1 vs fixed baseline) but **fundamental critique hit Anthropic 529 overloaded twice** — no `dcf_judgment` / no central case / no sensitivities. Relative critique OK. `fcf_history` still **5 rows**. C9 FAIL (missing dcf_judgment) is infrastructure, not quality. Narrative: C3 still fails ($23B); C7/C8/C11 pass.
+- Checks: (1) annual_series/fcf_history fix **fired** (5≥3, no "0 annual periods" msg). (2) central base present on NVDA only. (3) sensitivities present on NVDA only. (4) no percent-interpretation warnings; NVDA rates emitted as decimals.
+- Status: COMPLETED (CRM DCF-ICL incomplete due to API overload)
+
+### [2026-07-30] - [Grok] - [VAL-15: C11 full argued-shape allowlist]
+- What I changed: Criterion 11 now treats as non-contradictions any FV/rate that reconciles to structured `dcf_engine` default, `dcf_judgment.fair_value_range.{low,base,high}`, `central_case` / `low_case` / `high_case`, or `sensitivities[*].fair_value_per_share` (plus critique argued_range corners). Reads shape from state dicts, not prose.
+- Files modified: `mas_sector_system/valuation_rubric.py`, `tests/test_valuation_rubric.py`, offline `outputs/val02_baseline/*_grade_confirm.json`.
+- Offline re-score of confirm slices (no live run): NVDA C11 no longer flags sensitivity FVs 173/242/255/292; remaining C11 residual (if any) is non-FV. No new pipeline runs.
+- Status: COMPLETED
