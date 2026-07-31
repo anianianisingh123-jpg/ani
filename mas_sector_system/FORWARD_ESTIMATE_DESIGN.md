@@ -409,10 +409,18 @@ file.** Round 1 of the previous epic lost work because agents shared a checkout 
 
 ```python
 DRIVER_TEMPLATES: dict[str, dict]          # keyed on ARCHETYPES
-def drivers_for(archetype: str) -> list[dict]
+OUTPUT_KINDS: dict[str, str]               # all 16, from the §5.2 output column
+def drivers_for(archetype: str) -> tuple[list[dict], bool]   # (drivers, is_native)
 def band_for_driver(archetype: str, driver: str) -> tuple[float, float] | None
 def forecast_output_kind(archetype: str) -> str   # eps_fcf | ffo | residual_income | book_value
 ```
+
+**As-built note (2026-07-30, FWD-01a).** `drivers_for` returns a flag alongside the drivers,
+mirroring `valuation_doctrine.exemplar_block_for`. §8's fallback row requires the no-template case
+to run consolidated-only **and flagged**; a bare list cannot express that, so a substituted `general`
+set was indistinguishable from a native one. `OUTPUT_KINDS` covers all 16 archetypes ahead of their
+driver sets — the output *shape* is doctrine from §5.2 and does not depend on the FWD-07 baseline,
+whereas without it every archetype without a template silently reported `eps_fcf`.
 
 Pure data and pure functions. No I/O, no LLM, no import from `agents.py`.
 **Financials are the priority** — `bank_lender`, `insurance`, `equity_reit`, `mortgage_reit` first,
