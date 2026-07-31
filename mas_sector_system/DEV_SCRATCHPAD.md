@@ -176,6 +176,28 @@ Tracks A / B / C have **zero file overlap** by construction. **Note:** in round 
 
 ---
 
+### Epic F — Forward Estimates (`FORWARD_ESTIMATE_DESIGN.md`)
+
+**Read the design before claiming a row.** §7 (argued-driver contract) is shared and frozen. The two non-negotiable controls are §2's dial ceiling (4–8 drivers) and §7's mandatory `historical_basis`. **Locked decisions: annual only, 5-year horizon, 5 years of history.**
+
+The 5-year historical foundation already exists — all three statements carry `annual_series` at 5 ranks (income 14 labels, balance sheet 16, cash flow 9). The argued machinery (clamps, evidence check, sensitivities, bias detector) also exists. This epic points it at different dials rather than rebuilding it.
+
+| ID | Task | Assignee | Status |
+|----|------|----------|--------|
+| FWD-07 | Baseline the full 8-ticker set (NVDA/QCOM/CRM/JPM/PLD/PGR/XOM/KO) on pre-forecast code. Log every extraction failure — 5 of 8 have never run, and those findings shape the driver templates. | Grok | IN_PROGRESS |
+| FWD-00 | `state.py`: `historical_profile`, `forecast`, `driver_critique`, `dcf_modelled`, `consensus_reconciliation`. Additive. | Claude/Opus-5 | DONE |
+| FWD-05a | `historical_profile()` + `mechanical_defaults()` → `forecast_engine.py`. Pure Python over the existing `annual_series`. | Codex | IN_PROGRESS |
+| FWD-05b | `build_forecast()` skeleton + fixture tests. Annual, 5 years. Not wired. | Codex | IN_PROGRESS |
+| FWD-01a | Driver templates for `general` and `software_saas` only → `driver_templates.py`. Structure must let the other 14 slot in without an API change. | Gemini | IN_PROGRESS |
+| FWD-01b | Remaining 14 templates, financials first. **Held** until FWD-07 shows what parses for a bank/insurer/REIT. | Gemini | BLOCKED (on FWD-07) |
+| FWD-03 | Segment revenue extraction + 2% reconciliation. **Held** until FWD-07 shows which filers have clean segment data. Timebox and report early. | Codex | BLOCKED (on FWD-07) |
+| FWD-06 | Rubric criteria F1–F7 (§11). Reuse `_evidence_value`. | Grok | TODO |
+| FWD-08 | Driver-critique prompt + call; enforce mandatory `historical_basis`. | Claude/Opus-5 | TODO |
+| FWD-09 | `dcf_modelled` + consensus reconciliation into the valuation nodes. | Claude/Opus-5 | TODO |
+| FWD-10 | `--forecast` flag (CLI only, no topology change — needs assignment); artifacts + football field third case. | Claude/Opus-5 | TODO |
+
+---
+
 ## 📝 Agent Activity & Handoff Logs
 
 *Newest entries at the bottom. Append only — never rewrite another agent's entry.*
@@ -413,4 +435,15 @@ Tracks A / B / C have **zero file overlap** by construction. **Note:** in round 
   2. **Material means ≥2% of the default fair value.** Without a materiality floor, a trivial ±$1 counter-argument would clear the imbalance test and hide a genuine thumb on the scale.
   3. **This is a bias detector, not a correctness check.** A one-sided set can be right — a company genuinely deteriorating on several axes at once. The control is that it must be *stated as such* rather than presented as high conviction. The prompt asks for one company-specific fact justifying the uniform move; the engine discloses when that justification is missing.
 - **Verification:** `python3 -m pytest tests/ -q` → **181 passed** (176 prior + 5). Live NVDA payload replayed → `dominant_share 0.895, one_sided true`.
+- **Status:** COMPLETED
+
+### [2026-07-30] - [Claude/Opus-5] - [FWD-00: forward-estimate state contract]
+- **What I changed:** Added five additive `ResearchState` fields for the modelling layer — `historical_profile`, `forecast`, `driver_critique`, `dcf_modelled`, `consensus_reconciliation` — and seeded Epic F in the task queue. No behaviour change; nothing reads or writes them yet.
+- **Files modified:** `mas_sector_system/state.py`, `mas_sector_system/DEV_SCRATCHPAD.md`.
+- **Notes / Handoff for next agent:** Four things.
+  1. **Most of this epic already exists.** All three statements carry `annual_series` at 5 annual ranks (income 14 labels, balance sheet 16, cash flow 9) — roughly 200 filing-derived points per company, already in state. And the argued machinery (clamps, evidence resolution, band dissents, sensitivities, directional-bias detection) is built and tested. **We are pointing the existing judgment layer at different dials, not building a second one.** Scope accordingly before estimating.
+  2. **`dcf_modelled` travels alongside `dcf_engine` and `dcf_judgment` — it does not replace either.** Three cases ship together: sector defaults on trailing FCF, argued rates on trailing FCF, argued drivers on modelled FCF. Anything that surfaces a valuation must show the anchor.
+  3. **`historical_profile` is judgment-free and may never be overwritten by a model.** The LLM cites it as evidence and argues *against* it; it does not get to edit the history. It is also the source of the mechanical defaults, which is how most of a forecast is set empirically with no judgment at all.
+  4. **`driver_critique` carries one field `valuation_critique` does not: a mandatory `historical_basis`.** A driver that cannot name the trend it departs from is a guess, and is rejected in code. That is the single most important new control in this epic — do not soften it to a prompt request.
+- **Verification:** `python3 -m pytest tests/ -q` → **181 passed**. 52 state fields, all five new ones present.
 - **Status:** COMPLETED

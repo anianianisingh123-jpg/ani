@@ -223,6 +223,56 @@ class ResearchState(TypedDict):
     valuation_grade: Optional[dict]
 
     # ------------------------------------------------------------------
+    # Forward estimates (FORWARD_ESTIMATE_DESIGN.md) — the modelling layer
+    #
+    # Everything above values the company off a trailing figure with argued
+    # rates. These fields carry a modelled forward P&L instead: history →
+    # computed trends → 4–8 argued drivers → Python-built projection.
+    #
+    # The invariant is unchanged and now spans a longer chain: Python computes
+    # every figure, the LLM argues only the drivers, and the LLM's output
+    # surface holds bounded scalars and enums — never a currency amount. A
+    # forecast is the easiest place in this system to fabricate, which is why
+    # none of these fields may be assigned from model output.
+    # ------------------------------------------------------------------
+
+    # Facts computed from the five annual periods already carried on each
+    # statement's `annual_series` (design §3.2): growth per segment and in
+    # total, margin ranges and trend, opex/tax/capex/working-capital ratios,
+    # share-count pace, FCF conversion. Judgment-free — the LLM may cite these
+    # as evidence and argue *against* them, but may never overwrite one.
+    # Also the source of the mechanical defaults (§5.3), which is how most of
+    # a forecast gets set empirically with no judgment at all.
+    historical_profile: dict
+
+    # Deterministic 5-year projection from the accepted drivers
+    # (`forecast_engine.build_forecast`): per-year revenue by segment, margins,
+    # opex, operating and net income, EPS, and free cash flow. Annual only —
+    # quarterly is deliberately out of scope. None when no forecast was
+    # produced, which must leave the trailing-based valuation fully intact.
+    forecast: Optional[dict]
+
+    # Structured argument over the drivers, mirroring `valuation_critique` but
+    # pointed at growth/margin/opex rather than WACC. Adds one mandatory field
+    # the valuation critique does not have: every driver must carry a
+    # `historical_basis` naming the trend it departs from. An argument that
+    # cannot name what it is breaking is a guess, and is rejected in code.
+    driver_critique: Optional[dict]
+
+    # DCF run against the modelled cash flows rather than a grown trailing
+    # figure. Travels ALONGSIDE `dcf_engine` (sector-default anchor) and
+    # `dcf_judgment` (argued rates on trailing FCF) — three cases ship
+    # together and none replaces another.
+    dcf_modelled: Optional[dict]
+
+    # Modelled year-1 revenue/EPS against consensus, with the gap stated
+    # (§9.2). This is the desk's variant perception quantified: "modelled FY27
+    # EPS $8.38 vs consensus $8.82, 5% below, driven by opex." Report the gap;
+    # never force agreement — a large argued divergence is a legitimate view,
+    # a silent one is a bug.
+    consensus_reconciliation: Optional[dict]
+
+    # ------------------------------------------------------------------
     # Output fields
     # ------------------------------------------------------------------
 
