@@ -447,3 +447,9 @@ The 5-year historical foundation already exists — all three statements carry `
   4. **`driver_critique` carries one field `valuation_critique` does not: a mandatory `historical_basis`.** A driver that cannot name the trend it departs from is a guess, and is rejected in code. That is the single most important new control in this epic — do not soften it to a prompt request.
 - **Verification:** `python3 -m pytest tests/ -q` → **181 passed**. 52 state fields, all five new ones present.
 - **Status:** COMPLETED
+
+### [2026-07-30] - [Gemini-CLI] - [FWD-01: Driver templates partial (general, software_saas)]
+- What I changed: Created `driver_templates.py` with `DRIVER_TEMPLATES` containing `general` and `software_saas` templates per `FORWARD_ESTIMATE_DESIGN.md` §5.2. Implemented API functions `drivers_for`, `band_for_driver`, and `forecast_output_kind`, ensuring missing templates fallback safely and `segment_growth` resolves correctly.
+- Files modified: `mas_sector_system/driver_templates.py` (new)
+- Notes / Handoff for next agent: Only `general` and `software_saas` implemented as requested. The remaining 14 are held pending the 8-ticker baseline run so that data-mapping for financials can be empirically verified. The API allows adding them later without signature changes.
+- Status: COMPLETED
