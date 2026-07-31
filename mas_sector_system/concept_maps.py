@@ -136,6 +136,16 @@ GENERAL_CASHFLOW: dict[str, list[str]] = {
         "PaymentsToAcquireProductiveAssets",
         "CapitalExpendituresIncurredButNotYetPaid",
     ],
+    # Required by forecast_engine's mechanical defaults — without it no forecast
+    # can be built for any archetype, since d_and_a_pct_revenue has no fallback.
+    # Bare "Depreciation" is deliberately excluded: it is PP&E-only and aliases
+    # are merged rather than tried in order, so mixing it with the total-D&A tags
+    # would let a partial measure win a period and understate the add-back.
+    "DepreciationAndAmortization": [
+        "DepreciationDepletionAndAmortization",
+        "DepreciationAndAmortization",
+        "DepreciationAmortizationAndAccretionNet",
+    ],
     "NetCashFromInvestingActivities": [
         "NetCashProvidedByUsedInInvestingActivities",
         "NetCashProvidedByUsedInInvestingActivitiesContinuingOperations",

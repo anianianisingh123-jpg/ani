@@ -650,10 +650,18 @@ def _pick_period(
     filtered.sort(key=_key, reverse=True)
 
     # Deduplicate by (end, fp) keeping first (most recently filed).
+    #
+    # `fy` is deliberately NOT part of the signature. A filer reports the same
+    # period twice — once as its own fiscal year, then again as the prior-year
+    # comparative in the next 10-K under a *different* fy stamp — so including
+    # fy let both copies through. Ranks 0-4 then held three distinct years with
+    # two of them duplicated, silently halving the history every mean, CAGR and
+    # trend in the forecast is computed over. Same unreliable field that stamps
+    # NVDA's FY2025 close as 2026; it is not an identity.
     seen: set[tuple] = set()
     unique: list[dict] = []
     for o in filtered:
-        sig = (o.get("end"), o.get("fp"), o.get("fy"))
+        sig = (o.get("end"), o.get("fp"))
         if sig in seen:
             continue
         seen.add(sig)
