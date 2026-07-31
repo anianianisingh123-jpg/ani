@@ -174,8 +174,6 @@ Tracks A / B / C have **zero file overlap** by construction. **Note:** in round 
 | VAL-09 | Football-field bars: default / judgment low / judgment high / comps-implied / EPV (§8). `pdf_generator.py`. | _unassigned_ | TODO |
 | VAL-12 | Preserve filing-derived `annual_series` when the data-gatherer model supplies statement blocks; add model-supplied-path coverage proving `fcf_history()` receives ≥3 rows. | Codex/GPT-5 | DONE |
 
----
-
 ### Epic F — Forward Estimates (`FORWARD_ESTIMATE_DESIGN.md`)
 
 **Read the design before claiming a row.** §7 (argued-driver contract) is shared and frozen. The two non-negotiable controls are §2's dial ceiling (4–8 drivers) and §7's mandatory `historical_basis`. **Locked decisions: annual only, 5-year horizon, 5 years of history.**
@@ -186,8 +184,8 @@ The 5-year historical foundation already exists — all three statements carry `
 |----|------|----------|--------|
 | FWD-07 | Baseline the full 8-ticker set (NVDA/QCOM/CRM/JPM/PLD/PGR/XOM/KO) on pre-forecast code. Log every extraction failure — 5 of 8 have never run, and those findings shape the driver templates. | Grok | IN_PROGRESS |
 | FWD-00 | `state.py`: `historical_profile`, `forecast`, `driver_critique`, `dcf_modelled`, `consensus_reconciliation`. Additive. | Claude/Opus-5 | DONE |
-| FWD-05a | `historical_profile()` + `mechanical_defaults()` → `forecast_engine.py`. Pure Python over the existing `annual_series`. | Codex | IN_PROGRESS |
-| FWD-05b | `build_forecast()` skeleton + fixture tests. Annual, 5 years. Not wired. | Codex | IN_PROGRESS |
+| FWD-05a | `historical_profile()` + `mechanical_defaults()` → `forecast_engine.py`. Pure Python over the existing `annual_series`. | Codex | DONE |
+| FWD-05b | `build_forecast()` skeleton + fixture tests. Annual, 5 years. Not wired. | Codex | DONE |
 | FWD-01a | Driver templates for `general` and `software_saas` only → `driver_templates.py`. Structure must let the other 14 slot in without an API change. | Gemini | IN_PROGRESS |
 | FWD-01b | Remaining 14 templates, financials first. **Held** until FWD-07 shows what parses for a bank/insurer/REIT. | Gemini | BLOCKED (on FWD-07) |
 | FWD-03 | Segment revenue extraction + 2% reconciliation. **Held** until FWD-07 shows which filers have clean segment data. Timebox and report early. | Codex | BLOCKED (on FWD-07) |
@@ -452,4 +450,10 @@ The 5-year historical foundation already exists — all three statements carry `
 - What I changed: Created `driver_templates.py` with `DRIVER_TEMPLATES` containing `general` and `software_saas` templates per `FORWARD_ESTIMATE_DESIGN.md` §5.2. Implemented API functions `drivers_for`, `band_for_driver`, and `forecast_output_kind`, ensuring missing templates fallback safely and `segment_growth` resolves correctly.
 - Files modified: `mas_sector_system/driver_templates.py` (new)
 - Notes / Handoff for next agent: Only `general` and `software_saas` implemented as requested. The remaining 14 are held pending the 8-ticker baseline run so that data-mapping for financials can be empirically verified. The API allows adding them later without signature changes.
+- Status: COMPLETED
+
+### [2026-07-30] - [Codex/GPT-5] - [FWD-05a / FWD-05b]
+- What I changed: Added a pure deterministic forecast engine. `historical_profile()` aligns the three filing-derived annual series by rank and computes revenue growth/CAGRs, margins, opex, tax, capex, D&A, working capital, diluted-share pace, payout, and FCF conversion without interpolation. `mechanical_defaults()` exposes the §5.3 empirical inputs. `build_forecast()` produces the §6 annual P&L/EPS/FCF shape from general segment-growth, gross-margin, and opex-growth drivers, with disclosed consolidated fallback when segments are absent or fail the 2% reconciliation.
+- Files modified: `mas_sector_system/forecast_engine.py` (new), `tests/test_forecast_engine.py` (new), `mas_sector_system/DEV_SCRATCHPAD.md` (task claim/handoff only).
+- Notes / Handoff for next agent: General-company `annual_series` does not currently contain a D&A label, so production `d_and_a_pct_revenue` will be unavailable until an extraction decision is made. Per the FWD-05 timebox, I did not touch `tools.py`; the profile emits a warning and the forecast refuses to invent the missing mechanical default. Effective tax is computable without a new tag as tax expense / (net income + tax expense). Working capital is current assets minus current liabilities. Missing ranks are omitted, rank intervals are preserved for CAGR math, and negative FCF/net-income observations are retained. The fixture includes a filing-derived D&A line to exercise the complete forecast path.
 - Status: COMPLETED
