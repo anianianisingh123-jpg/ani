@@ -1,0 +1,160 @@
+{
+  "ticker": "XOM",
+  "score": 7,
+  "max_score": 11,
+  "criteria": [
+    {
+      "id": 1,
+      "name": "archetype_and_method",
+      "criterion": "Archetype named and primary method justified",
+      "type": "binary",
+      "mechanical": false,
+      "requires_judgment": true,
+      "passed": false,
+      "judged": true,
+      "detail": "empty valuation text",
+      "method": "llm_judge"
+    },
+    {
+      "id": 2,
+      "name": "evidence_for_argued_inputs",
+      "criterion": "Every argued input cites \u22651 resolvable evidence field",
+      "type": "binary",
+      "mechanical": true,
+      "requires_judgment": false,
+      "passed": true,
+      "judged": false,
+      "detail": "no argued inputs present \u2014 vacuous pass (pre-ICL baseline)",
+      "method": "mechanical"
+    },
+    {
+      "id": 3,
+      "name": "no_untraceable_currency",
+      "criterion": "No currency figure appears that is not traceable to an engine block",
+      "type": "binary",
+      "mechanical": true,
+      "requires_judgment": false,
+      "passed": true,
+      "judged": false,
+      "detail": "no currency figures in valuation text",
+      "method": "mechanical"
+    },
+    {
+      "id": 4,
+      "name": "terminal_value_share_stated",
+      "criterion": "Terminal-value share of EV stated (DCF path)",
+      "type": "binary",
+      "mechanical": true,
+      "requires_judgment": false,
+      "passed": true,
+      "judged": false,
+      "detail": "no FCF DCF path present \u2014 N/A pass",
+      "method": "mechanical"
+    },
+    {
+      "id": 5,
+      "name": "valuation_as_range",
+      "criterion": "Valuation expressed as a range, not a point",
+      "type": "binary",
+      "mechanical": true,
+      "requires_judgment": false,
+      "passed": false,
+      "judged": false,
+      "detail": "valuation appears as a point estimate with no range expression",
+      "method": "mechanical"
+    },
+    {
+      "id": 6,
+      "name": "peer_changes_justified",
+      "criterion": "Each peer inclusion/exclusion justified individually",
+      "type": "binary",
+      "mechanical": true,
+      "requires_judgment": false,
+      "passed": true,
+      "judged": false,
+      "detail": "no peer include/exclude actions \u2014 vacuous pass",
+      "method": "mechanical"
+    },
+    {
+      "id": 7,
+      "name": "comparison_windows_consistent",
+      "criterion": "Comparison windows consistent and stated (no YTD vs 1-yr mixing)",
+      "type": "binary",
+      "mechanical": true,
+      "requires_judgment": false,
+      "passed": true,
+      "judged": false,
+      "detail": "no explicit comparison windows",
+      "method": "mechanical"
+    },
+    {
+      "id": 8,
+      "name": "unresolved_risk",
+      "criterion": "\u22651 risk left explicitly unresolved (no self-neutralizing close)",
+      "type": "binary",
+      "mechanical": false,
+      "requires_judgment": true,
+      "passed": false,
+      "judged": true,
+      "detail": "empty valuation text",
+      "method": "llm_judge"
+    },
+    {
+      "id": 9,
+      "name": "default_and_judgment_cases",
+      "criterion": "Both default and judgment cases present",
+      "type": "binary",
+      "mechanical": true,
+      "requires_judgment": false,
+      "passed": false,
+      "judged": false,
+      "detail": "missing: dcf_engine",
+      "method": "mechanical"
+    },
+    {
+      "id": 10,
+      "name": "band_dissents_flagged",
+      "criterion": "Band dissents flagged where applicable",
+      "type": "binary",
+      "mechanical": true,
+      "requires_judgment": false,
+      "passed": true,
+      "judged": false,
+      "detail": "no band_dissents recorded \u2014 N/A pass (nothing to flag)",
+      "method": "mechanical"
+    },
+    {
+      "id": 11,
+      "name": "no_numeric_contradiction",
+      "criterion": "No internal numeric contradiction (same metric, two values)",
+      "type": "binary",
+      "mechanical": true,
+      "requires_judgment": false,
+      "passed": true,
+      "judged": false,
+      "detail": "empty valuation text",
+      "method": "mechanical"
+    }
+  ],
+  "notes": "passed 7/11; failed: 1:archetype_and_method, 5:valuation_as_range, 8:unresolved_risk, 9:default_and_judgment_cases; llm-judged: 1, 8",
+  "phase": "fwd_baseline",
+  "archetype_note": "cyclical_commodity \u2014 mid-cycle normalization",
+  "extraction_archetype": "cyclical_commodity",
+  "graded_at_utc": "2026-07-31T04:17:52.219825+00:00",
+  "source_slice": "XOM_state_slice_fwd_baseline.json",
+  "run_error": null,
+  "failures": [
+    {
+      "stage": "validation_gate",
+      "what": "validation status=FAIL checks=13 warnings=2 failures=1 archetype=cyclical_commodity"
+    },
+    {
+      "stage": "dcf_engine",
+      "what": "dcf_engine empty/missing"
+    },
+    {
+      "stage": "fundamental_critique",
+      "what": "valuation_critique missing (parse fail / API / skipped / inert path)"
+    }
+  ]
+}

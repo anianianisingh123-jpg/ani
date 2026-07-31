@@ -1,0 +1,126 @@
+{
+  "ticker": "KO",
+  "sector": "Consumer Staples",
+  "extraction_archetype": "mature_dividend_payer",
+  "validation_status": "WARN",
+  "qc_status": "PASS_WITH_FLAGS",
+  "dcf_engine_method": "multi_stage_fcf_dcf",
+  "dcf_engine_fv": 24.760912353640027,
+  "dcf_engine_errors": [],
+  "cashflow": {
+    "annual_series_len": 5,
+    "fcf_history_n": 5,
+    "fcf_history_ge_3": true,
+    "fcf_history_error": null,
+    "base_fcf_method_requested": "avg_5y",
+    "base_fcf_method_applied": "avg_5y",
+    "ttm_fallback_warnings": [],
+    "base_fcf_engine": 5296000000.0,
+    "base_fcf_judgment": 5296000000.0
+  },
+  "fair_value_range": {
+    "low": 28.390768332477098,
+    "base": 30.730791784545403,
+    "high": 33.94248305504241,
+    "basis": "base = central case, every argued parameter at its range midpoint; low/high = COMPOUNDED extremes (all parameters pessimistic / optimistic at once) and are wider than the analysis supports \u2014 not scenarios"
+  },
+  "sensitivities": {
+    "n": 5,
+    "table": [
+      {
+        "parameter": "wacc",
+        "engine_default": 0.09,
+        "argued_midpoint": 0.07750000000000001,
+        "fair_value_per_share": 54.88201628585144,
+        "delta_vs_default": 30.121103932211415
+      },
+      {
+        "parameter": "g_terminal",
+        "engine_default": 0.025,
+        "argued_midpoint": 0.025,
+        "fair_value_per_share": 42.06723190262557,
+        "delta_vs_default": 17.306319548985545
+      },
+      {
+        "parameter": "high_growth_years",
+        "engine_default": 5,
+        "argued_midpoint": 5,
+        "fair_value_per_share": 42.06723190262557,
+        "delta_vs_default": 17.306319548985545
+      },
+      {
+        "parameter": "fade_years",
+        "engine_default": 5,
+        "argued_midpoint": 5,
+        "fair_value_per_share": 42.06723190262557,
+        "delta_vs_default": 17.306319548985545
+      },
+      {
+        "parameter": "g_high",
+        "engine_default": 0.11706391056739074,
+        "argued_midpoint": 0.0325,
+        "fair_value_per_share": 23.286615913428836,
+        "delta_vs_default": -1.4742964402111909
+      }
+    ],
+    "dominant_driver": {
+      "parameter": "wacc",
+      "engine_default": 0.09,
+      "argued_midpoint": 0.07750000000000001,
+      "fair_value_per_share": 54.88201628585144,
+      "delta_vs_default": 30.121103932211415
+    }
+  },
+  "directional_bias": {
+    "dominant_share": 0.982,
+    "dominant_direction": "above default",
+    "one_sided": true,
+    "material_arguments": 5,
+    "disclosures": [
+      "DIRECTIONAL BIAS: 98% of the argued movement across 5 material arguments pushes fair value above default. A view is normally one or two departures with the rest left at default; a one-sided set warrants a single stated reason or it is a thumb on the scale."
+    ],
+    "one_sided_fired": true
+  },
+  "disclosures": {
+    "directional_bias": [
+      "DIRECTIONAL BIAS: 98% of the argued movement across 5 material arguments pushes fair value above default. A view is normally one or two departures with the rest left at default; a one-sided set warrants a single stated reason or it is a thumb on the scale."
+    ],
+    "argued_fcf_not_applied": [],
+    "all_clamp_warnings": [
+      "DIRECTIONAL BIAS: 98% of the argued movement across 5 material arguments pushes fair value above default. A view is normally one or two departures with the rest left at default; a one-sided set warrants a single stated reason or it is a thumb on the scale."
+    ]
+  },
+  "icl": {
+    "fundamental_critique_parseable": true,
+    "relative_critique_parseable": true,
+    "both_critiques_parseable": true,
+    "dcf_judgment_present": true,
+    "comps_judgment_present": true,
+    "arguments_proposed": [
+      "base_fcf_method",
+      "g_high",
+      "wacc",
+      "g_terminal",
+      "high_growth_years",
+      "fade_years"
+    ],
+    "arguments_accepted": [
+      "base_fcf_method",
+      "g_high",
+      "wacc",
+      "g_terminal",
+      "high_growth_years",
+      "fade_years"
+    ],
+    "arguments_rejected": [],
+    "proposed_n": 6,
+    "accepted_n": 6,
+    "rejected_n": 0,
+    "band_dissents_n": 0,
+    "band_dissents": [],
+    "revalidate_warnings": []
+  },
+  "failures": [],
+  "run_error": null,
+  "archetype_note": "mature_dividend_payer \u2014 stable-assumption control"
+}

@@ -1,0 +1,77 @@
+{
+  "ticker": "PLD",
+  "sector": "Real Estate",
+  "extraction_archetype": "equity_reit",
+  "validation_status": "WARN",
+  "qc_status": "PASS_WITH_FLAGS",
+  "dcf_engine_method": "ffo_nav",
+  "dcf_engine_fv": null,
+  "dcf_engine_errors": [],
+  "cashflow": {
+    "annual_series_len": 5,
+    "fcf_history_n": 0,
+    "fcf_history_ge_3": false,
+    "fcf_history_error": null,
+    "base_fcf_method_requested": "avg_3y",
+    "base_fcf_method_applied": null,
+    "ttm_fallback_warnings": [],
+    "base_fcf_engine": null,
+    "base_fcf_judgment": null
+  },
+  "fair_value_range": {
+    "low": null,
+    "base": null,
+    "high": null,
+    "basis": null
+  },
+  "sensitivities": {
+    "n": 0,
+    "table": [],
+    "dominant_driver": null
+  },
+  "directional_bias": {
+    "dominant_share": null,
+    "dominant_direction": null,
+    "one_sided": null,
+    "material_arguments": null,
+    "disclosures": [],
+    "one_sided_fired": false
+  },
+  "disclosures": {
+    "directional_bias": [],
+    "argued_fcf_not_applied": [
+      "Argued FCF inputs not applied: the archetype does not use an FCF DCF."
+    ],
+    "all_clamp_warnings": [
+      "Argued FCF inputs not applied: the archetype does not use an FCF DCF."
+    ]
+  },
+  "icl": {
+    "fundamental_critique_parseable": true,
+    "relative_critique_parseable": true,
+    "both_critiques_parseable": true,
+    "dcf_judgment_present": true,
+    "comps_judgment_present": true,
+    "arguments_proposed": [
+      "base_fcf_method"
+    ],
+    "arguments_accepted": [
+      "base_fcf_method"
+    ],
+    "arguments_rejected": [],
+    "proposed_n": 1,
+    "accepted_n": 1,
+    "rejected_n": 0,
+    "band_dissents_n": 0,
+    "band_dissents": [],
+    "revalidate_warnings": []
+  },
+  "failures": [
+    {
+      "stage": "argued_fcf_inert",
+      "what": "Argued FCF inputs not applied: the archetype does not use an FCF DCF."
+    }
+  ],
+  "run_error": null,
+  "archetype_note": "equity_reit \u2014 FFO/NAV path"
+}

@@ -1,0 +1,137 @@
+{
+  "ticker": "QCOM",
+  "sector": "Semiconductors",
+  "extraction_archetype": "general",
+  "validation_status": "PASS",
+  "qc_status": "PASS_WITH_FLAGS",
+  "dcf_engine_method": "multi_stage_fcf_dcf",
+  "dcf_engine_fv": 335.83173939925376,
+  "dcf_engine_errors": [],
+  "cashflow": {
+    "annual_series_len": 5,
+    "fcf_history_n": 5,
+    "fcf_history_ge_3": true,
+    "fcf_history_error": null,
+    "base_fcf_method_requested": "avg_3y",
+    "base_fcf_method_applied": "avg_3y",
+    "ttm_fallback_warnings": [],
+    "base_fcf_engine": 12820000000.0,
+    "base_fcf_judgment": 12820000000.0
+  },
+  "fair_value_range": {
+    "low": 123.86748233899961,
+    "base": 128.68944447875026,
+    "high": 133.8033285057957,
+    "basis": "base = central case, every argued parameter at its range midpoint; low/high = COMPOUNDED extremes (all parameters pessimistic / optimistic at once) and are wider than the analysis supports \u2014 not scenarios"
+  },
+  "sensitivities": {
+    "n": 4,
+    "table": [
+      {
+        "parameter": "g_high",
+        "engine_default": 0.14864259474957442,
+        "argued_midpoint": 0.02,
+        "fair_value_per_share": 146.37849750684578,
+        "delta_vs_default": -189.453241892408
+      },
+      {
+        "parameter": "wacc",
+        "engine_default": 0.1,
+        "argued_midpoint": 0.10750000000000001,
+        "fair_value_per_share": 272.59340913343226,
+        "delta_vs_default": -63.2383302658215
+      },
+      {
+        "parameter": "g_terminal",
+        "engine_default": 0.03,
+        "argued_midpoint": 0.0275,
+        "fair_value_per_share": 297.88678136279833,
+        "delta_vs_default": -37.94495803645543
+      },
+      {
+        "parameter": "high_growth_years",
+        "engine_default": 5,
+        "argued_midpoint": 5,
+        "fair_value_per_share": 306.09566890193895,
+        "delta_vs_default": -29.736070497314813
+      }
+    ],
+    "dominant_driver": {
+      "parameter": "g_high",
+      "engine_default": 0.14864259474957442,
+      "argued_midpoint": 0.02,
+      "fair_value_per_share": 146.37849750684578,
+      "delta_vs_default": -189.453241892408
+    }
+  },
+  "directional_bias": {
+    "dominant_share": 1.0,
+    "dominant_direction": "below default",
+    "one_sided": true,
+    "material_arguments": 4,
+    "disclosures": [
+      "DIRECTIONAL BIAS: 100% of the argued movement across 4 material arguments pushes fair value below default. A view is normally one or two departures with the rest left at default; a one-sided set warrants a single stated reason or it is a thumb on the scale."
+    ],
+    "one_sided_fired": true
+  },
+  "disclosures": {
+    "directional_bias": [
+      "DIRECTIONAL BIAS: 100% of the argued movement across 4 material arguments pushes fair value below default. A view is normally one or two departures with the rest left at default; a one-sided set warrants a single stated reason or it is a thumb on the scale."
+    ],
+    "argued_fcf_not_applied": [],
+    "all_clamp_warnings": [
+      "DIRECTIONAL BIAS: 100% of the argued movement across 4 material arguments pushes fair value below default. A view is normally one or two departures with the rest left at default; a one-sided set warrants a single stated reason or it is a thumb on the scale."
+    ]
+  },
+  "icl": {
+    "fundamental_critique_parseable": true,
+    "relative_critique_parseable": true,
+    "both_critiques_parseable": true,
+    "dcf_judgment_present": true,
+    "comps_judgment_present": true,
+    "arguments_proposed": [
+      "g_high",
+      "base_fcf_method",
+      "wacc",
+      "g_terminal",
+      "high_growth_years"
+    ],
+    "arguments_accepted": [
+      "g_high",
+      "base_fcf_method",
+      "wacc",
+      "g_terminal",
+      "high_growth_years"
+    ],
+    "arguments_rejected": [],
+    "proposed_n": 5,
+    "accepted_n": 5,
+    "rejected_n": 0,
+    "band_dissents_n": 1,
+    "band_dissents": [
+      {
+        "parameter": "g_high",
+        "argued_range": [
+          0.0,
+          0.04
+        ],
+        "archetype_band": [
+          0.02,
+          0.2
+        ],
+        "reasoning": "The engine takes g_high=14.9% from FY25 fcf_yoy, but that year was an unusually strong one (revenue +13.7% with R&D essentially flat). The nine-month FY26 evidence points the other way: fcf__current_quarter of $6.83B cumulative against fcf__current_annual of $12.82B, with capex_pct_revenue__current_quarter at 4.8% versus 2.7% at the annual mark. Compounding 14.9% for five years from a base that is currently shrinking is not defensible; low-single-digit growth over the explicit period (0-4%) reflects Apple modem attrition plus a possible China Android trough recovery.",
+        "evidence": [
+          "canonical_metrics.fcf__current_annual",
+          "canonical_metrics.fcf__current_quarter",
+          "canonical_metrics.fcf_annualized_from_current_quarter",
+          "canonical_metrics.capex_pct_revenue__current_quarter",
+          "canonical_metrics.capex_pct_revenue__current_annual"
+        ]
+      }
+    ],
+    "revalidate_warnings": []
+  },
+  "failures": [],
+  "run_error": null,
+  "archetype_note": "general / semis"
+}

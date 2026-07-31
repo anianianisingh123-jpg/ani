@@ -182,7 +182,7 @@ The 5-year historical foundation already exists — all three statements carry `
 
 | ID | Task | Assignee | Status |
 |----|------|----------|--------|
-| FWD-07 | Baseline the full 8-ticker set (NVDA/QCOM/CRM/JPM/PLD/PGR/XOM/KO) on pre-forecast code. Log every extraction failure — 5 of 8 have never run, and those findings shape the driver templates. | Grok | IN_PROGRESS |
+| FWD-07 | Baseline the full 8-ticker set (NVDA/QCOM/CRM/JPM/PLD/PGR/XOM/KO) on pre-forecast code. Log every extraction failure — 5 of 8 have never run, and those findings shape the driver templates. | Grok | COMPLETED |
 | FWD-00 | `state.py`: `historical_profile`, `forecast`, `driver_critique`, `dcf_modelled`, `consensus_reconciliation`. Additive. | Claude/Opus-5 | DONE |
 | FWD-05a | `historical_profile()` + `mechanical_defaults()` → `forecast_engine.py`. Pure Python over the existing `annual_series`. | Codex | DONE |
 | FWD-05b | `build_forecast()` skeleton + fixture tests. Annual, 5 years. Not wired. | Codex | DONE |
@@ -484,4 +484,32 @@ The 5-year historical foundation already exists — all three statements carry `
   2. **"Band" means two different things in two modules.** `valuation_doctrine.band_for()` returns an **absolute** `(low, high)`, and `validate_argued_inputs` tests it absolutely (`lo < band[0] or hi > band[1]`). `driver_templates.history_relative_band` is an **offset pair applied to the observed range** — floor is `hist_min + low`, ceiling is `hist_max + high` — because that is what §8.2 specifies (`[hist_min − 1000bps, hist_max + 500bps]`). Feeding a template band into the doctrine-style checker would test `-0.10 ≤ x ≤ 0.05` and reject every plausible gross margin on earth. The semantic is now documented in the module docstring; do not "unify" the two without reading §8.2 first.
   3. **The existing judgment layer cannot accept forecast drivers yet.** `validate_argued_inputs` rejects any parameter not in `ARGUED_INPUT_BOUNDS` as "unsupported", so `gross_margin` / `revenue_growth.*` would be thrown out today. FWD-00's note that "the argued machinery is built and tested" is true *for valuation parameters*; pointing it at forecast dials means extending that table and teaching it the history-relative band form. Budget for that in FWD-08, not as an afterthought.
 - **Verification:** `python3 -m pytest tests/ -q` → **207 passed**, unchanged.
+- **Status:** COMPLETED
+
+### [2026-07-30] - [Grok] - [FWD-07: full eight-ticker pre-forecast baseline]
+- **What I changed:** Ran full 8-ticker FWD-07 baseline on branch `fwd-07-baseline` (main@1ffa771 bias detector + central-case is ancestor; FWD-01 driver-template work on top but **not** exercised). Artifacts suffix `_fwd_baseline` under `outputs/val02_baseline/`. Scored all 11 rubric criteria + ICL stats (args p/a/r, FV low/base/high, sensitivities + dominant driver, directional_bias / one_sided, base_fcf_method applied, fcf_history_n, DIRECTIONAL BIAS / Argued FCF not applied disclosures). First pass used stale harness queries that routed JPM/PLD/PGR/XOM/KO to `valuation_only`; re-ran JPM/PLD/PGR/KO as full_underwrite for a clean reference. Did **not** workaround XOM extraction failure.
+- **Files modified:** `tmp/run_fwd07_baseline.py` (harness; multi-ticker `--only=`, full-underwrite queries), `outputs/val02_baseline/*_fwd_baseline.*` (slices, grades, icl_stats, failures, `comparison_fwd_baseline.md`, `summary_fwd_baseline.json`, `failures_fwd_baseline.json`), `DEV_SCRATCHPAD.md`.
+- **Scores (full_underwrite clean pass):** NVDA 9/11 · QCOM 10/11 · CRM 9/11 · JPM 8–9/11 (LLM-judged C8 can flip on re-grade) · PLD 8/11 · PGR 9/11 · XOM 7/11 (hard stop) · KO 10/11.
+- **Per-criterion pattern (definition vs extraction):**
+  - **C3 untraceable currency fails 6/8 completed** (only CRM + empty XOM pass) → **definition / writer discipline**, not archetype-specific.
+  - **C2, C4, C6, C10 pass all 8** (XOM C2 vacuous) → graders healthy.
+  - **C11 contradictions ~half** (NVDA/CRM/JPM/PLD/PGR) → writer discipline; clusters on both FCF and non-FCF.
+  - **C7 only CRM** → one-off window mixing.
+  - **C8 unresolved risk** fails JPM/PLD/XOM more than FCF tech → memo style + empty XOM.
+  - **XOM C1/C5/C8/C9 FAIL** → cascade from validation hard stop, not method choice.
+- **Expected inert FCF (not bugs):** JPM `excess_return_on_equity`, PLD `ffo_nav`, PGR `excess_return_on_equity` all disclose `Argued FCF inputs not applied: the archetype does not use an FCF DCF.`; judgment sensitivities empty; base_fcf_method_applied=None. **This is the gap FWD-01b/Epic F closes.**
+- **PLD extra:** `fair_value_range` low/base/high all null (FFO/NAV path does not populate judgment FV band); fcf_history_n=0; only 1 argued param accepted (`base_fcf_method`) still inert.
+- **XOM extraction failure inventory (shapes commodity driver work):**
+  - Broke at: `validation_gate` after `data_gatherer` + metrics; hard stop before analysis fan-out.
+  - Missing: **all income concepts null** every period under CIK `0002115436` (`incomplete=True`); note suspects CIK/entity identity / holdco re-registration.
+  - Also: BS incomplete, CF incomplete, annual_series empty, only 12 applicable metrics (threshold 15), BS identity unverifiable.
+  - Downstream empty: dcf_engine, valuation_critique, dcf_judgment, comps.
+- **One-sided bias fired:** QCOM (share=1.0), CRM (1.0), KO full-underwrite (0.982). NVDA 0.758 not one_sided. Financials inert (no FCF sensitivities).
+- **base_fcf_method / fcf_history:** NVDA ttm/5; QCOM avg_3y/5; CRM ttm/5; KO avg_5y/5; JPM requested avg_3y applied None n=0; PLD same; PGR requested avg_3y applied None but fcf_history_n=5 (history exists, method not consumed).
+- **Notes / Handoff for next agent:**
+  1. Artifacts live under `outputs/val02_baseline/*_fwd_baseline*` (gitignored); harness `tmp/run_fwd07_baseline.py` (gitignored). Comparison matrix: `comparison_fwd_baseline.md`.
+  2. **FWD-01b financials:** use JPM/PLD/PGR inert-FCF + missing non-FCF argued params as the template shape requirement. PLD needs FFO/NAV judgment range population, not just drivers.
+  3. **XOM CIK `0002115436`:** extract/SEC identity bug — fix before any cyclical_commodity driver validation on XOM.
+  4. Query routing: bare "valuation"/"fair value" → `valuation_only` unless "invest*" framing; baseline harness queries now force full_underwrite.
+  5. Do not treat C3 mass-fail as archetype extraction — fix writers or C3 allowlist next if product wants higher floors.
 - **Status:** COMPLETED
