@@ -103,13 +103,24 @@ def test_substituted_archetype_still_resolves_bands():
     assert band_for_driver("bank_lender", "gross_margin") == (-0.10, 0.05)
 
 
+def test_template_entry_count_leaves_room_for_segments():
+    """§2 caps *runtime* drivers at 4–8, and template entries are not runtime drivers:
+    one `segment_growth` entry expands to one driver per reported segment. NVDA's five
+    segments (§7) plus the non-segment entries is the binding case, so a template may
+    carry at most four entries before it breaches the ceiling in practice."""
+    max_segments = 5
+    for archetype, template in DRIVER_TEMPLATES.items():
+        entries = template["drivers"]
+        expands = any(d["id"] == "segment_growth" for d in entries)
+        runtime = len(entries) - 1 + max_segments if expands else len(entries)
+        assert runtime <= 8, f"{archetype}: {runtime} runtime drivers at {max_segments} segments"
+
+
 def test_driver_records_are_well_formed():
     required = {"id", "human_label", "unit", "hard_clamp", "history_relative_band",
                 "evidence_justification"}
     for archetype, template in DRIVER_TEMPLATES.items():
         drivers = template["drivers"]
-        # §2: a design that needs fifteen drivers is wrong.
-        assert len(drivers) <= 8, archetype
         assert len({d["id"] for d in drivers}) == len(drivers), archetype
         for d in drivers:
             assert required <= set(d), (archetype, d.get("id"))
