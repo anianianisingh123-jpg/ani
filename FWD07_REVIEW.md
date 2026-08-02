@@ -10,6 +10,55 @@ Numbers in this document were recomputed independently, not copied from the run.
 
 ---
 
+## STATUS — fixes landed 2026-08-01 (commit `5f385a8`, branch `fix/valuation-engine-arithmetic`)
+
+| # | Finding | Status |
+|---|---------|--------|
+| 1 | Sensitivity delta baseline | **FIXED** — `neutral_case` reference + `base_fcf_method` row |
+| 1b | Corners not sign-aware | **FIXED** — ends chosen by measured direction |
+| 2 | Judgment disclosures dropped | **FIXED** — wired into the audit log |
+| 3 | C11 regex garbage | **FIXED** — 3/8 → 8/8 |
+| 4 | C3 false positives | **FIXED** — 2/8 → 4/8; remaining 4 are genuine |
+| 4b | No plausibility/coherence check | **OPEN** → routed to Grok (FWD-06) |
+| 5 | Uncontrolled prompts | **OPEN** → routed to Grok (re-run) |
+| 6 | Prior-run contamination | **OPEN** → routed to Grok (re-run) |
+| 7 | Cosmetic ±15% band passes C5 | **FIXED** — C5 7/8 → 4/8 (the drop is the fix) |
+| 8 | Rating/PT not stored | **FIXED** — 1/7 → 7/7 extract |
+| 9 | XOM entity resolution | **OPEN** → swap to CVX/COP; file separately |
+| 10 | PGR band mislabel | **FIXED upstream** — prompt caption corrected |
+| 11 | C8 non-determinism | **OPEN** → routed to Grok |
+| 12 | gitignore vs committed | **OPEN** — product decision |
+
+Tests: 219 → 235. Both new invariants provably fail against the old behaviour.
+
+**Bug 1b hit all four FCF tickers, not just KO.** Published vs true compounded band:
+KO $5.55 → $17.10 (3.1×), **QCOM $9.94 → $62.40 (6.3×)**, CRM $57.74 → $124.88
+(2.2×), NVDA $136.81 → $221.10 (1.6×). QCOM's memo flagged its own band as
+"artificially narrow" and invented a wrong reason; it was 6.3× too narrow.
+
+**Two deliberate design decisions taken while fixing, flag if you disagree:**
+
+1. **`base_fcf_method` now counts toward `directional_bias`.** It is the largest
+   single lever on KO, so excluding it understates one-sidedness. On KO this
+   gives 3 material arguments at 0.616 share — still below the 0.80 gate, so it
+   changes no outcome here, but it is a judgement call.
+2. **C5 rejects a fixed ±% band from `dcf_engine` too, not only from the judgment
+   layer.** A ±15% ruler carries no company-specific information regardless of
+   which block emits it. Consequence: an FCF-path ticker whose judgment layer
+   produces no range (all argued inputs rejected, critique unparseable) will now
+   fail C5 on the engine's own ±15% band even though the DCF ran fine. None of
+   the eight hit this, but it is a live path — exempt `dcf_engine` if you want
+   the softer rule.
+
+**Not verified:** the pipeline has not been re-run. The engine now emits correct
+numbers and the writer prompt now carries them — both tested against the real
+state slices — but **the memos on disk are still the wrong ones.** They only
+regenerate on the clean re-run (§5, §6).
+
+---
+
+---
+
 ## Bottom line
 
 The run itself was executed carefully and the handoff is honest. But **the baseline is
