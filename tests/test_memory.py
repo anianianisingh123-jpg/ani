@@ -130,3 +130,49 @@ if __name__ == "__main__":
     test_missing_ticker_returns_none()
     test_backfill_docx_roundtrip()
     print("OK")
+
+
+# ── Recommendation extraction (FWD-07 review) ────────────────────────────────
+#
+# `_extract_cover_bits` looked for a "Rating: BUY" cover line. Synthesis writes a
+# "## 2. RECOMMENDATION" section instead, and the fallback only scanned the first
+# 800 characters, so `rating` and `price_target` were stored EMPTY for 6 of the 7
+# completed runs on the 2026-07-30 baseline. Desk memory could not report what
+# the desk had concluded.
+
+def test_rating_is_read_from_a_recommendation_section():
+    from mas_sector_system.memory import _extract_cover_bits
+
+    memo = (
+        "# KO (The Coca-Cola Company) — Full Institutional Underwrite\n\n"
+        "## 1. Business Overview\n\nKO sells concentrate.\n\n"
+        "## 2. Recommendation\n\n"
+        "### **HOLD — do not add at $88.49. Existing holders may retain.**\n\n"
+        "Some supporting prose.\n\n"
+        "## 3. Macro / Cycle Positioning\n\nBUY signals in the macro data.\n"
+    )
+    bits = _extract_cover_bits(memo)
+    assert bits.get("rating", "").upper().startswith("HOLD"), bits
+    # The qualifier carries the actual decision content — keep it.
+    assert "88.49" in bits["rating"]
+
+
+def test_recommendation_scan_stops_at_the_next_section():
+    """A later section's 'BUY' must not become the rating."""
+    from mas_sector_system.memory import _extract_cover_bits
+
+    memo = (
+        "## 2. RECOMMENDATION\n\n"
+        "AVOID — the balance sheet cannot support the payout.\n\n"
+        "## 3. MACRO\n\n"
+        "Peers are a BUY on this framework.\n"
+    )
+    bits = _extract_cover_bits(memo)
+    assert bits.get("rating", "").upper().startswith("AVOID"), bits
+
+
+def test_explicit_rating_cover_line_still_wins():
+    from mas_sector_system.memory import _extract_cover_bits
+
+    memo = "Rating: **BUY** — satellite sizing\n\n## 2. RECOMMENDATION\n\nHOLD elsewhere.\n"
+    assert _extract_cover_bits(memo).get("rating", "").upper().startswith("BUY")

@@ -73,6 +73,9 @@ _METRIC_PUBLIC_FIELDS = (
 # Engine keys that describe data quality rather than value. Audit log only.
 _DCF_DISCLOSURE_FIELDS = ("warnings", "errors")
 _COMPS_DISCLOSURE_FIELDS = ("peer_exclusions", "notes")
+# Judgment-layer (argued-input) disclosures. These live on `dcf_judgment` /
+# `comps_judgment`, not on the engine blocks — see collect_valuation_disclosures.
+_JUDGMENT_DISCLOSURE_FIELDS = ("clamp_warnings", "band_dissents", "errors")
 
 # Blocks that must never reach the clean memo, in case an upstream path ever
 # appends them to final_memo. Matched case-sensitively on the exact markers
@@ -514,6 +517,28 @@ def build_valuation_block(state: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _format_disclosure(item: Any) -> str:
+    """Render one disclosure for the audit log.
+
+    Band dissents arrive as structured dicts; a bare ``str()`` on them prints a
+    Python repr into a compliance document. Render the fields a reader needs.
+    """
+    if isinstance(item, str):
+        return item.strip()
+    if isinstance(item, dict):
+        parameter = item.get("parameter")
+        argued = item.get("argued_range")
+        band = item.get("archetype_band")
+        reasoning = str(item.get("reasoning") or "").strip()
+        head = f"**{parameter}**" if parameter else "Band dissent"
+        if argued and band:
+            head += f": argued {argued} vs archetype band {band}"
+        elif argued:
+            head += f": argued {argued}"
+        return f"{head}{' — ' + reasoning if reasoning else ''}".strip()
+    return str(item).strip()
+
+
 def collect_valuation_disclosures(state: dict[str, Any]) -> dict[str, list[str]]:
     """The data-quality keys :func:`build_valuation_block` strips out."""
     out: dict[str, list[str]] = {}
@@ -525,6 +550,26 @@ def collect_valuation_disclosures(state: dict[str, Any]) -> dict[str, list[str]]
             items = [str(x) for x in (dcf.get(field) or [])]
             if items:
                 out[f"dcf_{field}"] = items
+
+    # The judgment layer (Epic V) emits its own disclosures — one-sided argument
+    # sets, parameter clamps, inert-FCF notices on non-DCF archetypes, band
+    # dissents. Until FWD-07 these were generated, stored on `dcf_judgment`, and
+    # then dropped: `collect_valuation_disclosures` only ever read `dcf_engine`
+    # and `comps_engine`, so no DIRECTIONAL BIAS, clamp or inert-FCF line
+    # appeared in any audit log across the entire 2026-07-30 eight-ticker run.
+    # A control nobody can read is not a control.
+    for key, prefix in (("dcf_judgment", "judgment"), ("comps_judgment", "comps_judgment")):
+        block = state.get(key)
+        if not isinstance(block, dict):
+            continue
+        for field in _JUDGMENT_DISCLOSURE_FIELDS:
+            items = [
+                _format_disclosure(x)
+                for x in (block.get(field) or [])
+                if _format_disclosure(x)
+            ]
+            if items:
+                out.setdefault(f"{prefix}_{field}", []).extend(items)
     if isinstance(comps, dict):
         for field in _COMPS_DISCLOSURE_FIELDS:
             items = [str(x) for x in (comps.get(field) or [])]
@@ -841,6 +886,12 @@ def build_compliance_audit_log(
             "comps_peer_exclusions": "Peer exclusions",
             "comps_peer_fetch_errors": "Peer fetch failures",
             "comps_applicability": "Relative valuation applicability",
+            "judgment_clamp_warnings": "Judgment-case disclosures (argued inputs)",
+            "judgment_band_dissents": "Archetype band dissents",
+            "judgment_errors": "Judgment-case errors",
+            "comps_judgment_clamp_warnings": "Judgment-case disclosures (peer set)",
+            "comps_judgment_band_dissents": "Peer band dissents",
+            "comps_judgment_errors": "Judgment-case errors (peer set)",
         }
         for field, items in vdis.items():
             L.append(f"### {labels.get(field, field)}")

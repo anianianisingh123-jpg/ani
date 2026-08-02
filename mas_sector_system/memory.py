@@ -98,6 +98,55 @@ def init_db(db_path: Optional[Path] = None) -> Path:
     return path
 
 
+_RECOMMENDATION_HEADING_RE = re.compile(
+    r"^#{1,4}\s*(?:\d+\.\s*)?(?:RECOMMENDATION|RATING|VERDICT|THE\s+CALL)\b.*$",
+    re.I | re.M,
+)
+_CALL_RE = re.compile(
+    r"\b(BUY|HOLD|AVOID|SELL|ADD|TRIM|OVERWEIGHT|UNDERWEIGHT|NEUTRAL)\b", re.I
+)
+
+
+def _extract_from_recommendation_section(text: str) -> dict[str, str]:
+    """Read the call out of the RECOMMENDATION section.
+
+    Takes the first call token that appears after the heading, plus the rest of
+    its line as the qualifier ("HOLD — do not add at $88.49").
+    """
+    out: dict[str, str] = {}
+    head = _RECOMMENDATION_HEADING_RE.search(text or "")
+    if not head:
+        return out
+    # Bound the search to this section: stop at the next same-or-shallower ATX
+    # heading so a later section's language cannot be picked up.
+    depth = len(head.group(0)) - len(head.group(0).lstrip("#"))
+    tail = text[head.end():]
+    nxt = re.search(rf"^#{{1,{max(depth, 1)}}}\s+\S", tail, re.M)
+    section = tail[: nxt.start()] if nxt else tail
+
+    for line in (head.group(0), *section.splitlines()):
+        stripped = line.strip().lstrip("#").strip()
+        if not stripped:
+            continue
+        call = _CALL_RE.search(stripped)
+        if not call:
+            continue
+        # Keep the qualifier — "HOLD" alone loses the sizing and the condition.
+        start = call.start()
+        out["rating"] = stripped[start:].strip().strip("*").strip()[:200]
+        break
+
+    pt = re.search(
+        r"(?:price\s+target|fair\s+value|target\s+price)[^\n\d$]{0,24}\$?\s*"
+        r"([0-9]+(?:\.[0-9]+)?)",
+        section,
+        re.I,
+    )
+    if pt:
+        out["price_target"] = pt.group(1)
+    return out
+
+
 def _extract_cover_bits(memo: str) -> dict[str, str]:
     """Best-effort rating / PT / price from memo cover lines."""
     text = memo or ""
@@ -111,9 +160,18 @@ def _extract_cover_bits(memo: str) -> dict[str, str]:
     if m:
         out["rating"] = m.group(0).split(":", 1)[-1].strip().strip("*").strip()
     else:
-        m2 = re.search(r"\b(BUY|HOLD|AVOID)\b[^\n]{0,80}", text[:800], re.I)
-        if m2:
-            out["rating"] = m2.group(0).strip()[:120]
+        # Synthesis does not emit a "Rating:" cover line — it writes a
+        # "## 2. RECOMMENDATION" section with the call in the heading or the
+        # first line under it. The old fallback only scanned the first 800
+        # characters, which never reaches that section, so `rating` and
+        # `price_target` were stored EMPTY for 6 of the 7 completed runs on the
+        # 2026-07-30 baseline. Every later "thesis evolution vs prior desk run"
+        # then reasons about a prior run whose actual conclusion is unknown.
+        out.update(_extract_from_recommendation_section(text))
+        if "rating" not in out:
+            m2 = re.search(r"\b(BUY|HOLD|AVOID)\b[^\n]{0,80}", text[:800], re.I)
+            if m2:
+                out["rating"] = m2.group(0).strip()[:120]
     m = re.search(
         r"Price Target:\s*\**\s*\$?([0-9]+(?:\.[0-9]+)?)",
         text,

@@ -1464,7 +1464,10 @@ def _format_judgment_case(dcf_judgment: dict) -> str:
     if sens:
         lines.append(
             "Sensitivity — one parameter moved to its argued midpoint, all "
-            "others left at the engine default (most impactful first):"
+            "others left at the engine default, measured against the same "
+            "base FCF as the argued case (most impactful first). A parameter "
+            "argued AT the engine default shows 0.00 and moved nothing — do "
+            "not describe it as a lever:"
         )
         for s in sens[:6]:
             fv = s.get("fair_value_per_share")
@@ -1490,11 +1493,12 @@ def _format_judgment_case(dcf_judgment: dict) -> str:
 
     if rng.get("low") is not None and rng.get("high") is not None:
         lines.append(
-            f"Compounded extremes: {rng['low']:.2f} – {rng['high']:.2f}. These "
-            "stack EVERY parameter pessimistic, then every parameter "
-            "optimistic, so the spread is wider than the analysis supports. "
-            "They are not scenarios. Do NOT headline these as the argued "
-            "range — cite the central case and the sensitivity drivers."
+            f"Compounded extremes: {rng['low']:.2f} – {rng['high']:.2f}. Each "
+            "parameter is set to whichever end of its argued range moves fair "
+            "value down (low) or up (high) — all at once. The spread is wider "
+            "than any single coherent view. They are not scenarios. Do NOT "
+            "headline these as the argued range — cite the central case and "
+            "the sensitivity drivers."
         )
     for d in dcf_judgment.get("band_dissents") or []:
         if isinstance(d, dict):

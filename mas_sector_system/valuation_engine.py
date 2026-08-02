@@ -1456,17 +1456,92 @@ def compute_dcf_with_argued_inputs(state: dict, argued: dict) -> dict[str, Any]:
         state, str(method)
     )
 
+    # ── Neutral reference ────────────────────────────────────────────────────
+    # Every argued case below is recomputed on the *argued* base FCF. Measuring
+    # those against `base["fair_value_per_share"]` — which used the engine's own
+    # base FCF — compares two different worlds, so a parameter left at its
+    # default reports a non-zero delta.
+    #
+    # Observed live 2026-07-30 on KO (argued base_fcf_method=avg_5y): g_terminal,
+    # high_growth_years and fade_years were all argued *at* the engine default
+    # and each reported +$17.31. The memo then named WACC the dominant lever
+    # when g_high was nearly 50% larger and pointed the other way.
+    #
+    # `neutral_case` holds every parameter at the engine default and changes
+    # only the base FCF, isolating the base-FCF swap from the parameter moves.
+    _engine_kwargs = {
+        "wacc": float(assumptions.get("wacc") or 0.0),
+        "g_high": float(assumptions.get("g_high") or 0.0),
+        "g_terminal": float(assumptions.get("g_terminal") or 0.0),
+        "high_growth_years": int(assumptions.get("high_growth_years") or 0),
+        "fade_years": int(assumptions.get("fade_years") or 0),
+    }
+    neutral_case = _recompute_dcf_case(
+        base,
+        base_fcf=normalized_fcf,
+        base_fcf_method=applied_method,
+        **_engine_kwargs,
+    )
+    neutral_fv = neutral_case.get("fair_value_per_share")
+    engine_fv = base.get("fair_value_per_share")
+
+    # ── Sign-aware corner selection ──────────────────────────────────────────
+    # A range end is not inherently pessimistic: a *lower* WACC raises value
+    # while a *lower* g_high lowers it, so taking index [0] of every range
+    # builds a corner in which the two partly cancel. Observed live on KO — the
+    # case labelled `low_case` returned the HIGHER value ($33.94 vs $28.39), and
+    # the published band was 3.1x narrower than a genuine compounded extreme
+    # ($5.55 wide against $17.10) while being disclosed as "wider than the
+    # analysis supports".
+    #
+    # Direction is resolved empirically rather than from a static sign table:
+    # `high_growth_years` and `fade_years` only raise value while
+    # g_high > g_terminal, which is not guaranteed. Probe each parameter's two
+    # range ends with everything else at default and let the lower fair value
+    # define the pessimistic end.
+    def _corner_ends(parameter: str) -> tuple[Any, Any]:
+        """Return (pessimistic_end, optimistic_end) for one argued parameter."""
+        lo = _argued_corner(argued, parameter, 0, _engine_kwargs[parameter])
+        hi = _argued_corner(argued, parameter, 1, _engine_kwargs[parameter])
+        cast = (
+            (lambda v: int(v))
+            if parameter in {"high_growth_years", "fade_years"}
+            else (lambda v: float(v))
+        )
+        lo, hi = cast(lo), cast(hi)
+        if lo == hi:
+            return lo, hi
+        probes = {}
+        for end in (lo, hi):
+            kwargs = dict(_engine_kwargs)
+            kwargs[parameter] = end
+            if parameter == "g_terminal":
+                kwargs["g_terminal"] = max(
+                    0.0, min(kwargs["g_terminal"], kwargs["wacc"] - 0.015)
+                )
+            probe = _recompute_dcf_case(
+                base,
+                base_fcf=normalized_fcf,
+                base_fcf_method=applied_method,
+                **kwargs,
+            )
+            probes[end] = probe.get("fair_value_per_share")
+        f_lo, f_hi = probes.get(lo), probes.get(hi)
+        if not isinstance(f_lo, (int, float)) or not isinstance(f_hi, (int, float)):
+            return lo, hi  # cannot resolve direction — preserve prior behaviour
+        return (lo, hi) if f_lo <= f_hi else (hi, lo)
+
+    _ends = {p: _corner_ends(p) for p in _engine_kwargs}
+
     cases = []
     for corner in (0, 1):
-        wacc = float(
-            _argued_corner(argued, "wacc", corner, assumptions.get("wacc"))
-        )
-        g_terminal = float(
-            _argued_corner(
-                argued, "g_terminal", corner, assumptions.get("g_terminal")
-            )
-        )
-        # Defense in depth: callers may bypass validate_argued_inputs.
+        wacc = float(_ends["wacc"][corner])
+        g_terminal = float(_ends["g_terminal"][corner])
+        # Defense in depth: callers may bypass validate_argued_inputs. This must
+        # run AFTER sign-aware selection — the optimistic corner pairs low WACC
+        # with high terminal growth, which is exactly the combination that trips
+        # the Gordon constraint. Without the clamp the case returns FV=None,
+        # drops out of `values`, and the band silently collapses.
         g_terminal = max(0.0, min(g_terminal, wacc - 0.015))
         cases.append(
             _recompute_dcf_case(
@@ -1474,28 +1549,10 @@ def compute_dcf_with_argued_inputs(state: dict, argued: dict) -> dict[str, Any]:
                 base_fcf=normalized_fcf,
                 base_fcf_method=applied_method,
                 wacc=wacc,
-                g_high=float(
-                    _argued_corner(
-                        argued, "g_high", corner, assumptions.get("g_high")
-                    )
-                ),
+                g_high=float(_ends["g_high"][corner]),
                 g_terminal=g_terminal,
-                high_growth_years=int(
-                    _argued_corner(
-                        argued,
-                        "high_growth_years",
-                        corner,
-                        assumptions.get("high_growth_years"),
-                    )
-                ),
-                fade_years=int(
-                    _argued_corner(
-                        argued,
-                        "fade_years",
-                        corner,
-                        assumptions.get("fade_years"),
-                    )
-                ),
+                high_growth_years=int(_ends["high_growth_years"][corner]),
+                fade_years=int(_ends["fade_years"][corner]),
             )
         )
 
@@ -1528,16 +1585,13 @@ def compute_dcf_with_argued_inputs(state: dict, argued: dict) -> dict[str, Any]:
     # One-at-a-time sensitivity: move a single parameter to its argued midpoint
     # and hold everything else at the engine default. This answers the question
     # a compounded range cannot — which assumption actually drives the value.
-    default_fv = base.get("fair_value_per_share")
+    # Deltas are measured against `neutral_fv` — same base FCF, every parameter
+    # at the engine default — so each row isolates its own parameter. A
+    # parameter argued at the engine default must produce exactly 0.0.
+    default_fv = neutral_fv
     sensitivities = []
     for parameter in _argued_params:
-        kwargs = {
-            "wacc": float(assumptions.get("wacc") or 0.0),
-            "g_high": float(assumptions.get("g_high") or 0.0),
-            "g_terminal": float(assumptions.get("g_terminal") or 0.0),
-            "high_growth_years": int(assumptions.get("high_growth_years") or 0),
-            "fade_years": int(assumptions.get("fade_years") or 0),
-        }
+        kwargs = dict(_engine_kwargs)
         if parameter not in kwargs:
             continue
         moved = _argued_midpoint(argued, parameter, kwargs[parameter])
@@ -1565,6 +1619,28 @@ def compute_dcf_with_argued_inputs(state: dict, argued: dict) -> dict[str, Any]:
                 ),
             }
         )
+    # `base_fcf_method` is excluded from `_argued_params` because it is not a
+    # DCF dial, but it is still an argued choice and on KO it was the single
+    # largest lever in the whole valuation (+$17.31, larger than either real
+    # parameter). Leaving it out of the table hid it from the writer entirely
+    # while its effect was silently smeared across every other row. Report it.
+    if (
+        applied_method
+        and isinstance(neutral_fv, (int, float))
+        and isinstance(engine_fv, (int, float))
+        and abs(neutral_fv - engine_fv) > 1e-9
+    ):
+        sensitivities.append(
+            {
+                "parameter": "base_fcf_method",
+                "engine_default": (base.get("inputs") or {}).get("base_fcf_method")
+                or "engine_base_fcf",
+                "argued_midpoint": applied_method,
+                "fair_value_per_share": neutral_fv,
+                "delta_vs_default": neutral_fv - engine_fv,
+            }
+        )
+
     sensitivities.sort(
         key=lambda s: abs(s["delta_vs_default"]) if s["delta_vs_default"] else 0.0,
         reverse=True,
@@ -1624,6 +1700,10 @@ def compute_dcf_with_argued_inputs(state: dict, argued: dict) -> dict[str, Any]:
         {
             "input_source": "argued",
             "base_engine": base,
+            # Same base FCF as the argued cases, every parameter at the engine
+            # default. This is the reference `delta_vs_default` is measured
+            # from; `base_engine` is the engine's own answer on its own base FCF.
+            "neutral_case": neutral_case,
             "central_case": central_case,
             "sensitivities": sensitivities,
             "directional_bias": directional_bias,
@@ -1645,9 +1725,11 @@ def compute_dcf_with_argued_inputs(state: dict, argued: dict) -> dict[str, Any]:
                     "high": max(values),
                     "basis": (
                         "base = central case, every argued parameter at its "
-                        "range midpoint; low/high = COMPOUNDED extremes (all "
-                        "parameters pessimistic / optimistic at once) and are "
-                        "wider than the analysis supports — not scenarios"
+                        "range midpoint; low/high = COMPOUNDED extremes — each "
+                        "parameter set to whichever end of its argued range "
+                        "moves fair value down (low) or up (high), all at once. "
+                        "The spread is wider than any single coherent view and "
+                        "is NOT a scenario set; headline the central case."
                     ),
                 }
                 if values
