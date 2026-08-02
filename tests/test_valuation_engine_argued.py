@@ -61,6 +61,53 @@ def test_each_static_clamp_boundary(parameter, proposed_range, expected_range):
     assert any("clamped" in warning for warning in warnings)
 
 
+@pytest.mark.parametrize(
+    ("parameter", "proposed_range", "expected_range"),
+    [
+        ("cost_of_equity", [0.01, 0.30], [0.05, 0.20]),
+        ("sustainable_roe", [-0.20, 0.70], [-0.10, 0.50]),
+        ("fade_roe", [-0.20, 0.50], [-0.05, 0.30]),
+        ("plowback", [-0.20, 1.20], [0.0, 1.0]),
+        ("ffo_multiple", [1.0, 60.0], [3.0, 40.0]),
+        ("cap_rate", [0.01, 0.20], [0.02, 0.15]),
+        ("nav_discount", [-0.80, 0.80], [-0.50, 0.50]),
+    ],
+)
+def test_each_non_fcf_clamp_boundary(parameter, proposed_range, expected_range):
+    defaults = {
+        "assumptions": {
+            "cost_of_equity": 0.09,
+            "sustainable_roe": 0.15,
+            "fade_roe": 0.09,
+            "plowback": 0.5,
+            "ffo_multiple": 18.0,
+            "cap_rate": 0.055,
+            "nav_discount": 0.0,
+        }
+    }
+    accepted, warnings = validate_argued_inputs(
+        {"arguments": [_argument(parameter, proposed_range)]},
+        archetype="bank_lender",
+        engine_default=defaults,
+        state=_state(),
+    )
+
+    assert accepted[parameter]["argued_range"] == expected_range
+    assert any("clamped" in warning for warning in warnings)
+
+
+def test_forecast_driver_uses_template_clamp_in_shared_validator():
+    accepted, warnings = validate_argued_inputs(
+        {"arguments": [_argument("segment_growth", [-1.0, 3.0])]},
+        archetype="general",
+        engine_default={},
+        state=_state(),
+    )
+
+    assert accepted["segment_growth"]["argued_range"] == [-0.50, 2.00]
+    assert sum("segment_growth clamped" in warning for warning in warnings) == 2
+
+
 def test_justified_multiple_relative_and_absolute_clamp_boundaries():
     comps = {"peer_medians": {"trailing_pe": 100.0}}
     state = {

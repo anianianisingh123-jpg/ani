@@ -7,6 +7,7 @@ LLM nodes narrate these numbers — they do not invent the core math.
 from __future__ import annotations
 
 from copy import deepcopy
+from itertools import product
 from statistics import median
 from typing import Any, Optional
 
@@ -20,6 +21,15 @@ ARGUED_INPUT_BOUNDS: dict[str, tuple[float, float]] = {
     # For justified_multiple these are peer-median multipliers. Absolute
     # metric bounds are applied as a second clamp below.
     "justified_multiple": (0.25, 3.0),
+    # Residual-income dials. Rates are decimal fractions.
+    "cost_of_equity": (0.05, 0.20),
+    "sustainable_roe": (-0.10, 0.50),
+    "fade_roe": (-0.05, 0.30),
+    "plowback": (0.0, 1.0),
+    # REIT FFO/NAV dials.
+    "ffo_multiple": (3.0, 40.0),
+    "cap_rate": (0.02, 0.15),
+    "nav_discount": (-0.50, 0.50),
 }
 
 _MULTIPLE_ABSOLUTE_BOUNDS: dict[str, tuple[float, float]] = {
@@ -254,7 +264,17 @@ def _default_value(engine_default: dict, parameter: str) -> Any:
 # ceiling silently produced a 20% WACC and a 40% growth rate, destroying every
 # argument in that run. Normalising is strictly better than clamping: a rate
 # above 1.0 cannot be a real discount or growth rate, so it is a unit error.
-_RATE_PARAMETERS = frozenset({"wacc", "g_high", "g_terminal"})
+_RATE_PARAMETERS = frozenset(
+    {
+        "wacc",
+        "g_high",
+        "g_terminal",
+        "cost_of_equity",
+        "sustainable_roe",
+        "fade_roe",
+        "cap_rate",
+    }
+)
 
 
 def _normalize_rate_scale(
@@ -317,6 +337,39 @@ def _argument_band(archetype: str, parameter: str) -> Optional[tuple[float, floa
         return None
 
 
+def _argued_bounds(archetype: str, parameter: str) -> Optional[tuple[float, float]]:
+    """Resolve hard bounds from valuation dials or a forecast driver template.
+
+    This keeps the security-critical evidence/clamp path shared without copying
+    every forecast-driver id into the valuation table. Template import is lazy
+    so the deterministic valuation engine has no startup dependency on Epic F.
+    """
+    if parameter in ARGUED_INPUT_BOUNDS:
+        return ARGUED_INPUT_BOUNDS[parameter]
+    try:
+        from .driver_templates import drivers_for
+
+        template_result = drivers_for(archetype)
+        drivers = (
+            template_result[0]
+            if isinstance(template_result, tuple)
+            else template_result
+        )
+        wanted = parameter
+        if parameter.startswith("revenue_growth.") or parameter.startswith(
+            "segment_growth_"
+        ):
+            wanted = "segment_growth"
+        for driver in drivers or []:
+            if isinstance(driver, dict) and driver.get("id") == wanted:
+                clamp = driver.get("hard_clamp")
+                if isinstance(clamp, (list, tuple)) and len(clamp) == 2:
+                    return float(clamp[0]), float(clamp[1])
+    except (ImportError, KeyError, TypeError, ValueError):
+        pass
+    return None
+
+
 def validate_argued_inputs(
     proposed: dict,
     *,
@@ -336,7 +389,8 @@ def validate_argued_inputs(
             warnings.append("argued input rejected: argument is not an object")
             continue
         parameter = raw.get("parameter")
-        if parameter not in {*ARGUED_INPUT_BOUNDS, "base_fcf_method"}:
+        bounds = _argued_bounds(archetype, parameter) if isinstance(parameter, str) else None
+        if bounds is None and parameter != "base_fcf_method":
             warnings.append(f"argued input rejected: unsupported parameter {parameter!r}")
             continue
         if not _has_resolvable_evidence(state, raw.get("evidence")):
@@ -381,7 +435,7 @@ def validate_argued_inputs(
             warnings.append(f"{parameter} rejected: argued_range must contain [lo, hi]")
             continue
         integer = parameter in {"high_growth_years", "fade_years"}
-        bounds = ARGUED_INPUT_BOUNDS[parameter]
+        assert bounds is not None
         lo = _clamp_number(
             argued_range[0],
             parameter=parameter,
@@ -914,6 +968,123 @@ def _book_inputs(state: dict) -> dict[str, Any]:
     }
 
 
+def _residual_income_case(
+    base: dict[str, Any],
+    *,
+    cost_of_equity: float,
+    sustainable_roe: float,
+    fade_roe: float,
+    fade_years: int,
+    plowback: float,
+) -> dict[str, Any]:
+    """Recompute one finite residual-income case from explicit assumptions."""
+    result = deepcopy(base)
+    inputs = result.get("inputs") or {}
+    equity = inputs.get("book_equity")
+    shares = inputs.get("shares")
+    price = inputs.get("price")
+    if not isinstance(equity, (int, float)) or equity <= 0:
+        return result
+    if not isinstance(shares, (int, float)) or shares <= 0:
+        return result
+    if cost_of_equity <= 0 or fade_years <= 0:
+        return result
+
+    bv = float(equity)
+    total_pv_ri = 0.0
+    projections: list[dict[str, Any]] = []
+    for year in range(1, int(fade_years) + 1):
+        weight = (year - 1) / max(1, int(fade_years) - 1)
+        roe = float(sustainable_roe) + (float(fade_roe) - float(sustainable_roe)) * weight
+        ri = (roe - float(cost_of_equity)) * bv
+        pv = ri / ((1.0 + float(cost_of_equity)) ** year)
+        total_pv_ri += pv
+        projections.append(
+            {
+                "year": year,
+                "book_equity": bv,
+                "roe": roe,
+                "residual_income": ri,
+                "pv": pv,
+            }
+        )
+        bv *= 1.0 + max(-0.95, min(0.50, roe * float(plowback)))
+
+    equity_value = float(equity) + total_pv_ri
+    fair_value = equity_value / float(shares)
+    result["inputs"] = {
+        **inputs,
+        "cost_of_equity": float(cost_of_equity),
+        "sustainable_roe": float(sustainable_roe),
+        "fade_roe": float(fade_roe),
+        "fade_years": int(fade_years),
+        "plowback": float(plowback),
+    }
+    result["assumptions"] = {
+        **(result.get("assumptions") or {}),
+        "cost_of_equity": float(cost_of_equity),
+        "sustainable_roe": float(sustainable_roe),
+        "fade_roe": float(fade_roe),
+        "fade_years": int(fade_years),
+        "plowback": float(plowback),
+    }
+    result["projections"] = projections
+    result["equity_value"] = equity_value
+    result["fair_value_per_share"] = fair_value
+    result["fair_value_range"] = None
+    if isinstance(price, (int, float)) and price > 0:
+        result["implied_upside_vs_price"] = fair_value / float(price) - 1.0
+    return result
+
+
+def _ffo_nav_case(
+    base: dict[str, Any],
+    *,
+    ffo_multiple: float,
+    cap_rate: float,
+    nav_discount: float,
+) -> dict[str, Any]:
+    """Recompute one FFO/NAV case; both anchors are independently observable."""
+    result = deepcopy(base)
+    inputs = result.get("inputs") or {}
+    ffo = inputs.get("ffo")
+    shares = inputs.get("shares")
+    price = inputs.get("price")
+    if not isinstance(ffo, (int, float)) or ffo <= 0:
+        return result
+    if not isinstance(shares, (int, float)) or shares <= 0 or cap_rate <= 0:
+        return result
+
+    ffo_per_share = float(ffo) / float(shares)
+    # FFO multiple and inverse cap rate are separate market lenses. Averaging
+    # their implied multiples avoids pretending filing-derived FFO is property
+    # NOI while still making each argued dial economically operative.
+    nav_multiple = (1.0 - float(nav_discount)) / float(cap_rate)
+    blended_multiple = (float(ffo_multiple) + nav_multiple) / 2.0
+    fair_value = ffo_per_share * blended_multiple
+    equity_value = fair_value * float(shares)
+    result["inputs"] = {
+        **inputs,
+        "ffo_per_share": ffo_per_share,
+        "ffo_multiple": float(ffo_multiple),
+        "cap_rate": float(cap_rate),
+        "nav_discount": float(nav_discount),
+        "blended_implied_multiple": blended_multiple,
+    }
+    result["assumptions"] = {
+        **(result.get("assumptions") or {}),
+        "ffo_multiple": float(ffo_multiple),
+        "cap_rate": float(cap_rate),
+        "nav_discount": float(nav_discount),
+    }
+    result["equity_value"] = equity_value
+    result["fair_value_per_share"] = fair_value
+    result["fair_value_range"] = None
+    if isinstance(price, (int, float)) and price > 0:
+        result["implied_upside_vs_price"] = fair_value / float(price) - 1.0
+    return result
+
+
 def _excess_return_on_equity(state: dict, *, archetype: str) -> dict[str, Any]:
     """Simple residual-income style: BV + PV of (ROE − r) × equity for N years.
 
@@ -933,10 +1104,20 @@ def _excess_return_on_equity(state: dict, *, archetype: str) -> dict[str, Any]:
         "archetype": archetype,
         "ticker": ticker,
         "sector": sector,
-        "inputs": {**inp, "cost_of_equity": r_e, "fade_years": 10},
+        "inputs": {
+            **inp,
+            "cost_of_equity": r_e,
+            "sustainable_roe": roe,
+            "fade_roe": r_e,
+            "fade_years": 10,
+            "plowback": 0.5,
+        },
         "assumptions": {
             "cost_of_equity": r_e,
+            "sustainable_roe": roe,
+            "fade_roe": r_e,
             "fade_years": 10,
+            "plowback": 0.5,
             "note": (
                 "Residual income: equity_value ≈ BV + Σ PV[(ROE − r_e) × BV_t]. "
                 "Bank/insurer FCF DCF is invalid — this is the intentional path."
@@ -962,34 +1143,14 @@ def _excess_return_on_equity(state: dict, *, archetype: str) -> dict[str, Any]:
         result["errors"].append(f"invalid cost of equity {r_e}")
         return result
 
-    # Finite residual income: grow BV at retention * ROE; simplify with constant ROE 10y
-    years = 10
-    bv = float(equity)
-    total_pv_ri = 0.0
-    for t in range(1, years + 1):
-        ri = (float(roe) - r_e) * bv
-        pv = ri / ((1.0 + r_e) ** t)
-        total_pv_ri += pv
-        result["projections"].append(
-            {"year": t, "book_equity": bv, "residual_income": ri, "pv": pv}
-        )
-        # plowback approx 50% if ROE>r else 0
-        g_bv = max(0.0, min(0.08, float(roe) * 0.5))
-        bv = bv * (1.0 + g_bv)
-
-    equity_val = float(equity) + total_pv_ri
-    result["equity_value"] = equity_val
-    if shares and float(shares) > 0:
-        fv = equity_val / float(shares)
-        result["fair_value_per_share"] = fv
-        result["fair_value_range"] = {
-            "low": fv * 0.85,
-            "base": fv,
-            "high": fv * 1.15,
-            "basis": "±15% band on residual-income base (not a full stress test)",
-        }
-        if price and float(price) > 0:
-            result["implied_upside_vs_price"] = (fv / float(price)) - 1.0
+    result = _residual_income_case(
+        result,
+        cost_of_equity=r_e,
+        sustainable_roe=float(roe),
+        fade_roe=r_e,
+        fade_years=10,
+        plowback=0.5,
+    )
     result["warnings"].append(
         "Residual-income model is simplified (constant ROE fade window) — "
         "not a regulatory stress test or full DDM."
@@ -1055,10 +1216,27 @@ def _ffo_or_nav_valuation(state: dict, *, archetype: str) -> dict[str, Any]:
         result["warnings"].append(
             f"P/FFO = {result['inputs']['p_ffo']:.1f}x and FFO yield = "
             f"{result['inputs']['ffo_yield']:.1%} at live market cap — "
-            "no single fair-value DCF produced (NAV path not implemented)."
+            "used as observable anchors for the simplified FFO/NAV case."
         )
     if shares and ffo and float(shares) > 0:
         result["inputs"]["ffo_per_share"] = float(ffo) / float(shares)
+    if result["inputs"].get("p_ffo"):
+        observed_multiple = float(result["inputs"]["p_ffo"])
+        default_multiple = max(3.0, min(40.0, observed_multiple))
+        default_cap_rate = max(0.02, min(0.15, 1.0 / default_multiple))
+        result["assumptions"].update(
+            {
+                "ffo_multiple": default_multiple,
+                "cap_rate": default_cap_rate,
+                "nav_discount": 0.0,
+            }
+        )
+        result = _ffo_nav_case(
+            result,
+            ffo_multiple=default_multiple,
+            cap_rate=default_cap_rate,
+            nav_discount=0.0,
+        )
     result["confidence"] = "low_to_moderate"
     return result
 
@@ -1430,6 +1608,207 @@ def _recompute_dcf_case(
     return result
 
 
+def _corner_ends(
+    recompute: Any,
+    defaults: dict[str, Any],
+    ranges: dict[str, list[Any]],
+    parameter: str,
+) -> tuple[Any, Any]:
+    """Return pessimistic/optimistic ends by probing the actual model."""
+    lo, hi = ranges[parameter]
+    if lo == hi:
+        return lo, hi
+    values: dict[Any, Any] = {}
+    for end in (lo, hi):
+        kwargs = dict(defaults)
+        kwargs[parameter] = end
+        values[end] = recompute(**kwargs).get("fair_value_per_share")
+    f_lo, f_hi = values.get(lo), values.get(hi)
+    if not isinstance(f_lo, (int, float)) or not isinstance(f_hi, (int, float)):
+        return lo, hi
+    return (lo, hi) if f_lo <= f_hi else (hi, lo)
+
+
+def _non_fcf_ranges(
+    base: dict[str, Any], argued: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, list[Any]], list[str]]:
+    """Translate accepted arguments into the active non-FCF model's dials."""
+    assumptions = base.get("assumptions") or {}
+    method = base.get("method")
+    warnings: list[str] = []
+    if method == "excess_return_on_equity":
+        defaults = {
+            "cost_of_equity": float(assumptions["cost_of_equity"]),
+            "sustainable_roe": float(assumptions["sustainable_roe"]),
+            "fade_roe": float(assumptions["fade_roe"]),
+            "fade_years": int(assumptions["fade_years"]),
+            "plowback": float(assumptions["plowback"]),
+        }
+        ranges: dict[str, list[Any]] = {}
+        for parameter in defaults:
+            entry = argued.get(parameter)
+            if isinstance(entry, dict) and isinstance(entry.get("argued_range"), list):
+                ranges[parameter] = list(entry["argued_range"])
+
+        # Compatibility for the committed 2026-07-30 critiques. They were
+        # generated before native non-FCF dials existed: WACC meant cost of
+        # equity, and g_high reasoning explicitly described book-value growth.
+        if "cost_of_equity" not in ranges and isinstance(argued.get("wacc"), dict):
+            ranges["cost_of_equity"] = list(argued["wacc"]["argued_range"])
+        if "plowback" not in ranges and isinstance(argued.get("g_high"), dict):
+            growth = argued["g_high"].get("argued_range")
+            roe = defaults["sustainable_roe"]
+            if isinstance(growth, list) and roe:
+                ranges["plowback"] = [
+                    max(0.0, min(1.0, float(growth[0]) / roe)),
+                    max(0.0, min(1.0, float(growth[1]) / roe)),
+                ]
+        return defaults, ranges, warnings
+
+    defaults = {
+        "ffo_multiple": float(assumptions["ffo_multiple"]),
+        "cap_rate": float(assumptions["cap_rate"]),
+        "nav_discount": float(assumptions["nav_discount"]),
+    }
+    ranges = {}
+    for parameter in defaults:
+        entry = argued.get(parameter)
+        if isinstance(entry, dict) and isinstance(entry.get("argued_range"), list):
+            ranges[parameter] = list(entry["argued_range"])
+    if not ranges:
+        # The saved PLD critique predates these dials. Produce filing/market-
+        # anchored recomputed cases without pretending its FCF-basis argument
+        # changes FFO. These are explicit assumption cases, not a fixed FV band.
+        multiple = defaults["ffo_multiple"]
+        cap_rate = defaults["cap_rate"]
+        ranges = {
+            "ffo_multiple": [max(3.0, multiple - 2.0), min(40.0, multiple + 2.0)],
+            "cap_rate": [max(0.02, cap_rate - 0.0075), min(0.15, cap_rate + 0.0075)],
+            "nav_discount": [-0.10, 0.10],
+        }
+        warnings.append(
+            "No native FFO/NAV argument was accepted; range uses recomputed "
+            "market-anchored FFO multiple, cap-rate, and NAV-discount cases."
+        )
+    return defaults, ranges, warnings
+
+
+def _compute_non_fcf_with_argued_inputs(
+    base: dict[str, Any], argued: dict[str, Any]
+) -> dict[str, Any]:
+    method = base.get("method")
+    result = deepcopy(base)
+    result["input_source"] = "argued"
+    result["band_dissents"] = list(argued.get("band_dissents") or [])
+    result["clamp_warnings"] = []
+    if method not in {"excess_return_on_equity", "ffo_nav"}:
+        fcf_args = {
+            "wacc", "g_high", "g_terminal", "high_growth_years",
+            "fade_years", "base_fcf_method",
+        }.intersection(argued)
+        if fcf_args:
+            result["clamp_warnings"].append(
+                "Argued FCF inputs not applied: the archetype does not use an FCF DCF."
+            )
+        return result
+    if not isinstance(base.get("fair_value_per_share"), (int, float)):
+        return result
+
+    defaults, ranges, warnings = _non_fcf_ranges(base, argued)
+    result["clamp_warnings"].extend(warnings)
+    recompute = (
+        (lambda **kwargs: _residual_income_case(base, **kwargs))
+        if method == "excess_return_on_equity"
+        else (lambda **kwargs: _ffo_nav_case(base, **kwargs))
+    )
+    neutral = recompute(**defaults)
+    neutral_fv = neutral.get("fair_value_per_share")
+
+    # Preserve the empirical direction probe as a first-class diagnostic, then
+    # enumerate every combination. Enumeration guarantees the reported cases
+    # are the true extremes even when parameters interact nonlinearly.
+    directional_ends = {
+        parameter: _corner_ends(recompute, defaults, ranges, parameter)
+        for parameter in ranges
+    }
+    cases: list[dict[str, Any]] = []
+    for combo in product(*(ranges[p] for p in ranges)):
+        kwargs = dict(defaults)
+        kwargs.update(dict(zip(ranges, combo)))
+        cases.append(recompute(**kwargs))
+    valued_cases = [
+        case for case in cases
+        if isinstance(case.get("fair_value_per_share"), (int, float))
+    ]
+    if not valued_cases:
+        return result
+    low_case = min(valued_cases, key=lambda case: case["fair_value_per_share"])
+    high_case = max(valued_cases, key=lambda case: case["fair_value_per_share"])
+    midpoint_kwargs = dict(defaults)
+    midpoint_kwargs.update(
+        {p: (ends[0] + ends[1]) / 2.0 for p, ends in ranges.items()}
+    )
+    if "fade_years" in midpoint_kwargs:
+        midpoint_kwargs["fade_years"] = int(round(midpoint_kwargs["fade_years"]))
+    central = recompute(**midpoint_kwargs)
+
+    sensitivities: list[dict[str, Any]] = []
+    for parameter, ends in ranges.items():
+        kwargs = dict(defaults)
+        midpoint = (ends[0] + ends[1]) / 2.0
+        if parameter == "fade_years":
+            midpoint = int(round(midpoint))
+        kwargs[parameter] = midpoint
+        case = recompute(**kwargs)
+        fv = case.get("fair_value_per_share")
+        sensitivities.append(
+            {
+                "parameter": parameter,
+                "engine_default": defaults[parameter],
+                "argued_midpoint": midpoint,
+                "fair_value_per_share": fv,
+                "delta_vs_default": (
+                    fv - neutral_fv
+                    if isinstance(fv, (int, float))
+                    and isinstance(neutral_fv, (int, float))
+                    else None
+                ),
+                "pessimistic_end": directional_ends[parameter][0],
+                "optimistic_end": directional_ends[parameter][1],
+            }
+        )
+    sensitivities.sort(
+        key=lambda row: abs(row.get("delta_vs_default") or 0.0), reverse=True
+    )
+
+    result.update(central)
+    result["input_source"] = "argued"
+    result["base_engine"] = base
+    result["neutral_case"] = neutral
+    result["central_case"] = central
+    result["low_case"] = low_case
+    result["high_case"] = high_case
+    result["sensitivities"] = sensitivities
+    result["fair_value_range"] = {
+        "low": low_case["fair_value_per_share"],
+        "base": central.get("fair_value_per_share"),
+        "high": high_case["fair_value_per_share"],
+        "basis": (
+            "recomputed empirical corners over all accepted non-FCF "
+            "assumption-range combinations"
+        ),
+    }
+    fcf_args = {
+        "wacc", "g_high", "g_terminal", "high_growth_years", "base_fcf_method"
+    }.intersection(argued)
+    if fcf_args:
+        result["clamp_warnings"].append(
+            "Argued FCF inputs not applied: the archetype does not use an FCF DCF."
+        )
+    result["band_dissents"] = list(argued.get("band_dissents") or [])
+    return result
+
+
 def compute_dcf_with_argued_inputs(state: dict, argued: dict) -> dict[str, Any]:
     """Re-run the deterministic DCF at both accepted argued-range corners."""
     base = compute_dcf_from_state(state)
@@ -1437,13 +1816,7 @@ def compute_dcf_with_argued_inputs(state: dict, argued: dict) -> dict[str, Any]:
         "multi_stage_fcf_dcf",
         "cycle_normalized_fcf_dcf_placeholder_trailing_base",
     }:
-        result = deepcopy(base)
-        result["input_source"] = "argued"
-        result["clamp_warnings"] = [
-            "Argued FCF inputs not applied: the archetype does not use an FCF DCF."
-        ]
-        result["band_dissents"] = list(argued.get("band_dissents") or [])
-        return result
+        return _compute_non_fcf_with_argued_inputs(base, argued)
 
     assumptions = base.get("assumptions") or {}
     method_entry = argued.get("base_fcf_method")

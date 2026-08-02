@@ -25,7 +25,12 @@ from __future__ import annotations
 
 import pytest
 
-from mas_sector_system.valuation_engine import compute_dcf_with_argued_inputs
+from mas_sector_system.valuation_engine import (
+    _ffo_nav_case,
+    _residual_income_case,
+    compute_dcf_from_state,
+    compute_dcf_with_argued_inputs,
+)
 
 
 def _cell(value, end):
@@ -287,4 +292,153 @@ def test_compounded_band_is_at_least_as_wide_as_the_central_case_spread():
     tol = max(abs(low), abs(high)) * 1e-9
     assert low - tol <= base <= high + tol, (
         f"central case {base} sits outside its own band [{low}, {high}]"
+    )
+
+
+# ── The same invariants on non-FCF methods ──────────────────────────────────
+
+def _financial_state(archetype: str) -> dict:
+    state = {
+        "ticker": "TEST",
+        "sector": "Financials",
+        "canonical_metrics": {"archetype": archetype, "by_id": {}},
+        "income_statement": {
+            "current_annual": {
+                "NetIncomeLoss": _cell(12_000_000_000, "2025-12-31"),
+                "WeightedAverageSharesDiluted": _cell(1_000_000_000, "2025-12-31"),
+                "FFO": _cell(6_000_000_000, "2025-12-31"),
+            },
+            "live_market": {
+                "price": 120.0,
+                "market_cap": 120_000_000_000,
+                "shares_outstanding": 1_000_000_000,
+            },
+        },
+        "balance_sheet": {
+            "current_annual": {
+                "StockholdersEquity": _cell(80_000_000_000, "2025-12-31")
+            }
+        },
+        "cash_flow_statement": {},
+    }
+    if archetype == "equity_reit":
+        state["sector"] = "Real Estate"
+    return state
+
+
+@pytest.mark.parametrize(
+    ("archetype", "argued"),
+    [
+        (
+            "bank_lender",
+            {
+                "cost_of_equity": {"argued_range": [0.09, 0.09]},
+                "sustainable_roe": {"argued_range": [0.13, 0.17]},
+                "fade_roe": {"argued_range": [0.08, 0.10]},
+                "fade_years": {"argued_range": [8, 12]},
+                "plowback": {"argued_range": [0.35, 0.65]},
+            },
+        ),
+        (
+            "insurance",
+            {
+                "cost_of_equity": {"argued_range": [0.09, 0.09]},
+                "sustainable_roe": {"argued_range": [0.20, 0.30]},
+                "fade_roe": {"argued_range": [0.08, 0.10]},
+                "fade_years": {"argued_range": [7, 10]},
+                "plowback": {"argued_range": [0.25, 0.55]},
+            },
+        ),
+        (
+            "equity_reit",
+            {
+                "ffo_multiple": {"argued_range": [18.0, 22.0]},
+                "cap_rate": {"argued_range": [0.05, 0.05]},
+                "nav_discount": {"argued_range": [-0.10, 0.10]},
+            },
+        ),
+    ],
+)
+def test_non_fcf_parameter_at_engine_default_has_zero_delta(archetype, argued):
+    state = _financial_state(archetype)
+    base = compute_dcf_from_state(state)
+    # Set one dial exactly to the actual engine default, irrespective of the
+    # fixture's sector-derived value.
+    parameter = "cost_of_equity" if archetype != "equity_reit" else "cap_rate"
+    default = base["assumptions"][parameter]
+    argued[parameter] = {"argued_range": [default, default]}
+    judgment = compute_dcf_with_argued_inputs(state, argued)
+    row = next(s for s in judgment["sensitivities"] if s["parameter"] == parameter)
+    assert row["delta_vs_default"] == pytest.approx(0.0, abs=1e-9)
+
+
+@pytest.mark.parametrize(
+    ("archetype", "argued"),
+    [
+        (
+            "bank_lender",
+            {
+                "cost_of_equity": {"argued_range": [0.08, 0.11]},
+                "sustainable_roe": {"argued_range": [0.12, 0.19]},
+                "fade_roe": {"argued_range": [0.07, 0.11]},
+                "fade_years": {"argued_range": [6, 10]},
+                "plowback": {"argued_range": [0.30, 0.70]},
+            },
+        ),
+        (
+            "equity_reit",
+            {
+                "ffo_multiple": {"argued_range": [16.0, 24.0]},
+                "cap_rate": {"argued_range": [0.04, 0.07]},
+                "nav_discount": {"argued_range": [-0.15, 0.20]},
+            },
+        ),
+    ],
+)
+def test_non_fcf_reported_corners_are_true_combination_extremes(archetype, argued):
+    import itertools
+
+    state = _financial_state(archetype)
+    judgment = compute_dcf_with_argued_inputs(state, argued)
+    base = judgment["base_engine"]
+    defaults = {
+        key: value
+        for key, value in base["assumptions"].items()
+        if key in argued
+    }
+    recompute = (
+        (lambda **kwargs: _residual_income_case(base, **kwargs))
+        if archetype == "bank_lender"
+        else (lambda **kwargs: _ffo_nav_case(base, **kwargs))
+    )
+    values = []
+    parameters = list(argued)
+    for combo in itertools.product(
+        *(argued[p]["argued_range"] for p in parameters)
+    ):
+        kwargs = dict(defaults)
+        kwargs.update(dict(zip(parameters, combo)))
+        values.append(recompute(**kwargs)["fair_value_per_share"])
+
+    fair_range = judgment["fair_value_range"]
+    assert fair_range["low"] == pytest.approx(min(values), rel=1e-12)
+    assert fair_range["high"] == pytest.approx(max(values), rel=1e-12)
+
+
+def test_non_fcf_disclosure_only_fires_for_actual_fcf_arguments():
+    state = _financial_state("bank_lender")
+    native = compute_dcf_with_argued_inputs(
+        state, {"cost_of_equity": {"argued_range": [0.08, 0.10]}}
+    )
+    assert not any(
+        "Argued FCF inputs not applied" in warning
+        for warning in native.get("clamp_warnings") or []
+    )
+
+    legacy = compute_dcf_with_argued_inputs(
+        state, {"wacc": {"argued_range": [0.08, 0.10]}}
+    )
+    assert any(
+        "Argued FCF inputs not applied" in warning
+        for warning in legacy.get("clamp_warnings") or []
     )
