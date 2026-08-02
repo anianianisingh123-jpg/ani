@@ -1390,6 +1390,15 @@ def _substantive_engine_range(state: dict) -> tuple[Optional[str], Optional[dict
             continue
         if abs(high - low) <= 1e-9 or _is_mechanical_band(fr):
             continue
+        # A range built from conventional widths the code chose (±2 turns of
+        # FFO multiple, ±75bp of cap rate) rather than from an accepted argued
+        # parameter is a sensitivity convention, not a per-company view. It is
+        # asymmetric — because the FFO/NAV blend is nonlinear — so
+        # `_is_mechanical_band` cannot see it, but it satisfies this criterion
+        # no more than a ±15% ruler does. PLD's clean run produced exactly this:
+        # every sensitivity zero-delta, band 124.31–179.10, C5 passing.
+        if block.get("range_basis") == "convention":
+            continue
         return key, fr
     return None, None
 
@@ -1420,6 +1429,23 @@ def _grade_c5(state: dict, text: str) -> dict[str, Any]:
                 "detail": (
                     "range is a fixed ±% band on the point estimate "
                     f"({', '.join(mechanical)}) — no per-company analysis behind it"
+                ),
+            }
+        conventional = [
+            key
+            for key in ("dcf_judgment", "dcf_engine", "comps_judgment")
+            if isinstance(state.get(key), dict)
+            and state[key].get("range_basis") == "convention"
+        ]
+        if conventional:
+            return {
+                "passed": False,
+                "judged": False,
+                "method": "mechanical",
+                "detail": (
+                    "range uses conventional sensitivity widths, not an accepted "
+                    f"argued parameter ({', '.join(conventional)}) — no argued "
+                    "view behind it"
                 ),
             }
         return {

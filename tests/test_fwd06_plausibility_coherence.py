@@ -118,3 +118,38 @@ def test_missing_recommendation_fails_coherence():
     st["recommendation"] = None
     f = _fwd(st)
     assert f["F-coherence"]["passed"] is False
+
+
+# ── C5: a conventional sensitivity width is not an argued range ──────────────
+#
+# FWD-01b's FFO/NAV fallback builds a range from constants the code chooses
+# (±2 turns of FFO multiple, ±75bp of cap rate) when no dial was argued. The
+# result is asymmetric — the FFO/NAV blend is nonlinear — so the fixed-band
+# detector cannot see it, and PLD's clean run passed C5 with every sensitivity
+# at zero delta. C5 exists to require a per-company view, so it must not.
+
+def test_conventional_range_does_not_satisfy_c5():
+    from mas_sector_system.valuation_rubric import _grade_c5
+
+    state = {
+        "dcf_judgment": {
+            "range_basis": "convention",
+            "fair_value_range": {"low": 124.31, "base": 147.98, "high": 179.10},
+        }
+    }
+    result = _grade_c5(state, "Our fair value range is $124 to $179 per share.")
+    assert not result["passed"], result["detail"]
+    assert "conventional" in result["detail"].lower()
+
+
+def test_argued_range_still_satisfies_c5():
+    from mas_sector_system.valuation_rubric import _grade_c5
+
+    state = {
+        "dcf_judgment": {
+            "range_basis": "argued",
+            "fair_value_range": {"low": 157.47, "base": 165.34, "high": 174.27},
+        }
+    }
+    result = _grade_c5(state, "Our fair value range is $157 to $174 per share.")
+    assert result["passed"], result["detail"]

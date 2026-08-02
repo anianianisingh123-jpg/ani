@@ -1691,7 +1691,7 @@ def _non_fcf_ranges(
                     max(0.0, min(1.0, float(growth[0]) / roe)),
                     max(0.0, min(1.0, float(growth[1]) / roe)),
                 ]
-        return defaults, ranges, warnings
+        return defaults, ranges, warnings, ("argued" if ranges else "convention")
 
     defaults = {
         "ffo_multiple": float(assumptions["ffo_multiple"]),
@@ -1704,9 +1704,12 @@ def _non_fcf_ranges(
         if isinstance(entry, dict) and isinstance(entry.get("argued_range"), list):
             ranges[parameter] = list(entry["argued_range"])
     if not ranges:
-        # The saved PLD critique predates these dials. Produce filing/market-
-        # anchored recomputed cases without pretending its FCF-basis argument
-        # changes FFO. These are explicit assumption cases, not a fixed FV band.
+        # No FFO/NAV dial was argued. Produce filing/market-anchored recomputed
+        # cases without pretending an FCF-basis argument changes FFO. These are
+        # explicit assumption cases, not a fixed FV band — but the widths below
+        # are conventional (±2 turns, ±75bp), chosen here rather than argued by
+        # anyone, so the range is marked `convention` and must not satisfy the
+        # "expressed as a range" criterion. See _substantive_engine_range.
         multiple = defaults["ffo_multiple"]
         cap_rate = defaults["cap_rate"]
         ranges = {
@@ -1716,9 +1719,11 @@ def _non_fcf_ranges(
         }
         warnings.append(
             "No native FFO/NAV argument was accepted; range uses recomputed "
-            "market-anchored FFO multiple, cap-rate, and NAV-discount cases."
+            "market-anchored FFO multiple, cap-rate, and NAV-discount cases "
+            "at conventional widths — not an argued view."
         )
-    return defaults, ranges, warnings
+        return defaults, ranges, warnings, "convention"
+    return defaults, ranges, warnings, "argued"
 
 
 def _compute_non_fcf_with_argued_inputs(
@@ -1742,7 +1747,8 @@ def _compute_non_fcf_with_argued_inputs(
     if not isinstance(base.get("fair_value_per_share"), (int, float)):
         return result
 
-    defaults, ranges, warnings = _non_fcf_ranges(base, argued)
+    defaults, ranges, warnings, range_basis = _non_fcf_ranges(base, argued)
+    result["range_basis"] = range_basis
     result["clamp_warnings"].extend(warnings)
     recompute = (
         (lambda **kwargs: _residual_income_case(base, **kwargs))
