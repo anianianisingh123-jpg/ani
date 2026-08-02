@@ -358,6 +358,7 @@ def empty_state(
         "prior_run_id": None,
         "prior_run_meta": {},
         "prior_run_context": "",
+        "recommendation": None,
         "macro_context": "",
         "macro_regime_assessment": "",
         "management_assessment": "",

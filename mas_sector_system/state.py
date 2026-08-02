@@ -107,6 +107,18 @@ class ResearchState(TypedDict):
     # track thesis changes vs its own last memo / metrics.
     prior_run_context: str
 
+    # Structured investment recommendation (FWD-06 / FWD07_REVIEW §4b).
+    # Emitted by synthesis as a small JSON object so plausibility/coherence
+    # graders read state, not prose. Shape:
+    #   {
+    #     "rating": "BUY" | "HOLD" | "SELL" | "AVOID" | ...,
+    #     "preferred_lens": "primary_method" | "comps" | "hybrid" | "other",
+    #     "override_reason": str | None,  # required when preferred_lens ≠ primary
+    #     "primary_method_direction": "undervalued" | "overvalued" | "fair" | None,
+    #   }
+    # Additive shared-contract field — announced in DEV_SCRATCHPAD 2026-08-01.
+    recommendation: Optional[dict]
+
     # Top-down macroeconomic backdrop relevant to the sector: rates,
     # inflation, FX, commodity trends, and policy developments.
     # Written by data_gatherer_node as a short narrative digest.

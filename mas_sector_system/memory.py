@@ -10,6 +10,7 @@ persist from export and QC-halt finalize paths.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 from datetime import datetime, timezone
@@ -19,6 +20,31 @@ from typing import Any, Optional
 _PKG_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _PKG_DIR.parent
 DEFAULT_DB_PATH = _REPO_ROOT / "outputs" / "research_memory.sqlite"
+
+
+def resolve_db_path(db_path: Optional[Path] = None) -> Path:
+    """Resolve the SQLite path.
+
+    Priority: explicit ``db_path`` arg → ``MAS_MEMORY_DB`` env → default.
+    Harness baselines set ``MAS_MEMORY_DB`` to a scratch file so they never
+    touch the permanent desk archive.
+    """
+    if db_path is not None:
+        return Path(db_path)
+    env = (os.environ.get("MAS_MEMORY_DB") or "").strip()
+    if env:
+        return Path(env)
+    return DEFAULT_DB_PATH
+
+
+def prior_load_disabled() -> bool:
+    """True when harness/tests ask to skip prior-run injection.
+
+    Set ``MAS_MEMORY_DISABLE_PRIOR=1`` (or ``true``/``yes``) so a controlled
+    re-run cannot ingest a throwaway first pass as "desk memory".
+    """
+    v = (os.environ.get("MAS_MEMORY_DISABLE_PRIOR") or "").strip().lower()
+    return v in ("1", "true", "yes", "on")
 
 # Keep prompt injection bounded (foundation agents already carry large packets).
 _MAX_MEMO_CHARS = 3500
@@ -31,7 +57,7 @@ def _now_utc() -> str:
 
 
 def _connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
-    path = Path(db_path) if db_path else DEFAULT_DB_PATH
+    path = resolve_db_path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
@@ -43,7 +69,7 @@ def init_db(db_path: Optional[Path] = None) -> Path:
 
     Retention policy: keep **all** runs forever (no prune). Gemini/Ani 2026-07-27.
     """
-    path = Path(db_path) if db_path else DEFAULT_DB_PATH
+    path = resolve_db_path(db_path)
     with _connect(path) as conn:
         conn.execute(
             """
@@ -347,7 +373,7 @@ def save_run(
         run_id = int(cur.lastrowid)
     print(
         f"[memory] saved run id={run_id} ticker={ticker!r} "
-        f"qc={state.get('qc_status') or 'n/a'} db={db_path or DEFAULT_DB_PATH}",
+        f"qc={state.get('qc_status') or 'n/a'} db={resolve_db_path(db_path)}",
         flush=True,
     )
     return run_id
@@ -443,6 +469,17 @@ def load_prior_context_for_state(
     db_path: Optional[Path] = None,
 ) -> dict[str, Any]:
     """Convenience: load prior run + formatted prompt block for ResearchState."""
+    if prior_load_disabled():
+        print(
+            f"[memory] prior load disabled (MAS_MEMORY_DISABLE_PRIOR) "
+            f"ticker={ticker!r} — clean baseline context",
+            flush=True,
+        )
+        return {
+            "prior_run_id": None,
+            "prior_run_meta": {},
+            "prior_run_context": format_prior_run_for_prompt(None),
+        }
     prior = load_previous_run(ticker, mode=mode, db_path=db_path)
     if not prior:
         print(
@@ -622,7 +659,7 @@ def backfill_outputs_dir(
         "skipped": skipped,
         "errors": errors,
         "runs": imported,
-        "db": str(db_path or DEFAULT_DB_PATH),
+        "db": str(resolve_db_path(db_path)),
     }
     print(
         f"[memory:backfill] done imported={summary['imported']} "

@@ -350,6 +350,17 @@ def get_cik_for_ticker(ticker: str) -> str:
     """Look up the 10-digit zero-padded CIK for a ticker.
 
     Raises ValueError if the ticker is not found in the SEC ticker map.
+
+    Known gap (FWD-07 / XOM, 2026-07-31): the SEC company_tickers map can
+    resolve a liquid equity (e.g. XOM) to a brand-new holdco CIK with **no
+    XBRL history** — only a week of 8-K/8-K12B filings after a reorg. This
+    function never checks that the resolved entity actually has companyfacts
+    or 10-K/10-Q filings, so the pipeline hard-stops later at validation with
+    "Revenue missing" rather than failing at resolve time with a clear
+    entity-identity error. Fix separately: after map lookup, confirm
+    submissions recentFilings contains at least one 10-K/10-Q (or companyfacts
+    has non-empty us-gaap), else try formerNames / alternate CIKs. Do not treat
+    that class of failure as "commodity extraction is broken."
     """
     if not ticker or not str(ticker).strip():
         raise ValueError("Empty ticker — cannot look up CIK.")

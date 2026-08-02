@@ -1923,6 +1923,20 @@ Rules:
   numbers from training memory.
 - Do not split the difference reflexively — take a view.
 - Strip any claim none of the upstream agents supported with evidence.
+
+After the memo body, emit exactly one fenced JSON block labelled
+recommendation (not part of the reader-facing memo) with this schema:
+```recommendation
+{{
+  "rating": "BUY" | "HOLD" | "SELL" | "AVOID" | equivalent short string,
+  "preferred_lens": "primary_method" | "comps" | "hybrid" | "other",
+  "override_reason": null or a short sentence when preferred_lens is not
+    primary_method (why the primary intrinsic method is not the stance),
+  "primary_method_direction": "undervalued" | "overvalued" | "fair" | null
+}}
+```
+When the primary intrinsic method and the recommendation disagree, preferred_lens
+must not be primary_method and override_reason must be non-empty.
 """
 
 
@@ -2052,15 +2066,55 @@ def synthesis_node(state: ResearchState) -> dict:
             flush=True,
         )
 
-    return {
-        "final_memo": _run(
-            SYNTHESIS_SYSTEM_PROMPT,
-            _build_synthesis_user_prompt(state),
-            model=OPUS_MODEL,
-            max_tokens=MAX_TOKENS_MEMO,
-            label="synthesis",
+    raw_memo = _run(
+        SYNTHESIS_SYSTEM_PROMPT,
+        _build_synthesis_user_prompt(state),
+        model=OPUS_MODEL,
+        max_tokens=MAX_TOKENS_MEMO,
+        label="synthesis",
+    )
+    memo, recommendation = _split_recommendation_block(raw_memo or "")
+    out: Dict[str, Any] = {"final_memo": memo}
+    if recommendation:
+        out["recommendation"] = recommendation
+        print(
+            f"[synthesis] recommendation rating={recommendation.get('rating')!r} "
+            f"lens={recommendation.get('preferred_lens')!r}",
+            flush=True,
         )
-    }
+    return out
+
+
+def _split_recommendation_block(raw: str) -> tuple[str, Optional[Dict[str, Any]]]:
+    """Strip a trailing ```recommendation JSON fence; return (memo, rec)."""
+    if not raw:
+        return "", None
+    # Prefer labelled fence; fall back to a trailing bare JSON object with rating.
+    m = re.search(
+        r"```(?:recommendation|json)\s*\n(\{[\s\S]*?\})\s*```\s*$",
+        raw.strip(),
+        re.I,
+    )
+    if not m:
+        # Also allow fence mid-tail after the last heading-ish block.
+        m = re.search(
+            r"\n```(?:recommendation|json)\s*\n(\{[\s\S]*?\})\s*```\s*\Z",
+            raw,
+            re.I,
+        )
+    if not m:
+        return raw, None
+    try:
+        rec = json.loads(m.group(1))
+    except (json.JSONDecodeError, TypeError):
+        return raw, None
+    if not isinstance(rec, dict) or not rec.get("rating"):
+        return raw, None
+    memo = (raw[: m.start()] + raw[m.end() :]).rstrip() + "\n"
+    # Normalise rating case.
+    rating = str(rec.get("rating") or "").strip().upper()
+    rec = {**rec, "rating": rating}
+    return memo, rec
 
 
 # ─────────────────────────────────────────────────────────────────────────────

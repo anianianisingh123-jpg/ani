@@ -57,8 +57,11 @@ def test_format_rubric_for_prompt_lists_all_criteria():
 
 def test_held_out_tickers_match_section_10_2():
     tickers = [h["ticker"] for h in HELD_OUT_TICKERS]
-    assert tickers == ["NVDA", "QCOM", "CRM", "JPM", "PLD", "PGR", "XOM", "KO"]
+    # XOM replaced by CVX — entity resolution failure, not commodity extraction
+    # (FWD07_REVIEW §9 / FWD-07-CLEAN).
+    assert tickers == ["NVDA", "QCOM", "CRM", "JPM", "PLD", "PGR", "CVX", "KO"]
     assert "BABA" not in tickers
+    assert "XOM" not in tickers
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────

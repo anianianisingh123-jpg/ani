@@ -182,7 +182,8 @@ The 5-year historical foundation already exists — all three statements carry `
 
 | ID | Task | Assignee | Status |
 |----|------|----------|--------|
-| FWD-07 | Baseline the full 8-ticker set (NVDA/QCOM/CRM/JPM/PLD/PGR/XOM/KO) on pre-forecast code. Log every extraction failure — 5 of 8 have never run, and those findings shape the driver templates. | Grok | COMPLETED |
+| FWD-07 | Baseline the full 8-ticker set (NVDA/QCOM/CRM/JPM/PLD/PGR/XOM/KO) on pre-forecast code. Log every extraction failure — 5 of 8 have never run, and those findings shape the driver templates. **Superseded for FWD-01b/03 consumption by FWD-07-CLEAN** (uncontrolled prompts + memory contamination). | Grok | COMPLETED (not usable as controlled baseline) |
+| FWD-07-CLEAN | Controlled re-run on `fix/valuation-engine-arithmetic`: fixed prompt template, memory isolated, XOM→CVX, mechanical vs advisory headline. | Grok | COMPLETED |
 | FWD-00 | `state.py`: `historical_profile`, `forecast`, `driver_critique`, `dcf_modelled`, `consensus_reconciliation`. Additive. | Claude/Opus-5 | DONE |
 | FWD-05a | `historical_profile()` + `mechanical_defaults()` → `forecast_engine.py`. Pure Python over the existing `annual_series`. | Codex | DONE |
 | FWD-05b | `build_forecast()` skeleton + fixture tests. Annual, 5 years. Not wired. | Codex | DONE |
@@ -190,8 +191,8 @@ The 5-year historical foundation already exists — all three statements carry `
 | FWD-01b | Non-FCF judgment layer for bank/insurer residual income and equity-REIT FFO/NAV: native argued dials, evidence/clamps, recomputed ranges, sensitivities, and sign-aware true corners. | Codex/GPT-5 | DONE |
 | FWD-02 | Forecast doctrine on the L1 archetype cards (`valuation_doctrine.py`) — which drivers matter for this business type and why. Track A row from the design doc that never reached this board; not started. | _unassigned_ (Gemini off roster) | TODO |
 | FWD-11 | Wire `forecast_engine.py` to the template: call `drivers_for()` instead of hard-coding driver names, honour the `is_native` flag per §8, and refuse any archetype whose `forecast_output_kind()` is not `eps_fcf` rather than building an EPS forecast for a REIT. Includes the unimplemented `software_saas` path (`sm_margin`/`rd_margin`). Engine-side only — do not bend the template to fit. | Codex (proposed — its file) | TODO |
-| FWD-03 | Segment revenue extraction + 2% reconciliation. **Held** until FWD-07 shows which filers have clean segment data. Timebox and report early. | Codex | BLOCKED (on FWD-07) |
-| FWD-06 | Rubric criteria F1–F7 (§11). Reuse `_evidence_value`. | Grok | TODO |
+| FWD-03 | Segment revenue extraction + 2% reconciliation. **Unblocked by FWD-07-CLEAN** — inspect clean slices for segment data quality. Timebox and report early. | Codex | TODO |
+| FWD-06 | Rubric criteria F1–F7 (§11) + F-arithmetic / F-plausibility / F-coherence (§4b review). Reuse `_evidence_value`. | Grok | COMPLETED |
 | FWD-08 | Driver-critique prompt + call; enforce mandatory `historical_basis`. | Claude/Opus-5 | TODO |
 | FWD-09 | `dcf_modelled` + consensus reconciliation into the valuation nodes. | Claude/Opus-5 | TODO |
 | FWD-10 | `--forecast` flag (CLI only, no topology change — needs assignment); artifacts + football field third case. | Claude/Opus-5 | TODO |
@@ -538,3 +539,39 @@ The 5-year historical foundation already exists — all three statements carry `
 - Files modified: `mas_sector_system/valuation_engine.py`, `tests/test_argued_arithmetic_invariants.py`, `tests/test_valuation_engine_argued.py`, `mas_sector_system/DEV_SCRATCHPAD.md`.
 - Notes / Handoff for next agent: Offline re-grade of the committed JPM/PGR/PLD slices flips C5 to PASS for all three; each has 3 sensitivities, and PLD now has FV $149.60 with a recomputed $125.64–$181.23 range. The inert-FCF disclosure now appears only when an accepted FCF-named input was actually supplied. I did not endorse or restore ±15% as analysis: the new non-FCF paths carry no fixed band. Existing base FCF-DCF point bands remain outside this ticket and still fail the grader's mechanical-band test. Targeted valuation tests: 31 passed. Full-suite collection is independently blocked by the concurrent in-flight `driver_templates.py` edit causing `agents.py` prompt interpolation to raise `ValueError: Invalid format specifier`; that file and all other concurrent changes were left untouched.
 - Status: COMPLETED
+
+### [2026-08-01] - [Grok] - [FWD-07-CLEAN + FWD-06]
+- **What I changed:**
+  1. **Controlled baseline re-run** on branch `fix/valuation-engine-arithmetic` (inherits arithmetic + C3/C5/C11 grader fixes + Codex FWD-01b non-FCF judgment). Harness `tmp/run_fwd07_clean.py`. Artifacts `*_fwd_clean` + `comparison_fwd_clean.md`.
+  2. **FWD-06:** F-arithmetic stays as unit tests (`tests/test_argued_arithmetic_invariants.py` — promoted, not rewritten). F-plausibility + F-coherence grade **structured state only**. F1–F7 scaffolded with vacuous-pass when forecast path off. Headline split: `mechanical_score` (9) + `advisory_score` (C1/C8).
+  3. **Shared contract (announced):** `state.recommendation` dict (`rating`, `preferred_lens`, `override_reason`, `primary_method_direction`). Synthesis emits a trailing ```recommendation JSON fence; stripped into state.
+  4. **Memory isolation:** `MAS_MEMORY_DB` + `MAS_MEMORY_DISABLE_PRIOR` env in `memory.py`. Clean runs use scratch DB and never load prior desk memory.
+  5. **Housekeeping:** untracked force-added `_fwd_baseline` artifacts so `.gitignore` wins (gitignore = truth; local files remain on disk).
+  6. **XOM:** swapped to **CVX**; filed `outputs/val02_baseline/XOM_CIK_ENTITY_ISSUE.md` + docstring on `get_cik_for_ticker`.
+  7. **Reviewed C3/C5/C11** from FWD-07-FIX (Opus) — accepted; C11 8/8 on clean set, C3 5/8 genuine, C5 8/8 because FWD-01b empirical corners replaced the cosmetic ±15% band.
+- **Files modified:** `memory.py`, `state.py`, `main.py`, `agents.py`, `valuation_rubric.py`, `tools.py`, `tests/test_fwd06_*.py`, `tests/test_recommendation_split.py`, `tests/test_valuation_rubric.py`, `tmp/run_fwd07_clean.py`, `tmp/run_val02_baseline.py` (slice keys), `DEV_SCRATCHPAD.md`.
+- **Clean baseline headline (mechanical 9 only; C1/C8 advisory):**
+
+  | Ticker | Mechanical | Advisory C1/C8 | Method | F-plaus | F-coher | prior |
+  |--------|------------|----------------|--------|---------|---------|-------|
+  | NVDA | 8/9 | 2/2 | multi_stage_fcf_dcf | PASS | PASS | None |
+  | QCOM | 8/9 | 1/2 | multi_stage_fcf_dcf | PASS | PASS | None |
+  | CRM | **9/9** | 1/2 | multi_stage_fcf_dcf | PASS | PASS | None |
+  | JPM | 8/9 | 1/2 | excess_return_on_equity | PASS | PASS | None |
+  | PLD | 8/9 | 2/2 | ffo_nav | PASS | PASS | None |
+  | PGR | **9/9** | 2/2 | excess_return_on_equity | PASS | PASS | None |
+  | CVX | **9/9** | 1/2 | cycle_normalized_fcf… | PASS | PASS | None |
+  | KO | **9/9** | 0/2 | multi_stage_fcf_dcf | PASS | PASS | None |
+
+- **Hygiene verified:** all `query_type=full_underwrite`, all `prior_run_id=None`, identical prompt template, memory writes only to `fwd07_clean_memory.sqlite`.
+- **C3 remaining fails (genuine, 3 tickers):** NVDA, JPM, PLD — currency figures nowhere in state.
+- **C5 note for Codex:** live clean run has C5 **8/8 PASS** — not a regression; FWD-01b empirical corners for non-FCF paths make the old “expect C5 fail” acceptance signal obsolete for bank/REIT/insurance. Residual FCF ±15% engine bands (if any) still fail the mechanical-band test when they appear alone.
+- **KO F-plaus/coherence:** primary FV still ~$25–40 vs ~$88 price; recommendation `preferred_lens=comps` + override_reason → both F-criteria PASS (this is the intended behaviour).
+- **Corrections to my prior FWD-07 handoff (accepted):** C11 was grader garbage not writer discipline; C3 was mostly missing raw-statement universe. Both fixed before this re-run.
+- **Notes / Handoff:**
+  1. **Consume `*_fwd_clean` / `comparison_fwd_clean.md` for FWD-01b follow-ups and FWD-03** — not `_fwd_baseline`.
+  2. CVX unblocks cyclical_commodity; method string still says `cycle_normalized_fcf_dcf_placeholder_trailing_base` — mid-cycle normalization is still a stub shape for templates.
+  3. C8 remains advisory and still flips (3/8 PASS); never fold into the mechanical headline.
+  4. Do not force-add `outputs/` or `tmp/` again.
+- **Tests:** 63 related passed (FWD-06, arithmetic invariants, C11 scoping, held-out list).
+- **Status:** COMPLETED

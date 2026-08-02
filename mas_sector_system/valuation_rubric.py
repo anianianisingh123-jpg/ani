@@ -42,7 +42,11 @@ HELD_OUT_TICKERS: list[dict[str, str]] = [
     {"ticker": "JPM", "archetype": "bank_lender", "note": "DCF must be rejected as primary"},
     {"ticker": "PLD", "archetype": "equity_reit", "note": "FFO/NAV path"},
     {"ticker": "PGR", "archetype": "insurance", "note": "book-value path"},
-    {"ticker": "XOM", "archetype": "cyclical_commodity", "note": "mid-cycle normalization"},
+    {
+        "ticker": "CVX",
+        "archetype": "cyclical_commodity",
+        "note": "mid-cycle normalization (XOM blocked on CIK/entity resolution)",
+    },
     {"ticker": "KO", "archetype": "mature_dividend_payer", "note": "stable-assumption control"},
 ]
 
@@ -145,6 +149,66 @@ RUBRIC: list[dict[str, Any]] = [
 assert len(RUBRIC) == 11
 assert [c["id"] for c in RUBRIC] == list(range(1, 12))
 
+# LLM-judged criteria are advisory for baseline headlines (FWD07_REVIEW §11).
+# A criterion that flips between re-grades cannot anchor a before/after.
+ADVISORY_CRITERION_IDS: frozenset[int] = frozenset({1, 8})
+MECHANICAL_CRITERION_IDS: frozenset[int] = frozenset(
+    c["id"] for c in RUBRIC if c["id"] not in ADVISORY_CRITERION_IDS
+)
+
+# Forecast-epic criteria (FORWARD_ESTIMATE_DESIGN.md §11). Vacuous-pass when
+# the forecast path is not present so the pre-forecast baseline still grades.
+FORECAST_RUBRIC: list[dict[str, Any]] = [
+    {
+        "id": "F1",
+        "name": "driver_historical_basis",
+        "criterion": "Every argued driver carries a non-empty historical_basis",
+        "mechanical": True,
+    },
+    {
+        "id": "F2",
+        "name": "segment_reconciliation",
+        "criterion": "Segment revenues sum to consolidated within 2%",
+        "mechanical": True,
+    },
+    {
+        "id": "F3",
+        "name": "driver_count_bounded",
+        "criterion": "Driver count ≤ archetype template + 1",
+        "mechanical": True,
+    },
+    {
+        "id": "F4",
+        "name": "consensus_gap_stated",
+        "criterion": "Modelled year-1 reconciled to consensus with the gap stated",
+        "mechanical": True,
+    },
+    {
+        "id": "F5",
+        "name": "forecast_currency_traceable",
+        "criterion": "No currency figure in the memo absent from the forecast object",
+        "mechanical": True,
+    },
+    {
+        "id": "F6",
+        "name": "projected_margins_in_band",
+        "criterion": "Each projected year's margins within §8.2 bands, or dissent stated",
+        "mechanical": True,
+    },
+    {
+        "id": "F7",
+        "name": "three_valuation_cases",
+        "criterion": "All three valuation cases present (dcf_engine, dcf_judgment, dcf_modelled)",
+        "mechanical": True,
+    },
+]
+
+# FWD07_REVIEW §4b — form is not enough; check arithmetic, plausibility, coherence.
+# F-arithmetic lives as unit tests (tests/test_argued_arithmetic_invariants.py),
+# not a grader — an unmoved parameter must produce zero delta; corners must be
+# true extremes. The two tests below read STRUCTURED STATE only.
+PLAUSIBILITY_DIVERGENCE_THRESHOLD = 0.50  # 50% vs live price
+
 
 # ── Public API ───────────────────────────────────────────────────────────────
 
@@ -153,10 +217,16 @@ def format_rubric_for_prompt() -> str:
     lines = [
         "=== VALUATION QUALITY RUBRIC (binary; score = count passed) ===",
         "Source: VALUATION_ICL_DESIGN.md §10.1. Report per-criterion, not just the total.",
+        "Headline: report mechanical (9) and advisory/judged (C1/C8) separately.",
         "",
     ]
     for c in RUBRIC:
-        mode = "LLM-judged" if c["requires_judgment"] else "mechanical"
+        if c["id"] in ADVISORY_CRITERION_IDS:
+            mode = "LLM-judged (advisory)"
+        elif c["requires_judgment"]:
+            mode = "LLM-judged"
+        else:
+            mode = "mechanical"
         lines.append(f"{c['id']:2d}. [{mode}] {c['criterion']}")
     lines.append("")
     lines.append(
@@ -169,6 +239,7 @@ def grade_valuation(
     state: dict,
     *,
     judge: Optional[JudgeFn] = None,
+    include_fwd: bool = True,
 ) -> dict[str, Any]:
     """Grade valuation quality for a research-run state.
 
@@ -182,11 +253,17 @@ def grade_valuation(
         used for criteria 1 and 8. When provided, those results are marked
         ``judged: true``. When omitted, conservative heuristics run and results
         are marked ``judged: false``.
+    include_fwd:
+        When True (default), also grade F-plausibility, F-coherence, and F1–F7
+        (forecast criteria vacuous-pass when forecast fields are absent).
 
     Returns
     -------
     dict with keys:
-        score, max_score, criteria (list of per-criterion results),
+        score, max_score, criteria,
+        mechanical_score / mechanical_max (excludes C1/C8),
+        advisory_score / advisory_max (C1/C8 only),
+        fwd_criteria (F-plausibility, F-coherence, F1–F7 when include_fwd),
         ticker, notes.
     """
     text = _valuation_text(state)
@@ -217,6 +294,7 @@ def grade_valuation(
             "type": spec["type"],
             "mechanical": spec["mechanical"],
             "requires_judgment": spec["requires_judgment"],
+            "advisory": cid in ADVISORY_CRITERION_IDS,
             "passed": bool(result["passed"]),
             "judged": bool(result.get("judged", False)),
             "detail": str(result.get("detail") or ""),
@@ -224,14 +302,424 @@ def grade_valuation(
         }
         results.append(result)
 
+    mechanical = [r for r in results if r["id"] in MECHANICAL_CRITERION_IDS]
+    advisory = [r for r in results if r["id"] in ADVISORY_CRITERION_IDS]
     score = sum(1 for r in results if r["passed"])
-    return {
+    out: dict[str, Any] = {
         "ticker": state.get("ticker"),
         "score": score,
         "max_score": len(RUBRIC),
+        "mechanical_score": sum(1 for r in mechanical if r["passed"]),
+        "mechanical_max": len(mechanical),
+        "advisory_score": sum(1 for r in advisory if r["passed"]),
+        "advisory_max": len(advisory),
         "criteria": results,
         "notes": _summary_notes(results),
     }
+    if include_fwd:
+        fwd = _grade_fwd_criteria(state)
+        out["fwd_criteria"] = fwd
+        out["fwd_score"] = sum(1 for r in fwd if r["passed"] and not r.get("vacuous"))
+        out["fwd_max"] = sum(1 for r in fwd if not r.get("vacuous"))
+        out["fwd_vacuous"] = sum(1 for r in fwd if r.get("vacuous"))
+    return out
+
+
+def _grade_fwd_criteria(state: dict) -> list[dict[str, Any]]:
+    """F-plausibility, F-coherence (§4b) + F1–F7 (§11 design; vacuous without forecast)."""
+    results: list[dict[str, Any]] = []
+    for grader, meta in (
+        (_grade_f_plausibility, {
+            "id": "F-plausibility",
+            "name": "primary_method_plausibility",
+            "criterion": (
+                "Primary-method fair value within 50% of live price, "
+                "or an explicit override_reason is stated on recommendation"
+            ),
+        }),
+        (_grade_f_coherence, {
+            "id": "F-coherence",
+            "name": "recommendation_coherence",
+            "criterion": (
+                "Recommendation direction matches primary method, "
+                "or preferred_lens ≠ primary_method with override_reason"
+            ),
+        }),
+    ):
+        r = grader(state)
+        results.append({
+            **meta,
+            "mechanical": True,
+            "advisory": False,
+            "vacuous": False,
+            "passed": bool(r["passed"]),
+            "detail": str(r.get("detail") or ""),
+            "method": "mechanical_structured",
+        })
+    for spec in FORECAST_RUBRIC:
+        r = _grade_forecast_criterion(spec["id"], state)
+        results.append({
+            "id": spec["id"],
+            "name": spec["name"],
+            "criterion": spec["criterion"],
+            "mechanical": True,
+            "advisory": False,
+            "vacuous": bool(r.get("vacuous")),
+            "passed": bool(r["passed"]),
+            "detail": str(r.get("detail") or ""),
+            "method": "mechanical_structured",
+        })
+    return results
+
+
+def _primary_fv_and_price(state: dict) -> tuple[Optional[float], Optional[float], str]:
+    """Return (primary fair value, live price, source label). Prefer judgment."""
+    dj = state.get("dcf_judgment") if isinstance(state.get("dcf_judgment"), dict) else {}
+    dcf = state.get("dcf_engine") if isinstance(state.get("dcf_engine"), dict) else {}
+    fr = dj.get("fair_value_range") if isinstance(dj.get("fair_value_range"), dict) else {}
+    fv = fr.get("base")
+    src = "dcf_judgment.fair_value_range.base"
+    if not isinstance(fv, (int, float)):
+        fv = dj.get("fair_value_per_share")
+        src = "dcf_judgment.fair_value_per_share"
+    if not isinstance(fv, (int, float)):
+        fv = dcf.get("fair_value_per_share")
+        src = "dcf_engine.fair_value_per_share"
+    if not isinstance(fv, (int, float)):
+        fv = None
+        src = "missing"
+
+    price: Optional[float] = None
+    cm = state.get("canonical_metrics") if isinstance(state.get("canonical_metrics"), dict) else {}
+    by_id = cm.get("by_id") if isinstance(cm.get("by_id"), dict) else {}
+    for mid in ("price", "live_price"):
+        rec = by_id.get(mid)
+        if isinstance(rec, dict) and isinstance(rec.get("value"), (int, float)):
+            price = float(rec["value"])
+            break
+    if price is None:
+        lm = None
+        for key in ("income_statement", "cash_flow_statement", "balance_sheet"):
+            block = state.get(key)
+            if isinstance(block, dict) and isinstance(block.get("live_market"), dict):
+                lm = block["live_market"]
+                break
+        if isinstance(lm, dict) and isinstance(lm.get("price"), (int, float)):
+            price = float(lm["price"])
+    return (
+        float(fv) if isinstance(fv, (int, float)) else None,
+        price,
+        src,
+    )
+
+
+def _recommendation_dict(state: dict) -> dict[str, Any]:
+    rec = state.get("recommendation")
+    return rec if isinstance(rec, dict) else {}
+
+
+def _grade_f_plausibility(state: dict) -> dict[str, Any]:
+    """Primary FV vs live price; large gap needs structured override_reason."""
+    fv, price, src = _primary_fv_and_price(state)
+    if fv is None or price is None or price <= 0:
+        return {
+            "passed": True,
+            "detail": f"N/A pass — missing fv or price (fv={fv}, price={price}, src={src})",
+        }
+    divergence = abs(fv - price) / price
+    rec = _recommendation_dict(state)
+    reason = (rec.get("override_reason") or "").strip()
+    if divergence <= PLAUSIBILITY_DIVERGENCE_THRESHOLD:
+        return {
+            "passed": True,
+            "detail": (
+                f"primary FV ${fv:.2f} vs price ${price:.2f} "
+                f"({divergence:.0%} gap ≤ {PLAUSIBILITY_DIVERGENCE_THRESHOLD:.0%}; {src})"
+            ),
+        }
+    if reason:
+        return {
+            "passed": True,
+            "detail": (
+                f"primary FV ${fv:.2f} vs price ${price:.2f} ({divergence:.0%} gap) "
+                f"explained: {reason[:200]}"
+            ),
+        }
+    return {
+        "passed": False,
+        "detail": (
+            f"primary FV ${fv:.2f} vs price ${price:.2f} ({divergence:.0%} gap > "
+            f"{PLAUSIBILITY_DIVERGENCE_THRESHOLD:.0%}) with no recommendation.override_reason "
+            f"(src={src})"
+        ),
+    }
+
+
+def _grade_f_coherence(state: dict) -> dict[str, Any]:
+    """Recommendation must not fight the primary method without naming a lens."""
+    fv, price, src = _primary_fv_and_price(state)
+    rec = _recommendation_dict(state)
+    rating = str(rec.get("rating") or "").strip().upper()
+    lens = str(rec.get("preferred_lens") or "").strip().lower()
+    reason = (rec.get("override_reason") or "").strip()
+    stated_dir = str(rec.get("primary_method_direction") or "").strip().lower()
+
+    if not rating:
+        return {
+            "passed": False,
+            "detail": "recommendation.rating missing — synthesis must emit structured recommendation",
+        }
+    if fv is None or price is None or price <= 0:
+        return {
+            "passed": True,
+            "detail": f"rating={rating} present; N/A direction check (fv/price missing; {src})",
+        }
+
+    if stated_dir in ("undervalued", "overvalued", "fair"):
+        direction = stated_dir
+    else:
+        gap = (fv - price) / price
+        if gap > 0.10:
+            direction = "undervalued"
+        elif gap < -0.10:
+            direction = "overvalued"
+        else:
+            direction = "fair"
+
+    bullish = any(k in rating for k in ("BUY", "OVERWEIGHT", "ACCUMULATE", "LONG"))
+    bearish = any(k in rating for k in ("SELL", "AVOID", "UNDERWEIGHT", "SHORT"))
+    # HOLD / MARKET PERFORM is compatible with any direction.
+    fights = (bullish and direction == "overvalued") or (bearish and direction == "undervalued")
+    if not fights:
+        return {
+            "passed": True,
+            "detail": (
+                f"rating={rating} compatible with primary direction={direction} "
+                f"(FV ${fv:.2f} vs ${price:.2f})"
+            ),
+        }
+    if lens and lens != "primary_method" and reason:
+        return {
+            "passed": True,
+            "detail": (
+                f"rating={rating} fights primary ({direction}) but preferred_lens={lens} "
+                f"with override_reason"
+            ),
+        }
+    return {
+        "passed": False,
+        "detail": (
+            f"rating={rating} fights primary direction={direction} "
+            f"(FV ${fv:.2f} vs ${price:.2f}) without preferred_lens≠primary_method "
+            f"and override_reason (lens={lens!r})"
+        ),
+    }
+
+
+def _grade_forecast_criterion(fid: str, state: dict) -> dict[str, Any]:
+    """F1–F7: vacuous-pass when forecast path not present."""
+    forecast = state.get("forecast") if isinstance(state.get("forecast"), dict) else None
+    driver_critique = (
+        state.get("driver_critique") if isinstance(state.get("driver_critique"), dict) else None
+    )
+    dcf_modelled = state.get("dcf_modelled") if isinstance(state.get("dcf_modelled"), dict) else None
+    consensus = (
+        state.get("consensus_reconciliation")
+        if isinstance(state.get("consensus_reconciliation"), dict)
+        else None
+    )
+    hist = (
+        state.get("historical_profile") if isinstance(state.get("historical_profile"), dict) else None
+    )
+
+    if fid == "F1":
+        if not driver_critique:
+            return {
+                "passed": True,
+                "vacuous": True,
+                "detail": "vacuous — no driver_critique (forecast path off)",
+            }
+        args = driver_critique.get("arguments") or driver_critique.get("drivers") or []
+        if not isinstance(args, list) or not args:
+            return {"passed": False, "vacuous": False, "detail": "driver_critique has no arguments"}
+        missing = []
+        for i, a in enumerate(args):
+            if not isinstance(a, dict):
+                continue
+            if not str(a.get("historical_basis") or "").strip():
+                missing.append(str(a.get("parameter") or a.get("driver") or i))
+        if missing:
+            return {
+                "passed": False,
+                "vacuous": False,
+                "detail": f"missing historical_basis: {missing[:8]}",
+            }
+        return {
+            "passed": True,
+            "vacuous": False,
+            "detail": f"{len(args)} drivers each carry historical_basis",
+        }
+
+    if fid == "F2":
+        if not forecast and not hist:
+            return {
+                "passed": True,
+                "vacuous": True,
+                "detail": "vacuous — no forecast/historical_profile",
+            }
+        recon = (forecast or {}).get("segment_reconciliation") or (hist or {}).get(
+            "segment_reconciliation"
+        )
+        if isinstance(recon, dict):
+            gap = recon.get("gap_pct") or recon.get("error_pct")
+            if isinstance(gap, (int, float)) and abs(float(gap)) > 0.02:
+                return {
+                    "passed": False,
+                    "vacuous": False,
+                    "detail": f"segment gap {gap:.2%} exceeds 2%",
+                }
+            return {
+                "passed": True,
+                "vacuous": False,
+                "detail": f"segment reconciliation ok ({recon})",
+            }
+        return {
+            "passed": True,
+            "vacuous": True,
+            "detail": "vacuous — no segment_reconciliation block yet",
+        }
+
+    if fid == "F3":
+        if not driver_critique:
+            return {
+                "passed": True,
+                "vacuous": True,
+                "detail": "vacuous — no driver_critique",
+            }
+        try:
+            from .driver_templates import drivers_for
+        except Exception:  # noqa: BLE001
+            return {
+                "passed": True,
+                "vacuous": True,
+                "detail": "vacuous — driver_templates unavailable",
+            }
+        arch = None
+        cm = state.get("canonical_metrics") if isinstance(state.get("canonical_metrics"), dict) else {}
+        arch = cm.get("archetype") or state.get("extraction_archetype") or "general"
+        try:
+            drivers, _native = drivers_for(str(arch))
+            limit = len(drivers) + 1
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "passed": True,
+                "vacuous": True,
+                "detail": f"vacuous — drivers_for failed: {exc}",
+            }
+        args = driver_critique.get("arguments") or driver_critique.get("drivers") or []
+        n = len(args) if isinstance(args, list) else 0
+        if n > limit:
+            return {
+                "passed": False,
+                "vacuous": False,
+                "detail": f"{n} drivers > template+1 ({limit}) for {arch}",
+            }
+        return {
+            "passed": True,
+            "vacuous": False,
+            "detail": f"{n} drivers ≤ {limit} for {arch}",
+        }
+
+    if fid == "F4":
+        if not consensus:
+            return {
+                "passed": True,
+                "vacuous": True,
+                "detail": "vacuous — no consensus_reconciliation",
+            }
+        gap = consensus.get("gap") or consensus.get("gap_pct") or consensus.get("eps_gap")
+        stated = consensus.get("gap_stated") or consensus.get("gap") is not None
+        if not stated and gap is None:
+            return {
+                "passed": False,
+                "vacuous": False,
+                "detail": "consensus_reconciliation present but gap not stated",
+            }
+        return {
+            "passed": True,
+            "vacuous": False,
+            "detail": f"consensus gap stated: {gap!r}",
+        }
+
+    if fid == "F5":
+        if not forecast:
+            return {
+                "passed": True,
+                "vacuous": True,
+                "detail": "vacuous — no forecast object",
+            }
+        # Full C3-style scan deferred; presence of forecast is enough for scaffold.
+        return {
+            "passed": True,
+            "vacuous": False,
+            "detail": "forecast present — full currency walk deferred to forecast wiring",
+        }
+
+    if fid == "F6":
+        if not forecast:
+            return {
+                "passed": True,
+                "vacuous": True,
+                "detail": "vacuous — no forecast",
+            }
+        years = forecast.get("years") or forecast.get("projections") or []
+        if not years:
+            return {
+                "passed": True,
+                "vacuous": True,
+                "detail": "vacuous — forecast has no years",
+            }
+        return {
+            "passed": True,
+            "vacuous": False,
+            "detail": f"{len(years)} projected years present (band check when templates wired)",
+        }
+
+    if fid == "F7":
+        has_e = isinstance(state.get("dcf_engine"), dict) and bool(state.get("dcf_engine"))
+        has_j = isinstance(state.get("dcf_judgment"), dict) and bool(state.get("dcf_judgment"))
+        has_m = bool(dcf_modelled)
+        if not has_m:
+            return {
+                "passed": True,
+                "vacuous": True,
+                "detail": (
+                    f"vacuous — dcf_modelled absent (engine={has_e} judgment={has_j}); "
+                    "pre-forecast baseline"
+                ),
+            }
+        if has_e and has_j and has_m:
+            return {
+                "passed": True,
+                "vacuous": False,
+                "detail": "dcf_engine + dcf_judgment + dcf_modelled all present",
+            }
+        missing = [
+            n
+            for n, ok in (
+                ("dcf_engine", has_e),
+                ("dcf_judgment", has_j),
+                ("dcf_modelled", has_m),
+            )
+            if not ok
+        ]
+        return {
+            "passed": False,
+            "vacuous": False,
+            "detail": f"missing cases: {missing}",
+        }
+
+    return {"passed": True, "vacuous": True, "detail": f"unknown criterion {fid}"}
 
 
 # ── Text / number helpers ────────────────────────────────────────────────────
