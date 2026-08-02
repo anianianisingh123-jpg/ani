@@ -979,15 +979,25 @@ def _residual_income_case(
 ) -> dict[str, Any]:
     """Recompute one finite residual-income case from explicit assumptions."""
     result = deepcopy(base)
+    result["errors"] = list(base.get("errors") or [])
     inputs = result.get("inputs") or {}
     equity = inputs.get("book_equity")
     shares = inputs.get("shares")
     price = inputs.get("price")
+    # A case that cannot be computed must say why. Returning the base unchanged
+    # left `equity_value=None` with `errors=[]` and a trailing warning implying
+    # the model had run — a silent failure that reports success, which is the
+    # failure class FWD07_REVIEW exists to eliminate.
     if not isinstance(equity, (int, float)) or equity <= 0:
-        return result
-    if not isinstance(shares, (int, float)) or shares <= 0:
+        result["errors"].append(
+            "residual income: book equity missing or non-positive"
+        )
         return result
     if cost_of_equity <= 0 or fade_years <= 0:
+        result["errors"].append(
+            f"residual income: invalid cost of equity ({cost_of_equity}) "
+            f"or fade window ({fade_years})"
+        )
         return result
 
     bv = float(equity)
@@ -1010,8 +1020,17 @@ def _residual_income_case(
         )
         bv *= 1.0 + max(-0.95, min(0.50, roe * float(plowback)))
 
+    # Equity value does not depend on the share count — only the per-share
+    # figure does. Gating both on `shares` threw away a computable valuation
+    # whenever the share count was absent.
     equity_value = float(equity) + total_pv_ri
-    fair_value = equity_value / float(shares)
+    has_shares = isinstance(shares, (int, float)) and shares > 0
+    fair_value = equity_value / float(shares) if has_shares else None
+    if not has_shares:
+        result.setdefault("warnings", []).append(
+            "Share count unavailable — residual-income equity value computed, "
+            "but no per-share fair value."
+        )
     result["inputs"] = {
         **inputs,
         "cost_of_equity": float(cost_of_equity),
@@ -1032,7 +1051,7 @@ def _residual_income_case(
     result["equity_value"] = equity_value
     result["fair_value_per_share"] = fair_value
     result["fair_value_range"] = None
-    if isinstance(price, (int, float)) and price > 0:
+    if fair_value is not None and isinstance(price, (int, float)) and price > 0:
         result["implied_upside_vs_price"] = fair_value / float(price) - 1.0
     return result
 
@@ -1046,13 +1065,22 @@ def _ffo_nav_case(
 ) -> dict[str, Any]:
     """Recompute one FFO/NAV case; both anchors are independently observable."""
     result = deepcopy(base)
+    result["errors"] = list(base.get("errors") or [])
     inputs = result.get("inputs") or {}
     ffo = inputs.get("ffo")
     shares = inputs.get("shares")
     price = inputs.get("price")
+    # As in _residual_income_case: never fail silently. FFO per share genuinely
+    # requires the share count, so this path cannot proceed without it — but it
+    # must record that rather than return an empty result with no error.
     if not isinstance(ffo, (int, float)) or ffo <= 0:
+        result["errors"].append("ffo_nav: FFO missing or non-positive")
         return result
-    if not isinstance(shares, (int, float)) or shares <= 0 or cap_rate <= 0:
+    if not isinstance(shares, (int, float)) or shares <= 0:
+        result["errors"].append("ffo_nav: share count missing or non-positive")
+        return result
+    if cap_rate <= 0:
+        result["errors"].append(f"ffo_nav: invalid cap rate {cap_rate}")
         return result
 
     ffo_per_share = float(ffo) / float(shares)

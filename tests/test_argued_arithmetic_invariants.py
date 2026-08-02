@@ -442,3 +442,53 @@ def test_non_fcf_disclosure_only_fires_for_actual_fcf_arguments():
         "Argued FCF inputs not applied" in warning
         for warning in legacy.get("clamp_warnings") or []
     )
+
+
+# ── Invariant 3: a case never fails silently ─────────────────────────────────
+#
+# Added after the FWD-01b non-FCF paths landed. `_residual_income_case` and
+# `_ffo_nav_case` guarded on missing inputs by returning the base unchanged —
+# `equity_value=None`, `errors=[]`, and a trailing warning stating the model had
+# run. `_excess_return_on_equity` then reported success having computed nothing.
+# Producing neither a number nor a reason is the failure mode this whole review
+# exists to eliminate, so it gets an invariant of its own.
+
+def test_residual_income_reports_a_reason_when_it_cannot_compute():
+    from mas_sector_system.valuation_engine import _residual_income_case
+
+    base = {"inputs": {"book_equity": None, "shares": 3e9}, "errors": []}
+    out = _residual_income_case(
+        base, cost_of_equity=0.09, sustainable_roe=0.15,
+        fade_roe=0.09, fade_years=10, plowback=0.5,
+    )
+    assert out.get("equity_value") is None
+    assert out.get("errors"), "computed nothing and reported no reason"
+
+
+def test_residual_income_still_values_equity_without_a_share_count():
+    """Equity value does not depend on share count — only per-share does."""
+    from mas_sector_system.valuation_engine import _residual_income_case
+
+    base = {"inputs": {"book_equity": 300e9, "shares": None}, "errors": []}
+    out = _residual_income_case(
+        base, cost_of_equity=0.09, sustainable_roe=0.1667,
+        fade_roe=0.09, fade_years=10, plowback=0.5,
+    )
+    assert isinstance(out.get("equity_value"), float), out.get("errors")
+    assert out.get("fair_value_per_share") is None
+    assert any("share count" in w.lower() for w in out.get("warnings") or [])
+
+
+def test_ffo_nav_reports_a_reason_when_it_cannot_compute():
+    from mas_sector_system.valuation_engine import _ffo_nav_case
+
+    for inputs in (
+        {"ffo": None, "shares": 1e9},
+        {"ffo": 4e9, "shares": None},
+    ):
+        out = _ffo_nav_case(
+            {"inputs": inputs, "errors": []},
+            ffo_multiple=20.0, cap_rate=0.05, nav_discount=0.0,
+        )
+        assert out.get("fair_value_per_share") is None
+        assert out.get("errors"), f"silent failure on {inputs}"
