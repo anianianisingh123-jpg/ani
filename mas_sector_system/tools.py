@@ -1029,6 +1029,12 @@ def fetch_live_market_snapshot(ticker: str) -> dict[str, Any]:
             "price": price,
             "market_cap": mcap,
             "shares_outstanding": shares,
+            # Observed beta is the preferred input to the cost of equity
+            # (VAL-19). Without it the engine re-levers a sector unlevered beta,
+            # which is only as granular as the archetype: NVDA and QCOM both key
+            # to `general` and get 0.95 against a real NVDA beta near 2, which
+            # understates their discount rate materially.
+            "beta": info.get("beta"),
             "fifty_two_week_high": info.get("fiftyTwoWeekHigh"),
             "fifty_two_week_low": info.get("fiftyTwoWeekLow"),
             "error": None,

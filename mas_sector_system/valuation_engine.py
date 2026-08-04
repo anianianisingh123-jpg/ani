@@ -11,6 +11,8 @@ from itertools import product
 from statistics import median
 from typing import Any, Optional
 
+from .cost_of_capital import compute_cost_of_capital
+
 
 ARGUED_INPUT_BOUNDS: dict[str, tuple[float, float]] = {
     "wacc": (0.05, 0.20),
@@ -725,6 +727,7 @@ def compute_dcf(
     ticker: str = "",
     high_growth_years: int = 5,
     fade_years: int = 5,
+    cost_of_capital: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Multi-stage FCF DCF with explicit sector defaults.
 
@@ -764,6 +767,27 @@ def compute_dcf(
     prior_fcf = fcf.get("prior_annual")
 
     wacc, g_term = SECTOR_WACC.get(_sector_key(sector), SECTOR_WACC["DEFAULT"])
+
+    # ── Discount rate: company-specific when the filing supports it (VAL-19) ─
+    # `compute_dcf` stays state-free, so the block is computed by
+    # `compute_dcf_from_state` and passed in. A caller that supplies nothing
+    # keeps the sector constant, which is what every existing test does.
+    coc_warnings: list[str] = []
+    if isinstance(cost_of_capital, dict) and cost_of_capital.get("wacc"):
+        wacc = float(cost_of_capital["wacc"])
+        coc_warnings = list(cost_of_capital.get("warnings") or [])
+        # The Gordon denominator is (wacc - g_terminal). A sector constant was
+        # always comfortably clear of terminal growth; a computed rate is not
+        # guaranteed to be. Clamp rather than error — a utility or a staple can
+        # legitimately compute near 5-6% against a 2.5-3.0% terminal.
+        ceiling = wacc - 0.015
+        if g_term > ceiling:
+            coc_warnings.append(
+                f"Terminal growth {g_term:.2%} clamped to {max(0.0, ceiling):.2%} "
+                f"to keep it 150bp below the computed WACC of {wacc:.2%} "
+                "(Gordon denominator constraint)."
+            )
+            g_term = max(0.0, ceiling)
 
     # ── Base FCF: normalized over the filing history ────────────────────────
     # `normalize_base_fcf` is the same implementation the argued path uses, so
@@ -857,9 +881,12 @@ def compute_dcf(
             "high_growth_years": high_growth_years,
             "fade_years": fade_years,
             "base_fcf_method": base_fcf_method,
+            "wacc_basis": (
+                (cost_of_capital or {}).get("basis") or "sector_default"
+            ),
             "note": (
-                "WACC and terminal growth are sector defaults, not company-specific "
-                "estimates. Change g_high / WACC to stress the model. Base FCF and "
+                "Terminal growth is a sector default. Change g_high / WACC to "
+                "stress the model. Base FCF and "
                 "g_high are normalized over the filing history, not read off the "
                 "latest year — see base_fcf_method and g_high_source."
             ),
@@ -874,7 +901,8 @@ def compute_dcf(
         "trailing_pe": None,
         "confidence": "moderate",
         "errors": [],
-        "warnings": list(base_fcf_warnings),
+        "warnings": [*base_fcf_warnings, *coc_warnings],
+        "cost_of_capital": cost_of_capital or None,
     }
 
     # A normalized base that lands far from the trailing print is the signal the
@@ -1277,8 +1305,19 @@ def _excess_return_on_equity(state: dict, *, archetype: str) -> dict[str, Any]:
     roe = inp.get("roe")
     shares = inp.get("shares")
     price = inp.get("price")
-    # Cost of equity: sector default WACC as proxy
-    r_e, g = SECTOR_WACC.get(_sector_key(sector), SECTOR_WACC["DEFAULT"])
+    # Cost of equity, company-specific where the filing supports it (VAL-19).
+    # Was the sector-default WACC used as a proxy for every bank and insurer
+    # alike. `fade_roe` deliberately follows it: the whole construct is that
+    # excess return decays to the cost of equity, so hardcoding one while
+    # computing the other would make the fade converge on the wrong number.
+    r_e_default, g = SECTOR_WACC.get(_sector_key(sector), SECTOR_WACC["DEFAULT"])
+    coc = compute_cost_of_capital(
+        state,
+        archetype=archetype,
+        sector_default_wacc=r_e_default,
+        observed_beta=_live_market_from_state(state).get("beta"),
+    )
+    r_e = coc.get("cost_of_equity") or r_e_default
     result: dict[str, Any] = {
         "method": "excess_return_on_equity",
         "archetype": archetype,
@@ -1298,11 +1337,13 @@ def _excess_return_on_equity(state: dict, *, archetype: str) -> dict[str, Any]:
             "fade_roe": r_e,
             "fade_years": 10,
             "plowback": 0.5,
+            "cost_of_equity_basis": coc.get("basis"),
             "note": (
                 "Residual income: equity_value ≈ BV + Σ PV[(ROE − r_e) × BV_t]. "
                 "Bank/insurer FCF DCF is invalid — this is the intentional path."
             ),
         },
+        "cost_of_capital": coc,
         "enterprise_value": None,
         "equity_value": None,
         "fair_value_per_share": None,
@@ -1509,6 +1550,14 @@ def compute_dcf_from_state(state: dict) -> dict[str, Any]:
         live_market=_live_market_from_state(state),
         sector=sector,
         ticker=ticker,
+        cost_of_capital=compute_cost_of_capital(
+            state,
+            archetype=archetype,
+            sector_default_wacc=SECTOR_WACC.get(
+                _sector_key(sector), SECTOR_WACC["DEFAULT"]
+            )[0],
+            observed_beta=_live_market_from_state(state).get("beta"),
+        ),
     )
     dcf["archetype"] = archetype
     dcf["method_requested"] = method
