@@ -11,6 +11,7 @@ from itertools import product
 from statistics import median
 from typing import Any, Optional
 
+from .consensus import consensus_cross_check, consensus_growth_for_year_one
 from .cost_of_capital import compute_cost_of_capital
 
 
@@ -728,6 +729,8 @@ def compute_dcf(
     high_growth_years: int = 5,
     fade_years: int = 5,
     cost_of_capital: Optional[dict[str, Any]] = None,
+    consensus: Optional[dict[str, Any]] = None,
+    year_one_growth: Optional[float] = None,
 ) -> dict[str, Any]:
     """Multi-stage FCF DCF with explicit sector defaults.
 
@@ -903,7 +906,10 @@ def compute_dcf(
         "errors": [],
         "warnings": [*base_fcf_warnings, *coc_warnings],
         "cost_of_capital": cost_of_capital or None,
+        "consensus": consensus or None,
     }
+    if isinstance(consensus, dict) and consensus.get("disclosure"):
+        result["warnings"].append(consensus["disclosure"])
 
     # A normalized base that lands far from the trailing print is the signal the
     # writer needs most: it means the latest year is not representative, which
@@ -942,14 +948,29 @@ def compute_dcf(
 
     for i in range(1, high_growth_years + 1):
         year = i
-        fcf_t = fcf_t * (1.0 + g_high)
+        # Year 1 may be anchored on a consensus forward estimate; later years
+        # always run on the historical trend. `year_one_growth` is only ever
+        # supplied when the base was NOT normalized — see
+        # `consensus.consensus_growth_for_year_one` for why applying both a
+        # normalized base and consensus growth double-counts the same recovery.
+        growth_i = (
+            float(year_one_growth)
+            if (i == 1 and year_one_growth is not None)
+            else g_high
+        )
+        fcf_t = fcf_t * (1.0 + growth_i)
         pv = fcf_t / ((1.0 + wacc) ** year)
         total_pv += pv
         projections.append(
             {
                 "year": year,
                 "stage": "high_growth",
-                "growth": g_high,
+                "growth": growth_i,
+                "source": (
+                    "consensus_forward"
+                    if (i == 1 and year_one_growth is not None)
+                    else "historical_trend"
+                ),
                 "fcf": fcf_t,
                 "pv": pv,
             }
@@ -1542,14 +1563,38 @@ def compute_dcf_from_state(state: dict) -> dict[str, Any]:
             "projections": [],
         }
 
+    # Consensus forward estimate (VAL-20). Resolved here rather than inside
+    # `compute_dcf` because it reads the comps subject row off state. The base
+    # is resolved with the same shared helper the DCF uses, so the cross-check
+    # compares against exactly the number that gets discounted.
+    _cash_flow = state.get("cash_flow_statement") or {}
+    _income = state.get("income_statement") or {}
+    _base_fcf, _base_method, _ = normalize_base_fcf(
+        fcf_history_from_statements(_cash_flow, _income),
+        extract_fcf_series(_cash_flow).get("current_annual"),
+        "mid_cycle",
+    )
+    consensus_block = consensus_cross_check(
+        state, engine_base_fcf=_base_fcf, base_fcf_method=_base_method
+    )
+    year_one_growth, year_one_reason = consensus_growth_for_year_one(
+        state, base_fcf_method=_base_method
+    )
+    consensus_block["year_one_growth_applied"] = year_one_growth
+    consensus_block["year_one_growth_note"] = year_one_reason
+    if year_one_growth is not None:
+        consensus_block["applied_as"] = "year_one_growth_and_cross_check"
+
     # Cycle-normalized FCF: use standard DCF but flag that base should be mid-cycle.
     dcf = compute_dcf(
-        cash_flow=state.get("cash_flow_statement") or {},
-        income=state.get("income_statement") or {},
+        cash_flow=_cash_flow,
+        income=_income,
         balance=state.get("balance_sheet") or {},
         live_market=_live_market_from_state(state),
         sector=sector,
         ticker=ticker,
+        consensus=consensus_block,
+        year_one_growth=year_one_growth,
         cost_of_capital=compute_cost_of_capital(
             state,
             archetype=archetype,
