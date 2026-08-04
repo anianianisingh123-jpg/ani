@@ -591,3 +591,58 @@ The 5-year historical foundation already exists — all three statements carry `
   So the `wacc → cost_of_equity` and `g_high → plowback` shim at `_non_fcf_ranges` (commented as "compatibility for the committed 2026-07-30 critiques") is **not** serving legacy data — it is the only path, and it silently reinterprets intent on every live run. JPM's `wacc [0.09, 0.105]` was reasoned about as a DCF discount rate and consumed as cost of equity; its `g_high [0.03, 0.05]` became `plowback 0.254` via `growth/roe`, a parameter nobody argued. PLD's six arguments map to no FFO/NAV dial at all, which is why it lands in the convention fallback. **Two consequences:** (a) C2 ("every argued input cites ≥1 resolvable evidence field") is passing on these three while the cited evidence was written about a different quantity; (b) the shim should be deleted, not extended, once the prompts are fixed. The remaining work is in `agents.py` — teach `fundamental:critique` which dials exist for the archetype it is looking at, and extend `ARGUED_INPUT_BOUNDS` to accept them.
 - **OPEN — @Grok, three smaller items.** (1) C8 still LLM-judged and unpinned; it is advisory now, which is honest, but 3/8 pass rate with no distribution recorded is not yet a measurement. (2) KO now FAILS C1 — this is the confound being *removed*, not a regression: the old prompt named the archetype for it and the new one does not. Worth stating explicitly in the comparison doc so nobody reads it as damage. (3) The `_fwd_baseline` artifacts are untracked but still on disk — that resolves the gitignore contradiction, but the FWD-07 "before" reference is now local-only. Fine if intentional; say so.
 - **Status:** COMPLETED (review + both fixes); the FWD-01b critique-prompt gap is the one substantive item still open.
+
+### [2026-08-03] - [Claude/Opus-5] - [VAL-17: history-based DCF default + VAL-18: headline extraction]
+
+- **What I changed:** Two user-directed fixes off a full re-read of the codebase and graph. Full observation write-up in `REVIEW_2026-08-03.md` (repo root, 7 findings ranked). These are findings F1 and F2; F3–F7 remain open and are described there. Suite **263 → 288 pass, 0 fail**.
+- **Files modified:** `valuation_engine.py`, `artifacts.py`, `agents.py` (synthesis prompt only), `pdf_generator.py` (cover basis labels); new `tests/test_history_based_dcf_default.py` (11), `tests/test_headline_extraction.py` (14); new harness `tmp/prove_base_fcf.py`. **`driver_templates.py` / `test_driver_templates.py` left unstaged** — still in-flight, not mine (same convention as FWD-07-FIX).
+- **Ownership note:** `valuation_engine.py` is Codex's lane; edited on explicit user instruction. @Codex please review rather than assume.
+
+**VAL-17 — the anchor case read one year for both the level and the slope.**
+`compute_dcf` took base FCF from `current_annual` and `g_high` from that year's FCF YoY, capped, then ran it for five years and faded. A single unrepresentative year therefore set the entire projection. The five-year history VAL-10/VAL-12 built was reachable *only* when the model argued `base_fcf_method`; the default never opened it.
+
+Default is now `mid_cycle` (median FCF margin over the history × current revenue) with `g_high` from the **revenue** CAGR. Revenue, not FCF, because the base is already margin-normalized — running the trend off FCF would count the same margin recovery twice. Both are still purely mechanical; no judgment enters.
+
+Offline re-run over the committed `*_state_slice_fwd_clean` slices (`tmp/prove_base_fcf.py`, no API spend):
+
+| | price | FV before | FV after | upside before | upside after | base FCF | g_high |
+|---|---|---|---|---|---|---|---|
+| NVDA | $200.75 | $318.63 | $315.66 | +58.7% | +57.2% | 96.68B → 95.78B | 35.0% → 35.0% (both capped) |
+| QCOM | $147.61 | $335.83 | $206.32 | +127.5% | **+39.8%** | 12.82B → 12.18B | 14.9% → 7.2% |
+| CRM | $184.02 | $610.92 | $383.21 | +232.0% | **+108.2%** | 14.40B → 11.31B | 15.8% → 11.9% |
+| KO | $87.59 | $24.76 | $36.68 | −71.7% | **−58.1%** | 5.30B → **10.21B** | 11.7% → 5.5% |
+| CVX | $196.83 | $150.40 | $115.53 | −23.6% | −41.3% | 16.59B → 18.61B | 10.3% → 3.9% |
+
+JPM / PGR / PLD are non-FCF methods and are untouched by this change.
+
+Five things to know:
+1. **`avg_5y` was rejected as the default** for the opposite failure mode: it anchors NVDA at $39.3B against a $96B run-rate, penalizing genuine growth exactly as the §4.6 note warned. `mid_cycle` moves KO by +93% while leaving NVDA within 1% — a default should only move unrepresentative years.
+2. **`compute_dcf` now writes `inputs["base_fcf_method"]`, and the argued path reads it as the neutral basis.** This was a live landmine: `compute_dcf_with_argued_inputs` hardcoded `or "ttm"` for an unargued method, so once the engine moved to `mid_cycle` the `neutral_case` would have rebased to a different world from `base` and every sensitivity delta would again be measured across two bases — the exact bug FWD-07-FIX killed on KO and QCOM. Guarded by `test_unargued_base_keeps_the_neutral_case_on_the_engine_basis`.
+3. **Expect KO's `base_fcf_method` sensitivity row to disappear**, and do not read that as losing the FWD-07-FIX win. That row only emits when `neutral_fv != engine_fv`; with `mid_cycle` as the default, a model arguing `mid_cycle` is a no-op. The lever is now in the default rather than needing to be argued into it.
+4. **CVX moved further from price (−23.6% → −41.3%), and that is the fix working.** Its +10.3% FCF YoY was noise; +3.9% revenue CAGR is defensible for a major. A DCF is not supposed to reproduce the market price. Its `cyclical_commodity` warning was rewritten — the old text ("FCF base is trailing, not mid-cycle normalized") became false. The base IS margin-normalized now; what is still missing is **price-deck** normalization, which a five-year median margin does not provide. Method string deliberately unchanged (`compute_dcf_with_argued_inputs` gates on it).
+5. **Callers without `annual_series` keep the exact old behaviour** (ttm base, fcf_yoy growth) — verified, and that fallback is why the pre-existing 263 tests all still passed without touching the new path. The new tests use real KO/NVDA histories and are written to fail against the old code: `test_*_would_fail_on_single_year_basis` pin $5.296B and 11.7%, which is precisely what the old path returns when history is stripped.
+
+**Still open on valuation calibration (not fixed here, deliberately):** WACC and `g_terminal` remain sector constants (KO gets 9.0% / 2.5%), and the 35% `g_high` cap is what still drives NVDA. KO lands ~$37 against $87.59, so the dispersion is narrowed (−72%…+232% → −58%…+108%), **not closed**. Those two constants are the next lever and are a product decision, not a bug.
+
+**VAL-18 — the published rating/target could contradict the memo.**
+`_PRICE_TARGET_RE` included `fair value`, so the scrape lifted deterministic engine output and published it as the desk's target in `clean_memo.json` and on the deck cover. All four extracted targets in the 2026-08-01 run were wrong:
+
+- KO `HOLD` / `$24.76` — the mechanical DCF the memo spends two paragraphs arguing down
+- QCOM `HOLD` / `$335.83` — a figure the memo explicitly rejects as peak extrapolation
+- PGR `HOLD` / `$132.28` — the residual-income engine output
+- NVDA `BUY` / `$192.40` — **a sensitivity probe.** The memo says "move that single dominant lever from 0.35 to 0.25 in isolation, fair value falls to $192.40". That was never a target in any sense.
+
+None of those four memos issues a numeric target. All four now resolve to `null`, which is the correct answer and a legitimate stance on a HOLD.
+
+1. **`resolve_headline(state, prose)` is the single entry point.** Order: the synthesis ```recommendation fence (Grok's FWD-06 channel, now carrying `price_target`) → prose scrape → `None`. New `headline_source` field on the clean memo records which channel won ("structured" | "parsed" | "none"); a consumer needing a guaranteed target should require `"structured"`.
+2. **`fair value` is out of the pattern, and there is a second guard**: a scraped number equal to any `dcf_engine` / `dcf_judgment` / `comps_engine` / `comps_judgment` per-share figure is discarded. A false negative is acceptable here — a null target is recoverable, a fabricated one on a client cover is not.
+3. **Deck cover labels corrected.** "Price target … Engine fair value" was doubly wrong (scraped from prose, labelled as engine); the basis column now reads "Desk view" / "Memo text" / "None issued". "Implied upside" is now labelled "DCF vs. last price" — the shipped 2026-07-30 QCOM cover read `Implied upside 121.5%` beside `Rating HOLD` with nothing saying the two came from different places. Verified by re-rendering QCOM: cover now reads `Price target — / None issued`.
+4. **Synthesis prompt gained `price_target` in the fence** with an explicit instruction that null beats restating an engine figure it just argued against. **This only takes effect on the next live run** — stored artifacts keep whatever they had, and the eight slices resolve through the prose path.
+5. **OUT-03 can be closed** by this if the desk accepts "null unless the memo states a target". The remaining half is confirming the model actually populates the fence — needs one live run.
+
+- **Two follow-ups caught on review of this work:**
+  1. **`format_dcf_for_prompt` was labelling the normalized base "current annual" beside the prior year.** On KO that read as $10.21B vs $4.74B — implying 116% FCF growth when the filed year was $5.30B. The block now names the construct ("Base FCF (mid_cycle, normalized over 5 annual periods) — NOT a filed figure"), reports the filed figure separately, and instructs the writer not to compare it to the prior year. Without this the fix would have produced exactly the F3-class defect it was meant to avoid: prose describing one quantity while the number means another.
+  2. **`clean_memo.json` stays at schema 1.1** with `headline_source` added. Deliberate: the field is additive and optional, and **1.2 is reserved for VAL-08** (judgment blocks), which is a real shape change. Consumers should test for the key, not the version.
+
+- **Not done:** F3 (archetype-blind critique prompt — banks/insurers/REITs still argued with FCF dials and silently reinterpreted), F4 (Epic F is dark code; 10 of 16 archetypes have drivers with no computable history), F5 (judgment layer still absent from the clean memo / football field — schema still 1.1), F6 (no offline mock-LLM harness, so the graph still cannot be exercised without spend), F7 (uncommitted driver-template work, branch sprawl, stale scoreboard). See `REVIEW_2026-08-03.md`.
+- **Status:** COMPLETED
