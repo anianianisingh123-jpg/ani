@@ -670,3 +670,36 @@ None of those four memos issues a numeric target. All four now resolve to `null`
 4. **Live database today: 26 calls, 10 scoreable (38%).** Excluded: 15 no rating recorded, 4 no price at call. **All 10 recorded price targets are engine figures, not desk views** — excluded from target scoring by value-matching against the run's valuation block *and* by date, since every target written before 2026-08-03 came from the regex that matched "fair value". Both causes were fixed today, so coverage improves from the next run forward. **The thin back catalogue is the finding.**
 - **Open / next:** F3 (archetype-blind critique prompt) is now the highest-value remaining item and is newly testable — the harness can assert which dials a bank's critique is offered. F4 (Epic F scope decision), F5 (judgment layer into the artifact) unchanged. `driver_templates.py` is still uncommitted and unlogged.
 - **Status:** COMPLETED
+
+### [2026-08-04] - [Claude/Opus-5] - [VAL-19: company-specific cost of capital + VAL-20: consensus forward estimates]
+
+- **What I changed:** Branch `val-19-cost-of-capital`, commits `e8aa218`, `92ed5cc`. Suite **325 → 357 pass, 0 fail**. New: `cost_of_capital.py`, `consensus.py`, `tests/test_cost_of_capital.py` (18), `tests/test_consensus.py` (14). Touched `valuation_engine.py` (Codex's lane, explicit instruction) and one line of `tools.py`.
+
+**VAL-19 — the discount rate now comes from the company.**
+It was a sector constant: KO and every other staple got 9.0%, and no company attribute touched it. Computed now from the filing plus a market cap — effective tax rate (`IncomeTaxExpenseBenefit / (NetIncomeLoss + tax)`), cost of debt (`InterestExpense / average total debt`), market-weighted capital structure, levered beta, CAPM cost of equity.
+
+1. **Financials get a cost of equity and no WACC.** JPM's interest expense over its total debt computes to **24.4%** — deposit and float cost misread as a financing rate. The cost-of-debt guard now rejects anything above 15%. `bank_lender` / `insurance` / `mortgage_reit` return cost of equity only, and it is wired into `_excess_return_on_equity` (JPM, PGR) — not just the FCF path.
+2. **`compute_dcf` stays state-free.** The block is computed in `compute_dcf_from_state` and passed as an additive kwarg, so every existing caller keeps the sector constant and no test fixture had to change.
+3. **Gordon guard.** Computed WACC floored at 5% (matching `ARGUED_INPUT_BOUNDS`), and `g_terminal` clamped to `wacc − 1.5%` **with a disclosure** rather than erroring. A sector constant was always clear of terminal growth; a computed rate on a utility or staple is not.
+4. **@Codex / @Grok — the honest result. Two names got WORSE and the cause matters:**
+
+  | | gap before | +history (VAL-17) | +own WACC | rate |
+  |---|---|---|---|---|
+  | KO | −72% | −58% | **−33%** | 9.0% → 6.91% |
+  | CVX | −24% | −41% | **−28%** | 10.0% → 8.66% |
+  | PGR | −37% | −37% | −35% | CoE 9.0% → 8.11% |
+  | QCOM | +128% | +40% | **+78%** ✗ | 10.0% → 8.61% |
+  | NVDA | +59% | +57% | **+99%** ✗ | 10.0% → 8.76% |
+
+  **NVDA and QCOM both key to the catch-all `general` archetype**, which re-levers to a beta of 0.95–1.02 against a true NVDA beta near 2. Lowering their rate from 10% amplified an already-high value. Supplying an observed beta puts NVDA at **−11%** and CVX at −14%, so the *mechanism* is right and the *sector beta table* is the weak input. Accordingly: `beta` is now pulled in the yfinance market fetch and is the preferred input; re-levering is the fallback; and the fallback **emits an explicit warning when the archetype is `general`** that the discount rate is the weakest input in the valuation. **The durable fix is archetype granularity — there is still no semiconductor id** (VAL-00 note 6, design open decision 4). That is the single highest-value item this surfaced.
+5. Risk-free (4.2%) and ERP (4.8%) are **stated dated constants**, env-overridable, always echoed. They are assumptions about the market, not quotes.
+
+**VAL-20 — consensus forward estimates, deliberately not a second multiplier.**
+Forward EPS derives as `price / forward_pe`; the model never supplies an estimate (§5.3 intact).
+
+1. **Refused on a normalized base.** Consensus growth measures the change from the trailing year; `mid_cycle` already re-based off that same year. KO: base normalized $5.30B → $10.21B, trailing/forward P/E 28.81 → 24.84 implies ~16% — the same recovery. Applying both double-counts, which is the exact trap VAL-17 avoided by taking growth off revenue. Year-1 consensus growth is applied **only when the base is `ttm`**.
+2. **An uncorroborated forward multiple is not used at all.** The free `forward_pe` field is regularly stale: on the stored slices it implies **+163% NVDA, +106% QCOM, +99% CRM, +93% CVX**. Reading NVDA's as a level produced $251B forward FCF against a $96B run-rate. Gated on the trailing pair, so one bad field cannot manufacture a confident "the market disagrees" claim.
+3. **Only KO passes both gates on the eight-name set** — honest, not a failure; the free data does not support more. What it buys: *"consensus forward EPS implies about $6.13B of free cash flow next year at the filed 40% cash conversion — 40% below the $10.21B mid_cycle base this valuation discounts. The filings and the market disagree about normal earning power; say which one this thesis is taking and why."* That is a real tension put in front of the writer.
+
+- **Still open, unchanged:** F3 (archetype-blind critique prompt), F4 (Epic F dark + driver data gaps), F5 (judgment layer absent from `clean_memo` / football field). **New and now top of the list: archetype granularity** — `general` is carrying NVDA and QCOM and now poisons their discount rate as well as their exemplar set. **Nothing since 2026-08-02 has been validated live**; every number above is offline over stored slices.
+- **Status:** COMPLETED
