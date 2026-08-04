@@ -158,14 +158,21 @@ def extract_fcf_series(cash_flow: dict) -> dict[str, Optional[float]]:
     return out
 
 
-def fcf_history(state: dict) -> list[dict[str, Any]]:
+def fcf_history_from_statements(
+    cash_flow: dict, income: dict
+) -> list[dict[str, Any]]:
     """Return filing-derived annual FCF and revenue, newest first.
 
     Rows are aligned by the producer's explicit rank. Negative FCF is retained.
     Missing ranks are omitted rather than synthesized.
+
+    Takes the statement dicts directly rather than a `ResearchState` so that
+    `compute_dcf`, which is deliberately state-free, can reach the same history
+    the argued path uses. `fcf_history(state)` is the state-level wrapper and
+    keeps its exact prior behaviour.
     """
-    cash_rows = (state.get("cash_flow_statement") or {}).get("annual_series") or []
-    income_rows = (state.get("income_statement") or {}).get("annual_series") or []
+    cash_rows = (cash_flow or {}).get("annual_series") or []
+    income_rows = (income or {}).get("annual_series") or []
     income_by_rank = {
         row.get("rank"): row
         for row in income_rows
@@ -195,6 +202,14 @@ def fcf_history(state: dict) -> list[dict[str, Any]]:
         )
     history.sort(key=lambda row: row["rank"])
     return history
+
+
+def fcf_history(state: dict) -> list[dict[str, Any]]:
+    """State-level wrapper over `fcf_history_from_statements`."""
+    return fcf_history_from_statements(
+        state.get("cash_flow_statement") or {},
+        state.get("income_statement") or {},
+    )
 
 
 def _evidence_value(state: dict, field_id: str) -> Any:
@@ -664,6 +679,42 @@ def _net_debt(balance: dict) -> Optional[float]:
     return (st + lt) - cash
 
 
+def _trend_revenue_growth(
+    history: list[dict[str, Any]]
+) -> tuple[Optional[float], Optional[int]]:
+    """Revenue CAGR across the full filing history, oldest → newest.
+
+    Returns `(cagr, years_spanned)`, or `(None, None)` when the history is too
+    short or carries a missing / non-positive revenue year.
+
+    Revenue rather than FCF because the base is already margin-normalized: the
+    default case is "current revenue at mid-cycle margin, grown at the revenue
+    trend", which holds margin flat and lets scale do the growing. Running the
+    trend off FCF instead would count the same margin recovery twice.
+
+    A CAGR is endpoint-determined, so an anomalous newest or oldest year still
+    tilts it. That matters far less on revenue than on FCF — revenue is the
+    least one-off-prone line on the statement — and the argued layer can move
+    `g_high` when a specific endpoint is contested.
+
+    Note the two halves degrade independently: if rank 0 is missing, the base
+    falls back to `ttm` while this still returns a CAGR over the ranks that are
+    present. That pairing is intentional — a growth rate measured over four
+    good years is better than none — but it means `base_fcf_method` and
+    `g_high_source` may disclose different histories. Both are reported.
+    """
+    if len(history) < 3:
+        return None, None
+    rows = sorted(history, key=lambda row: row["rank"])
+    revenues = [row.get("revenue") for row in rows]
+    if any(rev is None or float(rev) <= 0 for rev in revenues):
+        return None, None
+    newest = float(rows[0]["revenue"])
+    oldest = float(rows[-1]["revenue"])
+    years = len(rows) - 1
+    return (newest / oldest) ** (1.0 / years) - 1.0, years
+
+
 def compute_dcf(
     *,
     cash_flow: dict,
@@ -682,33 +733,75 @@ def compute_dcf(
       2. fade_years linear fade from g_high → g_terminal
       3. Gordon terminal value at g_terminal
 
+    Base FCF and g_high are drawn from the **full filing history** when it is
+    available, not from the single most recent year. Before 2026-08-03 both
+    came from one year: the base was the latest annual FCF and g_high was that
+    year's FCF change, capped, then extrapolated for five years and faded.
+    A single unrepresentative year therefore set both the level and the slope.
+    Live consequence on the 2026-08-01 eight-name run: KO's 2025 FCF of $5.30B
+    (roughly half its prior run-rate) was grown at 11.7% — itself measured
+    between two depressed years — and produced a $24.76 fair value against an
+    $87.59 share price.
+
+    The default is now `mid_cycle` (median FCF margin over the history, applied
+    to current revenue) with growth at the revenue CAGR. This is still purely
+    mechanical — no judgment enters — but it only moves the answer when recent
+    years are unrepresentative: on the same run it re-bases KO from $5.30B to
+    ~$10.2B while leaving NVDA ($96.68B → ~$95.9B) and QCOM essentially where
+    they were. `avg_5y` was rejected as the default for the opposite failure:
+    it would anchor NVDA at $39.3B against a $96B run-rate, penalizing genuine
+    growth exactly as the §4.6 note warned.
+
+    When history is absent or unusable the pre-existing single-year behaviour
+    stands, so callers holding only `current_annual` / `prior_annual` are
+    unaffected.
+
     Returns a structured dict safe to JSON-serialize into prompts.
     """
     fcf = extract_fcf_series(cash_flow)
     basics = extract_income_basics(income)
-    base_fcf = fcf.get("current_annual")
+    trailing_fcf = fcf.get("current_annual")
     prior_fcf = fcf.get("prior_annual")
 
     wacc, g_term = SECTOR_WACC.get(_sector_key(sector), SECTOR_WACC["DEFAULT"])
 
+    # ── Base FCF: normalized over the filing history ────────────────────────
+    # `normalize_base_fcf` is the same implementation the argued path uses, so
+    # a model arguing `base_fcf_method` moves *from* this basis rather than
+    # from a second, differently-derived one.
+    history = fcf_history_from_statements(cash_flow, income)
+    base_fcf, base_fcf_method, base_fcf_warnings = normalize_base_fcf(
+        history, trailing_fcf, "mid_cycle"
+    )
+
     # Historical growth signals
     fcf_growth = None
-    if base_fcf is not None and prior_fcf is not None and prior_fcf != 0:
-        fcf_growth = (base_fcf / prior_fcf) - 1.0
+    if trailing_fcf is not None and prior_fcf is not None and prior_fcf != 0:
+        fcf_growth = (trailing_fcf / prior_fcf) - 1.0
 
     rev_c, rev_p = basics["revenue_current"], basics["revenue_prior"]
     rev_growth = None
     if rev_c is not None and rev_p is not None and rev_p != 0:
         rev_growth = (rev_c / rev_p) - 1.0
 
+    trend_growth, trend_years = _trend_revenue_growth(history)
+
     # Cap high growth — don't extrapolate 100%+ forever.
-    raw_g = fcf_growth if fcf_growth is not None else rev_growth
+    if trend_growth is not None:
+        raw_g = trend_growth
+        base_source = f"revenue_cagr_{trend_years}y"
+    elif fcf_growth is not None:
+        raw_g = fcf_growth
+        base_source = "fcf_yoy"
+    else:
+        raw_g = rev_growth
+        base_source = "revenue_yoy"
     if raw_g is None:
         g_high = 0.08
         g_source = "default_8pct_no_history"
     else:
         g_high = max(-0.05, min(float(raw_g), 0.35))
-        g_source = "fcf_yoy" if fcf_growth is not None else "revenue_yoy"
+        g_source = base_source
         if abs(g_high - raw_g) > 1e-9:
             g_source += f"_capped_from_{raw_g:.1%}"
 
@@ -738,9 +831,17 @@ def compute_dcf(
         "sector": sector,
         "inputs": {
             "base_fcf_annual": base_fcf,
+            # The method that actually produced `base_fcf_annual`. Read by the
+            # argued path as the neutral basis: without it, an unargued case
+            # silently rebased to `ttm` and every sensitivity delta was again
+            # measured across two different bases (the FWD-07-FIX bug).
+            "base_fcf_method": base_fcf_method,
+            "trailing_fcf_annual": trailing_fcf,
+            "fcf_history_years": len(history),
             "prior_fcf_annual": prior_fcf,
             "fcf_yoy_growth": fcf_growth,
             "revenue_yoy_growth": rev_growth,
+            "revenue_cagr": trend_growth,
             "price": price_f,
             "shares_outstanding": shares_f,
             "market_cap": mcap_f,
@@ -755,9 +856,12 @@ def compute_dcf(
             "g_terminal": g_term,
             "high_growth_years": high_growth_years,
             "fade_years": fade_years,
+            "base_fcf_method": base_fcf_method,
             "note": (
                 "WACC and terminal growth are sector defaults, not company-specific "
-                "estimates. Change g_high / WACC to stress the model."
+                "estimates. Change g_high / WACC to stress the model. Base FCF and "
+                "g_high are normalized over the filing history, not read off the "
+                "latest year — see base_fcf_method and g_high_source."
             ),
         },
         "projections": [],
@@ -770,8 +874,26 @@ def compute_dcf(
         "trailing_pe": None,
         "confidence": "moderate",
         "errors": [],
-        "warnings": [],
+        "warnings": list(base_fcf_warnings),
     }
+
+    # A normalized base that lands far from the trailing print is the signal the
+    # writer needs most: it means the latest year is not representative, which
+    # is exactly when a reader would otherwise anchor on the wrong number.
+    if (
+        base_fcf_method != "ttm"
+        and isinstance(base_fcf, (int, float))
+        and isinstance(trailing_fcf, (int, float))
+        and trailing_fcf
+        and abs(base_fcf / trailing_fcf - 1.0) >= 0.20
+    ):
+        result["warnings"].append(
+            f"Base FCF normalized to {base_fcf_method} "
+            f"({base_fcf / 1e9:.2f}B) from a trailing {trailing_fcf / 1e9:.2f}B "
+            f"({base_fcf / trailing_fcf - 1.0:+.1%}) over "
+            f"{len(history)} annual periods — the latest year is not "
+            "representative of the history."
+        )
 
     if base_fcf is None or base_fcf <= 0:
         result["errors"].append(
@@ -868,10 +990,20 @@ def compute_dcf(
     if price_f and eps and eps > 0:
         result["trailing_pe"] = price_f / eps
 
-    if fcf_growth is not None and fcf_growth > 0.5:
+    # Flag a capped growth rate against whatever series actually set it, so the
+    # disclosure names the number the model can argue with. Before the history
+    # change this could only ever be FCF YoY.
+    if raw_g is not None and raw_g > 0.5:
+        series = "Revenue" if g_source.startswith("revenue_cagr") else "FCF"
+        window = (
+            f"CAGR over {trend_years} years"
+            if g_source.startswith("revenue_cagr")
+            else "YoY"
+        )
         result["warnings"].append(
-            f"FCF grew {fcf_growth:.0%} YoY — g_high capped at {g_high:.0%}; "
-            "base case may still be optimistic if growth normalizes faster."
+            f"{series} grew {raw_g:.0%} ({window}) — g_high capped at "
+            f"{g_high:.0%}; base case may still be optimistic if growth "
+            "normalizes faster."
         )
         result["confidence"] = "low_to_moderate"
 
@@ -894,10 +1026,30 @@ def format_dcf_for_prompt(dcf: dict[str, Any]) -> str:
     lines.append(
         f"Method: {dcf.get('method')} | Confidence: {dcf.get('confidence')}"
     )
-    lines.append(
-        f"Base FCF (current annual): {_fmt_money(inp.get('base_fcf_annual'))} | "
-        f"Prior FCF: {_fmt_money(inp.get('prior_fcf_annual'))}"
-    )
+    # The base is a normalized construct, not a filed figure, whenever
+    # base_fcf_method != "ttm". Labelling it "current annual" beside the prior
+    # year invited the writer to read the pair as a YoY change: on KO that
+    # would have implied 116% FCF growth ($10.21B normalized vs $4.74B prior)
+    # when the filed year was $5.30B. Name the construct and keep the trailing
+    # figure on its own footing.
+    method = inp.get("base_fcf_method") or "ttm"
+    if method != "ttm":
+        lines.append(
+            f"Base FCF ({method}, normalized over "
+            f"{inp.get('fcf_history_years')} annual periods): "
+            f"{_fmt_money(inp.get('base_fcf_annual'))} — NOT a filed figure. "
+            f"Most recent filed annual FCF: "
+            f"{_fmt_money(inp.get('trailing_fcf_annual'))}, prior year: "
+            f"{_fmt_money(inp.get('prior_fcf_annual'))}. Describe the base as "
+            f"normalized; do not present it as the company's cash flow, and do "
+            f"not compare it against the prior year as if it were."
+        )
+    else:
+        lines.append(
+            f"Base FCF (current annual, unnormalized): "
+            f"{_fmt_money(inp.get('base_fcf_annual'))} | "
+            f"Prior FCF: {_fmt_money(inp.get('prior_fcf_annual'))}"
+        )
     lines.append(
         f"Assumptions: WACC={_fmt_pct(a.get('wacc'))}, "
         f"g_high={_fmt_pct(a.get('g_high'))} (source: {a.get('g_high_source')}), "
@@ -1361,11 +1513,29 @@ def compute_dcf_from_state(state: dict) -> dict[str, Any]:
     dcf["archetype"] = archetype
     dcf["method_requested"] = method
     if method == "cycle_normalized_fcf_dcf":
-        dcf.setdefault("warnings", []).append(
-            "Archetype cyclical_commodity: FCF base is trailing, not mid-cycle "
-            "normalized — treat point estimate with low confidence until cycle "
-            "normalization is implemented."
-        )
+        # The base is margin-normalized over the filing history as of
+        # 2026-08-03, so the old "base is trailing" wording was false. What is
+        # still missing for a commodity name is price-deck normalization: a
+        # five-year median FCF margin averages over whatever prices happened to
+        # prevail, which is not the same as marking to a mid-cycle price. The
+        # method string is deliberately unchanged — `compute_dcf_with_argued_inputs`
+        # gates the argued path on it.
+        dcf_inputs = dcf.get("inputs") or {}
+        applied = dcf_inputs.get("base_fcf_method")
+        years = dcf_inputs.get("fcf_history_years") or 0
+        if applied and applied != "ttm":
+            dcf.setdefault("warnings", []).append(
+                f"Archetype cyclical_commodity: FCF base is {applied}-normalized "
+                f"over {years} annual periods, which normalizes margin but NOT "
+                "commodity price — a mid-cycle price deck is still not modelled. "
+                "Treat the point estimate with low confidence."
+            )
+        else:
+            dcf.setdefault("warnings", []).append(
+                "Archetype cyclical_commodity: FCF base is trailing (no usable "
+                "filing history to normalize over), not mid-cycle normalized — "
+                "treat point estimate with low confidence."
+            )
         dcf["confidence"] = "low"
         dcf["method"] = "cycle_normalized_fcf_dcf_placeholder_trailing_base"
 
@@ -1454,14 +1624,27 @@ def _argued_midpoint(argued: dict, parameter: str, default: Any) -> Any:
 def _normalized_base_fcf(
     state: dict, method: str
 ) -> tuple[Optional[float], str, list[str]]:
-    warnings: list[str] = []
+    """State-level wrapper. See `normalize_base_fcf` for the rules."""
     ttm = extract_fcf_series(state.get("cash_flow_statement") or {}).get(
         "current_annual"
     )
+    return normalize_base_fcf(fcf_history(state), ttm, method)
+
+
+def normalize_base_fcf(
+    history: list[dict[str, Any]], ttm: Optional[float], method: str
+) -> tuple[Optional[float], str, list[str]]:
+    """Resolve a base FCF from filing history under an explicit method.
+
+    Pure: takes the history rows and the trailing figure, touches no state.
+    Returns `(value, method_actually_applied, warnings)` — the applied method
+    is not always the requested one, because every path degrades to `ttm`
+    rather than synthesizing a number it cannot support.
+    """
+    warnings: list[str] = []
     if method == "ttm":
         return ttm, "ttm", warnings
 
-    history = fcf_history(state)
     required = 3 if method in {"avg_3y", "mid_cycle"} else 5
     if method in {"avg_3y", "avg_5y"}:
         rows = [row for row in history if row["rank"] < required]
@@ -1854,11 +2037,17 @@ def compute_dcf_with_argued_inputs(state: dict, argued: dict) -> dict[str, Any]:
 
     assumptions = base.get("assumptions") or {}
     method_entry = argued.get("base_fcf_method")
+    # An unargued case must fall back to the basis the ENGINE actually used,
+    # not to `ttm`. Since 2026-08-03 the engine default is `mid_cycle`, so a
+    # hardcoded `ttm` here would rebase `neutral_case` to a different world
+    # from `base` and reintroduce the two-bases sensitivity bug that
+    # FWD-07-FIX killed on KO and QCOM.
+    engine_method = (base.get("inputs") or {}).get("base_fcf_method") or "ttm"
     method = (
         method_entry.get("value")
         if isinstance(method_entry, dict)
         else method_entry
-    ) or "ttm"
+    ) or engine_method
     normalized_fcf, applied_method, normalization_warnings = _normalized_base_fcf(
         state, str(method)
     )
