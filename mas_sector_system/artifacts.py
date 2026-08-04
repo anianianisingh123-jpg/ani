@@ -41,6 +41,14 @@ _PKG_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _PKG_DIR.parent
 DEFAULT_OUTPUT_DIR = _REPO_ROOT / "outputs"
 
+# Held at 1.1 deliberately when `headline_source` was added (2026-08-03, VAL-18).
+# The field is additive and optional: every 1.1 consumer that ignores it still
+# reads a valid artifact, and `_target_basis` degrades to "Memo text" when it is
+# absent. **1.2 is reserved for VAL-08** (judgment blocks + disclosure routing),
+# which is a genuine shape change; burning the number on an optional string
+# would leave that ticket without a version to claim. A consumer that must
+# distinguish "old artifact" from "field not computed" should test for the key,
+# not the version.
 CLEAN_MEMO_SCHEMA_VERSION = "1.1"
 
 # ── Numeric contract (schema 1.1) ────────────────────────────────────────────
@@ -409,8 +417,16 @@ _RATING_RE = re.compile(
     r"UNDERWEIGHT|REDUCE|SELL|AVOID)\b",
     re.IGNORECASE,
 )
+# "fair value" is deliberately NOT in this pattern. Memos discuss the engine's
+# fair value inside the recommendation section — often to argue against it — so
+# matching it lifted a deterministic engine output and published it as the
+# desk's target. Live on 2026-08-01: KO shipped `rating: HOLD` with
+# `price_target: "$24.76"` (the mechanical DCF, which the memo argued down), and
+# QCOM shipped `"$335.83"` from a memo whose second paragraph rejects that exact
+# figure as peak extrapolation. A missing target must read as null, never as a
+# number the analyst did not write.
 _PRICE_TARGET_RE = re.compile(
-    r"(?:price target|PT|fair value|target price)\D{0,15}(\$?\s?[\d,]+(?:\.\d+)?)",
+    r"(?:price target|target price|\bPT\b)\D{0,15}(\$?\s?[\d,]+(?:\.\d+)?)",
     re.IGNORECASE,
 )
 
@@ -420,12 +436,92 @@ def _extract_rating(text: str) -> Optional[str]:
     return m.group(1).upper() if m else None
 
 
-def _extract_price_target(text: str) -> Optional[str]:
+def _as_float(raw: Any) -> Optional[float]:
+    try:
+        return float(str(raw).replace("$", "").replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_price_target(
+    text: str, *, engine_values: Optional[list[float]] = None
+) -> Optional[str]:
+    """Pull an explicitly-stated price target out of the recommendation prose.
+
+    `engine_values` are deterministic outputs (DCF / comps fair values). A match
+    equal to one of them is discarded: that is the signature of prose describing
+    the engine rather than issuing a target.
+    """
     m = _PRICE_TARGET_RE.search(text or "")
     if not m:
         return None
     raw = m.group(1).strip().replace(" ", "")
+    value = _as_float(raw)
+    for engine_value in engine_values or []:
+        if (
+            value is not None
+            and isinstance(engine_value, (int, float))
+            and abs(value - float(engine_value)) < 0.01
+        ):
+            return None
     return raw if raw.startswith("$") else f"${raw}"
+
+
+def engine_fair_values(state: dict[str, Any]) -> list[float]:
+    """Deterministic per-share fair values the memo may quote in prose.
+
+    These are engine outputs, not desk views. Collected so the headline parser
+    can recognise and refuse them.
+    """
+    values: list[float] = []
+    for key in ("dcf_engine", "dcf_judgment", "comps_engine", "comps_judgment"):
+        block = state.get(key)
+        if not isinstance(block, dict):
+            continue
+        for field in (
+            "fair_value_per_share",
+            "implied_value_per_share",
+            "epv_per_share",
+        ):
+            value = block.get(field)
+            if isinstance(value, (int, float)):
+                values.append(float(value))
+        band = block.get("fair_value_range")
+        if isinstance(band, (list, tuple)):
+            values.extend(float(v) for v in band if isinstance(v, (int, float)))
+    return values
+
+
+def resolve_headline(
+    state: dict[str, Any], rating_source: str
+) -> tuple[Optional[str], Optional[str], str]:
+    """Resolve (rating, price_target, source) for the clean memo.
+
+    Order matters. Synthesis emits a machine-readable ```recommendation fence
+    (added FWD-06); that is the desk's own statement and is authoritative. Only
+    when it is absent do we fall back to reading the prose, and that fallback
+    now yields `None` rather than a number the analyst never wrote — see the
+    note on `_PRICE_TARGET_RE`.
+    """
+    recommendation = state.get("recommendation")
+    if isinstance(recommendation, dict):
+        rating = recommendation.get("rating")
+        target = recommendation.get("price_target")
+        if rating or target is not None:
+            target_value = _as_float(target)
+            return (
+                str(rating).upper() if rating else _extract_rating(rating_source),
+                f"${target_value:,.2f}" if target_value is not None else None,
+                "structured",
+            )
+
+    rating = _extract_rating(rating_source)
+    target = _extract_price_target(
+        rating_source, engine_values=engine_fair_values(state)
+    )
+    if rating is None and target is None:
+        return None, None, "none"
+    return rating, target, "parsed"
 
 
 def build_metrics_block(canonical_metrics: Optional[dict[str, Any]]) -> dict[str, Any]:
@@ -610,6 +706,7 @@ def build_clean_memo(state: dict[str, Any], *, audit_log_filename: Optional[str]
 
     rating_source = found.get("recommendation") or parsed["preamble"] or memo
     sections_payload = {k: found.get(k) or None for k in _SECTION_KEYS}
+    rating, price_target, headline_source = resolve_headline(state, rating_source)
 
     return {
         "schema_version": CLEAN_MEMO_SCHEMA_VERSION,
@@ -621,8 +718,13 @@ def build_clean_memo(state: dict[str, Any], *, audit_log_filename: Optional[str]
         "user_query": state.get("user_query"),
         "query_type": query_type,
         "synthesis_mode": mode,
-        "rating": _extract_rating(rating_source),
-        "price_target": _extract_price_target(rating_source),
+        "rating": rating,
+        "price_target": price_target,
+        # Which channel produced the two fields above: "structured" (the
+        # synthesis recommendation fence), "parsed" (regex over prose), or
+        # "none". A consumer that needs a guaranteed target should require
+        # "structured" rather than trusting a scrape.
+        "headline_source": headline_source,
         "title": parsed.get("title"),
         "sections": sections_payload,
         "subsections": parsed.get("subsections") or {},

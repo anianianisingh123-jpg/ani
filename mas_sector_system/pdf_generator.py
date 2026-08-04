@@ -1217,6 +1217,16 @@ def summary_bullets(payload: dict[str, Any], *, limit: int = 5) -> list[tuple[st
     return out[:limit]
 
 
+def _target_basis(payload: dict[str, Any]) -> str:
+    """Say where the cover's price target came from, or that none was issued."""
+    if not payload.get("price_target"):
+        return "None issued"
+    return {
+        "structured": "Desk view",
+        "parsed": "Memo text",
+    }.get(str(payload.get("headline_source")), "Memo text")
+
+
 def _render_cover(pdf: HawktradePDF, payload: dict[str, Any], book: MetricBook) -> None:
     """Page 1 — identification, the KPI table, and the five headline points."""
     ticker = str(payload.get("ticker") or "SECTOR").upper()
@@ -1249,8 +1259,16 @@ def _render_cover(pdf: HawktradePDF, payload: dict[str, Any], book: MetricBook) 
             ["Rating", rating.split("—")[0].split("(")[0].strip() or "NOT RATED",
              "Desk view"],
             ["Last price", _price(price), _short_period(book.period("price")) or "Live"],
-            ["Price target", target, "Engine fair value" if dcf else "Memo"],
-            ["Implied upside", _pct(up, digits=1) if up is not None else "—", "vs. last price"],
+            # The basis column must say where the target came from. It used to
+            # read "Engine fair value" while the number was scraped from prose,
+            # and a null target now means the memo issued none — which is a
+            # legitimate stance on a HOLD and must not read as missing data.
+            ["Price target", target, _target_basis(payload)],
+            # Explicitly an engine number. The shipped 2026-07-30 QCOM cover
+            # read "Implied upside 121.5%" beside "Rating HOLD" with no hint
+            # that the two came from different places.
+            ["Implied upside", _pct(up, digits=1) if up is not None else "—",
+             "DCF vs. last price"],
             ["Market cap", _money(book.value("market_cap"), digits=2), "Live"],
             ["Trailing P/E", _mult(book.value("trailing_pe")), "Canonical"],
         ],

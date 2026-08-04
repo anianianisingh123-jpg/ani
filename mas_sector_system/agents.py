@@ -1929,6 +1929,7 @@ recommendation (not part of the reader-facing memo) with this schema:
 ```recommendation
 {{
   "rating": "BUY" | "HOLD" | "SELL" | "AVOID" | equivalent short string,
+  "price_target": number or null — YOUR target, in dollars per share,
   "preferred_lens": "primary_method" | "comps" | "hybrid" | "other",
   "override_reason": null or a short sentence when preferred_lens is not
     primary_method (why the primary intrinsic method is not the stance),
@@ -1937,6 +1938,13 @@ recommendation (not part of the reader-facing memo) with this schema:
 ```
 When the primary intrinsic method and the recommendation disagree, preferred_lens
 must not be primary_method and override_reason must be non-empty.
+
+`price_target` is the number the desk stands behind. It is NOT the engine's
+fair value: those are deterministic model outputs you are free to argue with,
+and several memos have correctly rejected them in the body. If the memo issues
+no target — which is a legitimate stance on a HOLD — emit `null`. Null is
+always better than restating an engine figure you just argued against, because
+this field is published as the desk's view on the cover of the deck.
 """
 
 
