@@ -144,13 +144,21 @@ def _synthetic_bank():
 # ── Golden expectations ─────────────────────────────────────────────────────
 
 GOLDEN = [
-    {"ticker": "NVDA", "sector": "Semiconductors", "expect_archetype": "general"},
+    # `semiconductor` since 2026-08-04 — see the note on the golden matrix in
+    # tests/test_us_sector_coverage.py.
+    {"ticker": "NVDA", "sector": "Semiconductors", "expect_archetype": "semiconductor"},
     {"ticker": "JPM", "sector": "Financials Banks", "expect_archetype": "bank_lender"},
     {"ticker": "PLD", "sector": "REIT Real Estate", "expect_archetype": "equity_reit"},
     {"ticker": "JNJ", "sector": "Healthcare", "expect_archetype": "mature_dividend_payer"},
     {"ticker": "PLTR", "sector": "Software", "expect_archetype": "pre_profit_growth"},
     {"ticker": "XOM", "sector": "Energy Oil", "expect_archetype": "cyclical_commodity"},
-    {"ticker": "TSM", "sector": "Semiconductors", "expect_archetype": "general"},  # foreign filer → general
+    # TSM was `general` under a "foreign filer → general" rule. That rule was
+    # never doing scope work: nothing in the codebase branches on archetype for
+    # foreign filers (20-F handling is keyed on the filing form in tools.py, not
+    # here), so all it did was hand a semiconductor a 0.95 unlevered beta. Being
+    # a foreign filer is an extraction question; being a semi is a risk
+    # question. Conflating the two is what produced the duplicate-key bug.
+    {"ticker": "TSM", "sector": "Semiconductors", "expect_archetype": "semiconductor"},
 ]
 
 

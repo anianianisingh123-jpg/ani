@@ -25,6 +25,7 @@ ARCHETYPES = (
     "pre_profit_growth",
     "telecom",
     "midstream",
+    "semiconductor",
     "general",
     # legacy alias still accepted
     "reit_real_estate",
@@ -44,7 +45,7 @@ _SECTOR_RULES: list[tuple[tuple[str, ...], str]] = [
     (("REAL ESTATE", "REALTY"), "equity_reit"),
     (("UTILITY", "UTILITIES", "ELECTRIC UTILITY", "GAS UTILITY", "WATER UTILITY", "REGULATED ELECTRIC"), "utility"),
     (("SOFTWARE", "SAAS", "CLOUD SOFTWARE", "APPLICATION SOFTWARE"), "software_saas"),
-    (("SEMICONDUCTOR", "SEMI", "CHIP", "FABLESS"), "general"),
+    (("SEMICONDUCTOR", "SEMI", "CHIP", "FABLESS", "GPU", "FOUNDRY"), "semiconductor"),
     (("MIDSTREAM", "PIPELINE", "MLP"), "midstream"),
     (("OIL", "GAS", "ENERGY", "PETROLEUM", "E&P", "EXPLORATION"), "cyclical_commodity"),
     (("MINING", "COAL", "METALS", "STEEL", "COMMODITY"), "cyclical_commodity"),
@@ -103,6 +104,13 @@ TICKER_ARCHETYPE: dict[str, str] = {
     "CRM": "software_saas", "NOW": "software_saas", "ADBE": "software_saas",
     "MSFT": "software_saas", "ORCL": "software_saas", "INTU": "software_saas",
     "SNOW": "software_saas",
+    # Semiconductors — device makers and the capital-equipment side.
+    "NVDA": "semiconductor", "QCOM": "semiconductor", "AMD": "semiconductor",
+    "AVGO": "semiconductor", "INTC": "semiconductor", "TSM": "semiconductor",
+    "MU": "semiconductor", "TXN": "semiconductor", "ADI": "semiconductor",
+    "NXPI": "semiconductor", "MRVL": "semiconductor", "ON": "semiconductor",
+    "AMAT": "semiconductor", "LRCX": "semiconductor", "KLAC": "semiconductor",
+    "ASML": "semiconductor", "ARM": "semiconductor",
     # Commodity / energy
     "XOM": "cyclical_commodity", "CVX": "cyclical_commodity", "COP": "cyclical_commodity",
     "EOG": "cyclical_commodity", "FCX": "cyclical_commodity", "NEM": "cyclical_commodity",
@@ -115,8 +123,9 @@ TICKER_ARCHETYPE: dict[str, str] = {
     # Staples
     "JNJ": "mature_dividend_payer", "PG": "mature_dividend_payer",
     "KO": "mature_dividend_payer", "PEP": "mature_dividend_payer",
-    # Tech general / fabless semi
-    "NVDA": "general", "AMD": "general", "AVGO": "general", "QCOM": "general",
+    # Tech general. The semis that used to sit here now key to `semiconductor`
+    # above — a later duplicate in this literal silently wins, which is how
+    # NVDA kept resolving to `general` after the archetype was added.
     "AAPL": "general", "GOOGL": "general", "AMZN": "general", "META": "general",
     # Pre-profit / growth
     "PLTR": "pre_profit_growth", "PATH": "pre_profit_growth", "DKNG": "pre_profit_growth",
@@ -129,8 +138,14 @@ TICKER_ARCHETYPE: dict[str, str] = {
     # Retail
     "WMT": "general", "TGT": "general", "COST": "mature_dividend_payer",
     "HD": "general", "LOW": "general", "SBUX": "general", "MCD": "mature_dividend_payer",
-    # Foreign (out of scope but mapped general)
-    "TSM": "general", "ASML": "general", "SAP": "software_saas",
+    # Foreign (out of scope but mapped general). TSM and ASML used to sit here
+    # and, being later in the literal, silently overrode their `semiconductor`
+    # entries above — the same shadowing that kept NVDA on `general`. Both are
+    # semis and are keyed once, in the semiconductor block.
+    # `test_ticker_archetype_has_no_duplicate_keys` now fails the build on any
+    # repeat, because a duplicate here is invisible at runtime: Python collapses
+    # the literal and the wrong beta reaches the DCF with nothing to flag it.
+    "SAP": "software_saas",
 }
 
 # Metric id prefixes suppressed per archetype
@@ -225,9 +240,11 @@ def classify_from_sic(sic: Optional[str]) -> Optional[tuple[str, str]]:
     # Software
     if s in (7371, 7372, 7373):
         return "software_saas", f"SIC {s} (software/services)"
-    # Semiconductors
-    if s == 3674:
-        return "general", f"SIC {s} (semiconductors)"
+    # Semiconductors. 3674 is the device makers (NVDA, QCOM, AMD, INTC, MU);
+    # 3559 is the capital-equipment side (AMAT, LRCX, KLAC), which shares the
+    # same cycle and risk profile even though it does not ship silicon.
+    if s in (3674, 3559):
+        return "semiconductor", f"SIC {s} (semiconductors)"
     return None
 
 
@@ -874,6 +891,7 @@ def valuation_method_for_archetype(archetype: str) -> str:
         "utility": "multi_stage_fcf_dcf",
         "telecom": "multi_stage_fcf_dcf",
         "software_saas": "multi_stage_fcf_dcf",
+        "semiconductor": "multi_stage_fcf_dcf",
         "mature_dividend_payer": "multi_stage_fcf_dcf",
         "asset_heavy_industrial": "multi_stage_fcf_dcf",
         "asset_heavy": "multi_stage_fcf_dcf",

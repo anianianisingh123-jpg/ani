@@ -157,6 +157,33 @@ ARCHETYPE_CARDS: Dict[str, dict] = {
         "thesis_invalidators": "NRR (Net Retention Rate) falling below 100%.",
         "multiple_set": ["forward_pe", "price_to_sales", "ev_to_revenue"],
     },
+    "semiconductor": {
+        "primary_method": "multi_stage_fcf_dcf",
+        "defensible_bands": {
+            # Wider and higher than `general`: the asset beta is the highest in
+            # this universe and the earnings stream is cyclical, so a 9% WACC on
+            # a chip name is not a defensible floor.
+            "wacc": (0.10, 0.15),
+            "g_high": (-0.10, 0.35),
+            "g_terminal": (0.02, 0.03),
+            "high_growth_years": (3, 7),
+            "fade_years": (3, 7),
+            "justified_multiple": (12.0, 35.0),
+        },
+        "cycle_traps": (
+            "Extrapolating peak-cycle gross margin or a peak inventory year as "
+            "the run-rate. Semis earn their best margins exactly when the cycle "
+            "is about to turn, so a trailing base is at its least representative "
+            "at the moment it looks most attractive."
+        ),
+        "thesis_invalidators": (
+            "Customer concentration converting to insourcing (an Apple- or "
+            "hyperscaler-scale buyer designing the part out); a capex cycle that "
+            "adds industry capacity faster than end demand; export-control or "
+            "fab-location policy that strands a revenue geography."
+        ),
+        "multiple_set": ["forward_pe", "ev_to_ebitda", "trailing_pe"],
+    },
     "mature_dividend_payer": {
         "primary_method": "multi_stage_fcf_dcf",
         "defensible_bands": {

@@ -56,8 +56,20 @@ Consensus assumes that the deceleration in top-line growth (10.8%) dictates a te
 """
 
 def get_exemplars(archetype: str) -> str:
-    """Return an exemplar string block for the given archetype."""
-    if archetype == "general":
+    """Return an exemplar string block for the given archetype.
+
+    `semiconductor` returns the same block as `general` on purpose. Two of
+    these four exemplars are *already* semiconductor reasoning extracted from
+    the NVDA and QCOM desk memos — hyperscalers extending GPU depreciation
+    schedules, and Apple insourcing its modem — and they only ever lived under
+    `general` because there was no semiconductor archetype to key them to
+    (design §11.5). Now that there is one, the material follows the names it
+    came from. `general` keeps them too: the reasoning *moves* they teach
+    (steelman-then-concede, tying a discount rate to a named company risk)
+    are not sector-specific, and removing them would thin the catch-all card
+    that every unclassified company still depends on.
+    """
+    if archetype in ("general", "semiconductor"):
         return _GENERAL_EXEMPLARS
     if archetype == "software_saas":
         return _SOFTWARE_SAAS_EXEMPLARS

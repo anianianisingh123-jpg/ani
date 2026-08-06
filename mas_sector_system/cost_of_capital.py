@@ -67,6 +67,11 @@ WACC_CEILING = 0.20
 SECTOR_UNLEVERED_BETA: dict[str, float] = {
     "general": 0.95,
     "software_saas": 1.05,
+    # Semiconductors carry the highest asset beta in this universe: a deep
+    # capex cycle, customer concentration, and demand that swings with the
+    # inventory cycle. Routing NVDA and QCOM through `general` at 0.95 was the
+    # measured cause of their +99% / +78% overvaluation on 2026-08-01.
+    "semiconductor": 1.40,
     "asset_light": 0.95,
     "asset_heavy": 0.90,
     "asset_heavy_industrial": 0.95,

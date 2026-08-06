@@ -252,3 +252,66 @@ def test_the_summary_names_the_basis_a_reader_needs():
     assert "COMPANY SPECIFIC" in text
     assert "sector default would have been 9.00%" in text
     assert "risk-free" in text and "beta" in text and "cost of debt" in text
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The semiconductor archetype (2026-08-04)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_semis_no_longer_fall_through_to_the_catch_all():
+    """NVDA and QCOM keyed to `general`, which set their discount rate wrong.
+
+    `general` carries a 0.95 unlevered beta. Applied to two of the most
+    cyclical, most customer-concentrated businesses in the universe, it put
+    NVDA at +99% and QCOM at +78% against market on the 2026-08-01 slices.
+    """
+    from mas_sector_system.archetype import classify_archetype
+
+    for ticker in ("NVDA", "QCOM", "AMD", "AVGO", "TSM", "AMAT"):
+        result = classify_archetype(ticker=ticker, sector="Semiconductors")
+        assert result["archetype"] == "semiconductor", ticker
+
+
+def test_the_semiconductor_beta_is_the_highest_operating_beta():
+    assert SECTOR_UNLEVERED_BETA["semiconductor"] > SECTOR_UNLEVERED_BETA["general"]
+    assert SECTOR_UNLEVERED_BETA["semiconductor"] > SECTOR_UNLEVERED_BETA["software_saas"]
+    assert SECTOR_UNLEVERED_BETA["semiconductor"] > SECTOR_UNLEVERED_BETA["utility"]
+
+
+def test_a_semi_now_discounts_harder_than_the_catch_all_would_have():
+    """The point of the archetype: it must actually change the rate."""
+    as_general = compute_cost_of_capital(
+        _state(), archetype="general", sector_default_wacc=0.10
+    )
+    as_semi = compute_cost_of_capital(
+        _state(), archetype="semiconductor", sector_default_wacc=0.10
+    )
+    assert as_semi["wacc"] > as_general["wacc"]
+    # ...and the catch-all warning is gone, because the archetype is specific.
+    assert not any("CATCH-ALL" in w for w in as_semi["warnings"])
+
+
+def test_semis_have_doctrine_a_forecast_template_and_exemplars():
+    """A new archetype must be complete across every registry keyed by it."""
+    from mas_sector_system.archetype import valuation_method_for_archetype
+    from mas_sector_system.driver_templates import drivers_for, forecast_output_kind
+    from mas_sector_system.exemplars import get_exemplars
+    from mas_sector_system.valuation_doctrine import ARCHETYPE_CARDS
+
+    assert valuation_method_for_archetype("semiconductor") == "multi_stage_fcf_dcf"
+    card = ARCHETYPE_CARDS["semiconductor"]
+    # A 9% WACC floor on a chip name is not defensible — the band must sit above
+    # the general/staple range.
+    assert card["defensible_bands"]["wacc"][0] >= 0.10
+    assert "peak" in card["cycle_traps"].lower()
+
+    assert forecast_output_kind("semiconductor") == "eps_fcf"
+    drivers, is_native = drivers_for("semiconductor")
+    assert is_native, "semis fell back to the generic driver set"
+    assert all(d["basis_status"] == "profile" for d in drivers), (
+        "every semi driver must be grounded in a history the profile computes"
+    )
+
+    # The GPU-depreciation and Apple-modem exemplars are semiconductor
+    # reasoning and must reach a semiconductor company.
+    assert "GPU depreciation" in get_exemplars("semiconductor")

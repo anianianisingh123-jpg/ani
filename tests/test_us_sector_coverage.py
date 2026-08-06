@@ -31,7 +31,10 @@ from mas_sector_system.valuation_engine import compute_dcf_from_state  # noqa: E
 
 GOLDEN_MATRIX = [
     # archetype, ticker, sector, expect high conf via ticker map
-    ("general", "NVDA", "Information Technology Semiconductors"),
+    # NVDA moved off `general` on 2026-08-04: semis carry a 1.40 unlevered beta
+    # against `general`'s 0.95, and routing them through the catch-all was the
+    # measured cause of the +99% / +78% overvaluation on NVDA / QCOM.
+    ("semiconductor", "NVDA", "Information Technology Semiconductors"),
     ("software_saas", "CRM", "Information Technology Software"),
     ("bank_lender", "JPM", "Financials Banks"),
     ("insurance", "PGR", "Financials Insurance"),
@@ -48,6 +51,36 @@ GOLDEN_MATRIX = [
     ("telecom", "T", "Communication Services Telecom"),
     ("cyclical_commodity", "FCX", "Materials Metals Mining"),
 ]
+
+
+def test_ticker_archetype_has_no_duplicate_keys():
+    """A repeated ticker in the literal is invisible — and reaches the DCF.
+
+    Python collapses a duplicate key at parse time and keeps the *last* one,
+    silently and with no warning. On 2026-08-04 `TSM` and `ASML` appeared both
+    in the semiconductor block and again under "Foreign", so both classified as
+    `general` and were priced off a 0.95 unlevered beta instead of 1.40 — the
+    exact defect the semiconductor archetype was added to fix, shipped half
+    working. Nothing at runtime can catch this, so it has to be caught in the
+    source: read the AST, not the dict.
+    """
+    import ast
+
+    src = (ROOT / "mas_sector_system" / "archetype.py").read_text()
+    for node in ast.walk(ast.parse(src)):
+        targets = getattr(node, "targets", []) or ([node.target] if getattr(node, "target", None) else [])
+        if not any(getattr(t, "id", None) == "TICKER_ARCHETYPE" for t in targets):
+            continue
+        keys = [k.value for k in node.value.keys if isinstance(k, ast.Constant)]
+        dupes = sorted({k for k in keys if keys.count(k) > 1})
+        assert not dupes, (
+            f"duplicate tickers in TICKER_ARCHETYPE: {dupes}. The last entry "
+            f"silently wins and the earlier one is dead code."
+        )
+        assert len(keys) > 50, f"only parsed {len(keys)} keys — the AST walk missed the literal"
+        break
+    else:
+        raise AssertionError("TICKER_ARCHETYPE assignment not found in archetype.py")
 
 
 def test_classifier_golden_matrix():
@@ -67,7 +100,11 @@ def test_sic_ranges():
     assert classify_from_sic("6798")[0] == "equity_reit"
     assert classify_from_sic("4911")[0] == "utility"
     assert classify_from_sic("1311")[0] == "cyclical_commodity"
-    assert classify_from_sic("3674")[0] == "general"  # semis
+    # Semis route to their own archetype as of 2026-08-04. They previously fell
+    # through to `general`, whose 0.95 unlevered beta understated the discount
+    # rate badly enough to put NVDA at +99% and QCOM at +78% against market.
+    assert classify_from_sic("3674")[0] == "semiconductor"  # device makers
+    assert classify_from_sic("3559")[0] == "semiconductor"  # capital equipment
 
 
 def test_concept_maps_exist_for_hard_archetypes():
