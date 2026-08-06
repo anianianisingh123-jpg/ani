@@ -31,20 +31,36 @@ from mas_sector_system.offline import (
 )
 
 REPO = Path(__file__).resolve().parent.parent
-SLICE = REPO / "outputs" / "val02_baseline" / "KO_state_slice_fwd_clean.json"
+from fixtures import agent_prose, state_slice_path  # noqa: E402
+
+# The KO slice is now a committed fixture (TEST-02), falling back to a local
+# recording under `outputs/`. It used to resolve only to `outputs/`, which is
+# gitignored — so on every machine except the one that produced the runs, the
+# ten tests below SKIPPED. A fresh clone reported green while the only tests
+# that exercise an actual graph traversal had never run. Skips are not passes.
+#
+# The memory DB stays machine-local (9 MB of real run history), but it is NOT
+# optional in effect: the slice carries no `bull_thesis` / `bear_thesis`, and
+# without them the transcript falls back to placeholder text short enough to
+# trip the weak-output retry — so bull and bear each fire twice and
+# `test_no_node_executes_twice` fails. That was invisible while these tests
+# skipped. `agent_prose("KO")` commits the 63 KB those two nodes need, so the
+# guarantee holds with or without the database.
+SLICE = state_slice_path("KO")
 MEMORY_DB = REPO / "outputs" / "research_memory.sqlite"
 
-# The recorded runs live under `outputs/`, which is gitignored, so these skip
-# rather than fail on a fresh clone.
 needs_recording = pytest.mark.skipif(
-    not SLICE.exists(), reason="recorded run slice not present (outputs/ is gitignored)"
+    SLICE is None,
+    reason="KO state slice missing from tests/fixtures AND outputs/ — broken checkout",
 )
 
 
 @pytest.fixture()
 def transcript() -> Transcript:
     return transcript_from_slice(
-        SLICE, memory_db=MEMORY_DB if MEMORY_DB.exists() else None
+        SLICE,
+        memory_db=MEMORY_DB if MEMORY_DB.exists() else None,
+        extra_prose=agent_prose("KO"),
     )
 
 
@@ -226,7 +242,11 @@ def test_a_weak_model_response_is_retried_once(tmp_path):
     """`_run`'s retry-on-empty gate, exercised end to end rather than in a unit."""
     from mas_sector_system.main import run_deep_dive
 
-    thin = transcript_from_slice(SLICE, memory_db=MEMORY_DB if MEMORY_DB.exists() else None)
+    thin = transcript_from_slice(
+        SLICE,
+        memory_db=MEMORY_DB if MEMORY_DB.exists() else None,
+        extra_prose=agent_prose("KO"),
+    )
     thin.set("business_overview", "too short")  # under MIN_USEFUL_CHARS
 
     with offline_mode(thin) as recorder:

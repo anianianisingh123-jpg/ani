@@ -168,6 +168,7 @@ def transcript_from_slice(
     path: str | Path,
     *,
     memory_db: Optional[str | Path] = None,
+    extra_prose: Optional[dict[str, str]] = None,
 ) -> Transcript:
     """Build a transcript from a stored `*_state_slice*.json` run.
 
@@ -175,6 +176,14 @@ def transcript_from_slice(
     desk's actual language rather than placeholder text. That matters for the
     artifact assertions: the clean-memo parser is heading-driven, so a fixture
     with invented headings would prove nothing about the real parse.
+
+    `extra_prose` supplies agent text the slice does not carry, for callers
+    with no run database. The slice has no `bull_thesis` / `bear_thesis`, so
+    without one of the two sources those nodes fall back to placeholder text —
+    which is short enough to trip `_is_weak_output`, fire the retry, and double
+    their call count. That failure only appears where the 9 MB memory DB is
+    absent, which is every machine except the one that recorded the runs, and
+    it stayed hidden for as long as those tests skipped instead of running.
     """
     state = json.loads(Path(path).read_text())
     responses: dict[str, str] = {}
@@ -183,9 +192,13 @@ def transcript_from_slice(
         if isinstance(value, str) and value.strip():
             responses[label] = value
 
-    # Fill gaps (notably bull/bear) from the run database.
+    # Fill gaps (notably bull/bear) from the run database, then from any prose
+    # the caller committed alongside the slice.
     if memory_db:
         for label, text in _prose_from_memory(memory_db, state.get("ticker") or "").items():
+            responses.setdefault(label, text)
+    for label, text in (extra_prose or {}).items():
+        if isinstance(text, str) and text.strip():
             responses.setdefault(label, text)
     for label, field in LABEL_TO_JSON_FIELD.items():
         value = state.get(field)

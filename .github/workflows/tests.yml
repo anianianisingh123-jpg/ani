@@ -1,0 +1,53 @@
+name: tests
+
+# The suite is offline by design — `offline.py` swaps the model and every
+# network seam for recorded material — so CI never needs an API key and never
+# spends. That is what makes running it on every push affordable.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+          cache: pip
+
+      - name: Install pinned dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.lock
+
+      - name: Run the suite
+        # No API key in the environment. A test that silently starts making
+        # live calls will fail here rather than quietly billing.
+        env:
+          ANTHROPIC_API_KEY: ""
+          TAVILY_API_KEY: ""
+        run: python -m pytest tests/ -q --tb=short
+
+      - name: Fail on silently skipped tests
+        # Skips are not passes. Every fixture these tests need is committed
+        # under `tests/fixtures/`, so on a clean checkout — which is exactly
+        # what CI has, since `outputs/` is gitignored — the run must be fully
+        # green with nothing skipped. A new skip here means someone reattached
+        # a test to machine-local data, which is how ten graph-traversal tests
+        # went unrun on every machine but one.
+        run: |
+          python -m pytest tests/ -q -rs --tb=no > result.txt 2>&1 || true
+          tail -5 result.txt
+          if grep -qE "[0-9]+ skipped" result.txt; then
+            echo "::error::tests skipped on a clean checkout — see SKIPPED lines above"
+            grep -i "SKIPPED" result.txt || true
+            exit 1
+          fi
