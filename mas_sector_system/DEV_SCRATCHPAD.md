@@ -703,3 +703,141 @@ Forward EPS derives as `price / forward_pe`; the model never supplies an estimat
 
 - **Still open, unchanged:** F3 (archetype-blind critique prompt), F4 (Epic F dark + driver data gaps), F5 (judgment layer absent from `clean_memo` / football field). **New and now top of the list: archetype granularity** — `general` is carrying NVDA and QCOM and now poisons their discount rate as well as their exemplar set. **Nothing since 2026-08-02 has been validated live**; every number above is offline over stored slices.
 - **Status:** COMPLETED
+
+### [2026-08-05] - Claude/Opus-5 - VAL-21 / VAL-22 / VAL-23 / ARCH-01 / OPS-01
+
+Follow-on to `REVIEW_2026-08-05.md` (G1–G8). Everything below is offline over the
+stored slices; **nothing here has been validated live.** Suite **263 → 390 passed,
+0 failed, 0 skipped**, and green on a checkout with no `outputs/` directory.
+
+- **What I changed:**
+
+  **ARCH-01 — landed the semiconductor archetype; it was shipped half-working.**
+  `TSM` and `ASML` appeared twice in `TICKER_ARCHETYPE`; being later in the
+  literal, the `"general"` entries silently won, so both kept a 0.95 unlevered
+  beta. The in-flight comment warned about this exact shadowing 33 lines before
+  repeating it. Removed the duplicates, updated the two stale golden matrices,
+  and added `test_ticker_archetype_has_no_duplicate_keys`, which reads the
+  **AST** — a runtime dict has already collapsed the duplicate, so this class of
+  bug is invisible to any test that imports the module.
+  *Judgment call for the record:* TSM/ASML were `general` under a "foreign filer
+  → general" rule. Nothing in the codebase branches on archetype for foreign
+  filers (20-F handling is keyed on the filing form in `tools.py`), so that rule
+  was never doing scope work — it only handed a semiconductor the wrong beta.
+  Filing status is an extraction question; sector risk is a valuation question.
+  **This is the highest-impact change in the batch** — see the table below.
+
+  **VAL-21 — sustainable ROE normalized over the filing history.**
+  The residual-income path (`bank_lender`, `insurance`, `mortgage_reit`) held
+  `sustainable_roe` at the trailing year and projected it flat for ten years:
+  VAL-17's defect, left standing on exactly the archetypes that never touch an
+  FCF DCF. New `roe_history_from_statements` (rank-aligned, mirroring
+  `fcf_history_from_statements` — row-level `fy` is unreliable, three JPM
+  balance rows carry `fy` 2025) + `normalize_sustainable_roe`, default
+  `mid_cycle` = median. Thin history falls back to trailing **loudly**; negative
+  equity years are dropped, not treated as large ROE.
+  PGR's history is 37.3 / 33.1 / 19.2 / 4.5 / 18.4 — the engine was running a
+  hard-market peak for a decade. JPM's is 15.7 / 17.0 / 15.1 / 12.9 / 16.4 and
+  the median is the trailing year, so it does not move. That asymmetry is the
+  design: inert on a stable franchise, decisive on a cyclical one.
+
+  **VAL-22 — `cycle_normalized_fcf_dcf_placeholder_trailing_base` retired.**
+  The base has been margin-normalized since 2026-08-03, so the label was false
+  on every run with history — and it reaches `clean_memo.json` and the deck
+  cover, where "placeholder" tells a reader to discount a number that was
+  computed properly. Now conditional: `cycle_normalized_fcf_dcf` when
+  normalized, `..._trailing_base` when genuinely trailing. **Not attempted:** a
+  mid-cycle *price deck*. Margin normalization is not price normalization and
+  the price history isn't in this system — so `confidence: low` and the standing
+  disclosure both remain. Added `_FCF_DCF_METHODS` because the argued-path gate
+  held these names in an inline literal: a rename that missed it would route the
+  whole archetype down the non-FCF branch and discard its critique silently.
+
+  **VAL-23 — the `wacc → cost_of_equity` shim is deleted (closes F3).**
+  Its guard (`if "cost_of_equity" not in ranges`) could never be false: nothing
+  offered the native dials, so nothing could populate them, and every live bank
+  and insurer run went through the reinterpretation. New
+  `ARGUED_DIALS_BY_METHOD` + `ARGUED_DIAL_DEFINITIONS` are one source of truth
+  read by **both** the critique prompt (`_arguable_dials_block`) and the
+  consumption path, so the offer is derived from the method the engine already
+  chose. Off-model dials are now **dropped and disclosed**, never translated —
+  a dropped argument leaves the default standing and says so; a renamed one
+  publishes reasoning about a discount rate under a required equity return, and
+  passes C2 while doing it. REITs are the quiet win: no FFO/NAV dial was ever
+  offered, so **every REIT range was stuck at `convention` and could not satisfy
+  the "expressed as a range" criterion at all.** PLD can now argue.
+  Checked before deleting: `prior_run_context` is prompt text
+  (`format_prior_run_for_prompt`), never structured argued inputs, so no memory
+  replay depended on the shim.
+
+  **OPS-01 — CI, lockfile, fixtures, temperature.**
+  `.github/workflows/tests.yml` (there was no CI at all) + `requirements.lock`
+  pinned at the versions this suite is green against — `langgraph` owns the
+  deferred-join semantics `main.py` depends on and was floating on `>=0.2.0`.
+  `STRUCTURED_TEMPERATURE = 0.0` on the critique calls only, threaded through
+  `_run`/`_invoke`/`_llm`; narrative nodes keep the provider default, because
+  flattening the prose is a product decision and not mine to make silently.
+  **Committed `tests/fixtures/` (TEST-02, ~2.4 MB):** four state slices, one per
+  valuation path, plus 63 KB of KO agent prose.
+
+- **The silent-skip finding, which was worth more than the fix.** Ten tests were
+  gated on `outputs/`, which is gitignored — on every machine but this one they
+  **skipped**, so a fresh clone reported green while no graph-traversal test had
+  ever run. After committing the fixtures I ran a checkout with `outputs/`
+  removed and **two tests failed immediately**: the slice carries no
+  `bull_thesis`/`bear_thesis`, those came from the 9 MB memory DB, and without
+  them the transcript falls back to placeholder text short enough to trip
+  `_is_weak_output` — so bull and bear each fired **twice** and the
+  double-execution guard caught it. A real defect in the harness, invisible for
+  as long as the tests skipped. Fixed via `extra_prose` on
+  `transcript_from_slice`. CI now **fails the build on any skip**.
+
+- **Effect on the eight stored names** (offline; the archetype column is what a
+  fresh run now classifies, applied to the stored slice):
+
+  | | before | after | archetype / method |
+  |---|---|---|---|
+  | CRM | +232% | **+109%** | software_saas / multi_stage_fcf_dcf |
+  | QCOM | +128% | **+26%** | semiconductor / multi_stage_fcf_dcf |
+  | NVDA | +59% | **+35%** | semiconductor / multi_stage_fcf_dcf |
+  | PLD | +2% | +2% | equity_reit / ffo_nav |
+  | CVX | −24% | −28% | cyclical_commodity / cycle_normalized_fcf_dcf |
+  | KO | −72% | **−33%** | mature_dividend_payer / multi_stage_fcf_dcf |
+  | JPM | −50% | −51% | bank_lender / excess_return_on_equity |
+  | PGR | −37% | **−62%** | insurance / excess_return_on_equity |
+
+  **Spread 304 → 172 points; widest single name 232% → 109%.** NVDA and QCOM
+  came off the extremes entirely (beta 0.95 → 1.40, WACC 8.8% → 10.9%), which is
+  the item the VAL-19 entry above called "the single highest-value item this
+  surfaced".
+
+- **Read PGR honestly: it moved further from price, not closer.** −37% → −62%.
+  That is the normalizer working, not failing — the engine now says a 2.7×-book
+  insurer is expensive on mid-cycle underwriting rather than on a peak year.
+  Whether 19.2% understates a best-in-class underwriter is a *judgment*, and
+  VAL-23 is what finally lets the desk argue `sustainable_roe` directly instead
+  of smuggling it through `g_high`. Do not read the spread number as "PGR fixed".
+
+- **Files modified:** `archetype.py`, `valuation_engine.py`, `agents.py`,
+  `offline.py`; `tests/test_us_sector_coverage.py`,
+  `tests/test_structural_phases.py`, `tests/test_offline_end_to_end.py`; new
+  `tests/test_residual_income_normalization.py`,
+  `tests/test_cyclical_method_naming.py`,
+  `tests/test_argued_dial_correspondence.py`, `tests/fixtures/`;
+  `.github/workflows/tests.yml`, `requirements.lock`.
+  **Untouched:** `main.py`, `routing.py`, `state.py` (Rule 2 — no topology or
+  shared-contract change was needed).
+
+- **Notes / Handoff for next agent:**
+  1. **The critique prompt change is unvalidated.** Every VAL-23 test proves the
+     *plumbing* — offered set == consumed set, off-model dials disclosed. Whether
+     Opus actually argues `cost_of_equity` and `cap_rate` well needs one live
+     JPM/PGR/PLD run. That is the first thing to spend credit on.
+  2. **Still open:** F4 (Epic F dark — `forecast_engine.py` imported by nothing
+     outside its tests; 10 of 16 archetypes have `unavailable` driver basis, and
+     the scope decision is still unmade), F5 (clean memo still schema 1.1; the
+     judgment layer never reaches the artifact or the football field).
+  3. **Board was stale** — VAL-07 and TEST-06 were still `TODO` after shipping.
+     Worth a pass over the queue.
+  4. Market data is still yfinance. Unchanged, and unfixable in code.
+- **Status:** COMPLETED
