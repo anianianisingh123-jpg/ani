@@ -45,7 +45,9 @@ from .tools import (
 from .validate import format_validation_for_prompt, validate_inputs
 from .valuation_doctrine import doctrine_block_for, exemplar_block_for
 from .valuation_engine import (
+    ARGUED_DIAL_DEFINITIONS,
     apply_peer_changes,
+    argued_dials_for_method,
     compute_dcf_from_state,
     compute_dcf_with_argued_inputs,
     fetch_peer_multiples,
@@ -108,23 +110,41 @@ numbers. If a metric is missing, say so.
 """
 
 
+# Temperature for calls whose output is a STRUCTURED OBJECT rather than prose:
+# the valuation critiques, which return JSON that Python parses and feeds
+# straight into the engine. Nothing about arguing a discount rate benefits from
+# sampling variance, and pinning it means two runs over the same filings argue
+# the same case — the minimum bar for defending a published number.
+#
+# Narrative nodes deliberately keep the provider default. Flattening the prose
+# the whole system is built to produce is a product decision, not a bug fix,
+# and it is called out in REVIEW_2026-08-05 rather than made here silently.
+STRUCTURED_TEMPERATURE = 0.0
+
+
 def _llm(
     model: str = SONNET_MODEL,
     max_tokens: Optional[int] = None,
     *,
     disable_thinking: bool = True,
+    temperature: Optional[float] = None,
 ) -> ChatAnthropic:
     """Build a chat model. ChatAnthropic reads ANTHROPIC_API_KEY from the env.
 
     Thinking is disabled by default. Claude Sonnet/Opus adaptive thinking can
     consume the entire max_tokens budget as thinking tokens and return zero
     visible text (the NVDA DCF/comps failure mode).
+
+    `temperature=None` leaves the provider default in place, which is the
+    existing behaviour for every narrative node.
     """
     if max_tokens is None:
         max_tokens = MAX_TOKENS_OPUS if model == OPUS_MODEL else MAX_TOKENS_SONNET
     kwargs: Dict[str, Any] = {"model": model, "max_tokens": max_tokens}
     if disable_thinking:
         kwargs["thinking"] = {"type": "disabled"}
+    if temperature is not None:
+        kwargs["temperature"] = temperature
     return ChatAnthropic(**kwargs)
 
 
@@ -221,10 +241,14 @@ def _invoke(
     disable_thinking: bool,
     label: str,
     attempt: int,
+    temperature: Optional[float] = None,
 ) -> tuple[str, dict[str, Any]]:
     t0 = time.monotonic()
     response = _llm(
-        model, max_tokens=max_tokens, disable_thinking=disable_thinking
+        model,
+        max_tokens=max_tokens,
+        disable_thinking=disable_thinking,
+        temperature=temperature,
     ).invoke(messages)
     duration_s = time.monotonic() - t0
     text = _message_text(response)
@@ -258,6 +282,7 @@ def _run(
     label: str = "run",
     disable_thinking: bool = True,
     retry_on_empty: bool = True,
+    temperature: Optional[float] = None,
 ) -> str:
     """One system + user round trip, returning the text response.
 
@@ -275,6 +300,7 @@ def _run(
         disable_thinking=disable_thinking,
         label=label,
         attempt=1,
+        temperature=temperature,
     )
     if retry_on_empty and _is_weak_output(text, bits.get("stop_reason")):
         print(
@@ -289,6 +315,7 @@ def _run(
             disable_thinking=True,
             label=label,
             attempt=2,
+            temperature=temperature,
         )
         if not _is_weak_output(text2, bits2.get("stop_reason")) or len(text2) > len(text):
             return text2
@@ -1276,8 +1303,8 @@ Return ONE JSON object and nothing else:
   "method_reasoning": "<one or two sentences>",
   "arguments": [
     {
-      "parameter": "wacc" | "g_high" | "g_terminal" | "high_growth_years"
-                   | "fade_years" | "base_fcf_method",
+      "parameter": "<one of the ARGUABLE INPUTS listed below — those are the
+                    only dials this company's model consumes>",
       "argued_range": [low, high],
       "verdict": "too_high" | "too_low" | "defensible",
       "reasoning": "<why, specific to this company>",
@@ -1303,6 +1330,13 @@ Rules that are enforced in code — violating them silently discards your work:
 4. "base_fcf_method" is an enum, not a number: its argued_range must be
    ["<method>", "<method>"] where method is one of ttm, avg_3y, avg_5y,
    mid_cycle. Use it when the base year is unrepresentative of mid-cycle.
+4b. ARGUE ONLY THE DIALS IN THE "ARGUABLE INPUTS" BLOCK. They are derived from
+   the model that actually ran for this company, and each is defined there in
+   the engine's own terms. Anything else is dropped and disclosed — not
+   translated. A bank is valued on residual income, so it has a
+   `cost_of_equity` and no `wacc`; arguing "wacc" there means your reasoning
+   is published against a quantity you did not write about. Read the
+   definition before you argue the dial.
 5. If a default is genuinely defensible, say so with verdict "defensible" —
    do not manufacture disagreement.
 6. DIRECTION IS NOT A FREE VARIABLE. Arguing every parameter against the
@@ -1512,6 +1546,35 @@ def _format_judgment_case(dcf_judgment: dict) -> str:
     return "\n".join(lines)
 
 
+def _arguable_dials_block(method: Optional[str]) -> str:
+    """Name and define exactly the dials this company's model consumes (VAL-23).
+
+    Derived from `ARGUED_DIALS_BY_METHOD`, the same table the engine reads when
+    it applies arguments, so the offer and the consumption cannot drift. Before
+    this, one global prompt offered the six FCF dials to every archetype and the
+    engine quietly reinterpreted `wacc` as `cost_of_equity` on banks — the model
+    reasoned about a discount rate, the reader saw that reasoning, and the
+    number underneath was a required equity return.
+
+    Returns "" for a method with no argued dials, which correctly offers
+    nothing rather than falling back to the FCF six.
+    """
+    dials = argued_dials_for_method(method)
+    if not dials:
+        return ""
+    lines = [
+        f"ARGUABLE INPUTS — the `{method}` model consumes exactly these, and "
+        "nothing else you name will be applied:",
+    ]
+    lines += [f"  - {d}: {ARGUED_DIAL_DEFINITIONS[d]}" for d in dials]
+    lines.append(
+        "Argue only from this list. An argument naming any other parameter is "
+        "dropped and disclosed in the audit log — it is never translated onto "
+        "one of these."
+    )
+    return "\n".join(lines)
+
+
 def _run_critique(
     system_prompt: str,
     packet: str,
@@ -1520,6 +1583,7 @@ def _run_critique(
     *,
     archetype: str,
     label: str,
+    dials_block: str = "",
 ) -> Optional[dict]:
     """Opus critique call → parsed JSON, or None on any failure.
 
@@ -1528,6 +1592,7 @@ def _run_critique(
     """
     user = "\n\n".join(
         [packet, engine_block, *icl_blocks,
+         *( [dials_block] if dials_block else [] ),
          f"Archetype for this company: {archetype}\n"
          "Critique the engine's inputs. Return only the JSON object."]
     )
@@ -1538,6 +1603,10 @@ def _run_critique(
             model=OPUS_MODEL,
             max_tokens=MAX_TOKENS_OPUS,
             label=label,
+            # Structured JSON straight into the valuation engine — see
+            # STRUCTURED_TEMPERATURE. Two runs over the same filings should
+            # argue the same case.
+            temperature=STRUCTURED_TEMPERATURE,
         )
     except Exception as exc:  # noqa: BLE001 - critique must never break a run
         print(f"[{label}] critique call failed: {exc}", flush=True)
@@ -1606,6 +1675,8 @@ def fundamental_valuation_node(state: ResearchState) -> dict:
         ([*icl, vocab] if vocab else icl),
         archetype=archetype,
         label="fundamental:critique",
+        # Offer the dials the engine picked for THIS company, not the FCF six.
+        dials_block=_arguable_dials_block(dcf.get("method")),
     )
 
     dcf_judgment: Optional[dict] = None

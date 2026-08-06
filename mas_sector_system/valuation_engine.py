@@ -215,6 +215,231 @@ def fcf_history(state: dict) -> list[dict[str, Any]]:
     )
 
 
+# Methods that are FCF DCFs under the hood and therefore accept argued FCF
+# dials. Kept as one constant so the argued-path gate and any future consumer
+# cannot drift apart — the previous inline literal is why a method rename is a
+# latent way to silently disable a whole archetype's critique.
+_FCF_DCF_METHODS = frozenset(
+    {
+        "multi_stage_fcf_dcf",
+        "cycle_normalized_fcf_dcf",
+        "cycle_normalized_fcf_dcf_trailing_base",
+    }
+)
+
+# ── The dials each model actually consumes (VAL-23) ─────────────────────────
+#
+# One source of truth for "what may be argued", read by BOTH the critique
+# prompt in agents.py and the consumption path below. They were separate: the
+# prompt offered the six FCF dials to every archetype regardless of method,
+# and the engine then reinterpreted `wacc` as `cost_of_equity` and `g_high` as
+# `plowback` through a compatibility shim. So on every bank and insurer run the
+# reasoning shown to the reader was about a discount rate while the number
+# computed was a required equity return — two different quantities — and
+# criterion C2 ("every argued input cites resolvable evidence") passed, because
+# the evidence resolved; it was simply written about something else.
+#
+# REITs had it worse: no shim existed, so with no FFO/NAV dial ever offered,
+# every REIT range fell back to `convention` and could not satisfy the
+# "expressed as a range" criterion at all.
+#
+# Deriving the offer from the method the engine already chose is what makes
+# that class of mismatch unrepresentable rather than merely fixed:
+# `test_no_parameter_is_consumed_under_a_different_name_than_argued` fails the
+# build if the two ever diverge again.
+ARGUED_DIALS_BY_METHOD: dict[str, tuple[str, ...]] = {
+    "multi_stage_fcf_dcf": (
+        "wacc", "g_high", "g_terminal", "high_growth_years",
+        "fade_years", "base_fcf_method",
+    ),
+    "cycle_normalized_fcf_dcf": (
+        "wacc", "g_high", "g_terminal", "high_growth_years",
+        "fade_years", "base_fcf_method",
+    ),
+    "cycle_normalized_fcf_dcf_trailing_base": (
+        "wacc", "g_high", "g_terminal", "high_growth_years",
+        "fade_years", "base_fcf_method",
+    ),
+    "excess_return_on_equity": (
+        "cost_of_equity", "sustainable_roe", "fade_roe", "fade_years", "plowback",
+    ),
+    "ffo_nav": ("ffo_multiple", "cap_rate", "nav_discount"),
+}
+
+# What each dial means, in the engine's own terms. Sent to the model verbatim:
+# a dial named without its definition is how `wacc` got argued as a discount
+# rate on a bank in the first place.
+ARGUED_DIAL_DEFINITIONS: dict[str, str] = {
+    "wacc": "weighted-average cost of capital used to discount free cash flow (decimal)",
+    "g_high": "annual FCF growth rate during the high-growth years (decimal)",
+    "g_terminal": "perpetual growth rate in the Gordon terminal value (decimal)",
+    "high_growth_years": "number of years held at g_high before the fade (integer)",
+    "fade_years": "number of years fading linearly from the high rate to terminal (integer)",
+    "base_fcf_method": (
+        "which historical basis sets the starting FCF level "
+        "(`ttm` | `mid_cycle` | `avg_3y` | `avg_5y`)"
+    ),
+    "cost_of_equity": (
+        "the return equity holders require, used to discount residual income. "
+        "NOT a WACC: there is no debt term — for a bank, deposits and debt are "
+        "raw material, not financing"
+    ),
+    "sustainable_roe": (
+        "the mid-cycle return on book equity the franchise earns through a full "
+        "cycle — not last year's ROE (decimal)"
+    ),
+    "fade_roe": (
+        "the ROE the business decays toward as excess returns are competed away "
+        "(decimal; defaults to cost_of_equity)"
+    ),
+    "plowback": (
+        "share of earnings retained to grow book value rather than paid out "
+        "(0-1). Book growth = sustainable_roe x plowback"
+    ),
+    "ffo_multiple": "multiple applied to funds from operations per share",
+    "cap_rate": "capitalization rate applied to net operating income (decimal)",
+    "nav_discount": (
+        "premium/discount to net asset value (decimal; negative = trades below NAV)"
+    ),
+}
+
+
+def argued_dials_for_method(method: Optional[str]) -> tuple[str, ...]:
+    """The dials the engine will actually consume for this method.
+
+    Returns `()` for an unknown method, which correctly offers nothing rather
+    than defaulting to the FCF six — the default that caused the mismatch.
+    """
+    return ARGUED_DIALS_BY_METHOD.get(method or "", ())
+
+
+def roe_history_from_statements(
+    income: dict, balance: dict
+) -> list[dict[str, Any]]:
+    """Return filing-derived annual ROE, oldest-rank first.
+
+    The residual-income counterpart to `fcf_history_from_statements`, and
+    aligned the same way — by the producer's explicit `rank`, never by `fy`.
+    The `fy` on a row is unreliable (on the stored JPM slice three separate
+    balance-sheet rows carry `fy` 2025, because the value is lifted off
+    whichever line-level tag was present), so it is carried for display only.
+
+    Rows where either side is missing, or equity is non-positive, are omitted
+    rather than synthesized: a negative-equity year makes ROE meaningless, not
+    large.
+    """
+    income_rows = (income or {}).get("annual_series") or []
+    balance_rows = (balance or {}).get("annual_series") or []
+    balance_by_rank = {
+        row.get("rank"): row
+        for row in balance_rows
+        if isinstance(row, dict) and isinstance(row.get("rank"), int)
+    }
+    history: list[dict[str, Any]] = []
+    for income_row in income_rows:
+        if not isinstance(income_row, dict) or not isinstance(income_row.get("rank"), int):
+            continue
+        rank = income_row["rank"]
+        balance_row = balance_by_rank.get(rank)
+        if not isinstance(balance_row, dict):
+            continue
+        ni = _line_value(income_row, "NetIncomeLoss")
+        equity = _line_value(balance_row, "StockholdersEquity")
+        if ni is None or equity is None or equity <= 0:
+            continue
+        history.append(
+            {
+                "rank": rank,
+                "fy": income_row.get("fy") or balance_row.get("fy"),
+                "net_income": float(ni),
+                "book_equity": float(equity),
+                "roe": float(ni) / float(equity),
+            }
+        )
+    history.sort(key=lambda row: row["rank"])
+    return history
+
+
+def roe_history(state: dict) -> list[dict[str, Any]]:
+    """State-level wrapper over `roe_history_from_statements`."""
+    return roe_history_from_statements(
+        state.get("income_statement") or {},
+        state.get("balance_sheet") or {},
+    )
+
+
+# Minimum annual periods before a median is a normalization rather than an
+# average of two numbers. Mirrors the `len(history) < 3` floor in
+# `_trend_revenue_growth`.
+_MIN_ROE_HISTORY = 3
+
+
+def normalize_sustainable_roe(
+    history: list[dict[str, Any]],
+    trailing_roe: Optional[float],
+    method: str = "mid_cycle",
+) -> tuple[Optional[float], str, list[str]]:
+    """Pick the ROE the residual-income model should treat as sustainable.
+
+    The residual-income path held `sustainable_roe` at the single most recent
+    year's NI/equity and then projected it flat for ten years while excess
+    return faded. That is the same one-year-anchor defect VAL-17 removed from
+    the FCF path, left in place for every bank, insurer and mortgage REIT —
+    the archetypes that never touch an FCF DCF and so were never covered.
+
+    It bites hardest where the cycle is widest. On the stored 2026-08-01 slice
+    PGR's ROE history is 37.3 / 33.1 / 19.2 / 4.5 / 18.4 percent: the engine
+    took 37.3% — a hard-market peak for a P&C insurer — and ran it for a
+    decade. JPM's history (15.7 / 17.0 / 15.1 / 12.9 / 16.4) is genuinely
+    stable, so the median barely moves it. That asymmetry is the point: this
+    only changes the answer when the latest year is unrepresentative.
+
+    Returns `(roe, method_applied, warnings)`. Falls back to the trailing value
+    — loudly — rather than inventing a median from too few periods.
+    """
+    warnings: list[str] = []
+    values = [row["roe"] for row in history if isinstance(row.get("roe"), (int, float))]
+
+    if method == "trailing" or len(values) < _MIN_ROE_HISTORY:
+        if method != "trailing" and values:
+            warnings.append(
+                f"sustainable_roe: only {len(values)} annual period(s) of ROE "
+                f"history (need {_MIN_ROE_HISTORY}) — used the trailing year "
+                "un-normalized. Treat a cyclical franchise with caution."
+            )
+        elif method != "trailing":
+            warnings.append(
+                "sustainable_roe: no usable ROE history (net income or book "
+                "equity missing across the filing series) — used the trailing "
+                "year un-normalized."
+            )
+        return trailing_roe, "trailing", warnings
+
+    if method == "avg":
+        return (sum(values) / len(values)), "avg", warnings
+
+    # `mid_cycle` (default): median across the filing history. Median over mean
+    # for the same reason the FCF path prefers it — one loss year or one
+    # reserve release should not drag the whole normalization with it. PGR's
+    # 4.5% year is exactly that case.
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    median = (
+        ordered[mid]
+        if len(ordered) % 2
+        else (ordered[mid - 1] + ordered[mid]) / 2.0
+    )
+    if trailing_roe is not None and trailing_roe != 0:
+        drift = abs(median - trailing_roe) / abs(trailing_roe)
+        if drift > 0.20:
+            warnings.append(
+                f"sustainable_roe normalized to the {len(values)}-year median "
+                f"{median:.1%} from a trailing {trailing_roe:.1%} "
+                f"({drift:.0%} apart) — the latest year is not mid-cycle."
+            )
+    return median, f"mid_cycle_{len(values)}y", warnings
+
+
 def _evidence_value(state: dict, field_id: str) -> Any:
     if not isinstance(field_id, str) or not field_id.strip():
         return None
@@ -1339,6 +1564,13 @@ def _excess_return_on_equity(state: dict, *, archetype: str) -> dict[str, Any]:
         observed_beta=_live_market_from_state(state).get("beta"),
     )
     r_e = coc.get("cost_of_equity") or r_e_default
+    # Sustainable ROE normalized over the filing history (VAL-21), the
+    # residual-income counterpart to VAL-17's base-FCF fix. `roe` above is the
+    # trailing year and stays the fallback when history is too thin.
+    roe_hist = roe_history(state)
+    sustainable_roe, roe_method, roe_warnings = normalize_sustainable_roe(
+        roe_hist, roe, "mid_cycle"
+    )
     result: dict[str, Any] = {
         "method": "excess_return_on_equity",
         "archetype": archetype,
@@ -1347,14 +1579,18 @@ def _excess_return_on_equity(state: dict, *, archetype: str) -> dict[str, Any]:
         "inputs": {
             **inp,
             "cost_of_equity": r_e,
-            "sustainable_roe": roe,
+            "sustainable_roe": sustainable_roe,
+            "trailing_roe": roe,
+            "sustainable_roe_method": roe_method,
+            "roe_history_years": len(roe_hist),
             "fade_roe": r_e,
             "fade_years": 10,
             "plowback": 0.5,
         },
         "assumptions": {
             "cost_of_equity": r_e,
-            "sustainable_roe": roe,
+            "sustainable_roe": sustainable_roe,
+            "sustainable_roe_method": roe_method,
             "fade_roe": r_e,
             "fade_years": 10,
             "plowback": 0.5,
@@ -1372,10 +1608,10 @@ def _excess_return_on_equity(state: dict, *, archetype: str) -> dict[str, Any]:
         "implied_upside_vs_price": None,
         "confidence": "low_to_moderate",
         "errors": [],
-        "warnings": [],
+        "warnings": list(roe_warnings),
         "projections": [],
     }
-    if equity is None or equity <= 0 or roe is None:
+    if equity is None or equity <= 0 or sustainable_roe is None:
         result["errors"].append(
             "excess_return_on_equity requires book equity and ROE (NI / equity)"
         )
@@ -1388,7 +1624,7 @@ def _excess_return_on_equity(state: dict, *, archetype: str) -> dict[str, Any]:
     result = _residual_income_case(
         result,
         cost_of_equity=r_e,
-        sustainable_roe=float(roe),
+        sustainable_roe=float(sustainable_roe),
         fade_roe=r_e,
         fade_years=10,
         plowback=0.5,
@@ -1631,7 +1867,25 @@ def compute_dcf_from_state(state: dict) -> dict[str, Any]:
                 "treat point estimate with low confidence."
             )
         dcf["confidence"] = "low"
-        dcf["method"] = "cycle_normalized_fcf_dcf_placeholder_trailing_base"
+        # The method name must describe what actually ran. Since 2026-08-03 the
+        # base IS margin-normalized over the filing history, so the blanket
+        # `..._placeholder_trailing_base` label was false on every run that had
+        # history — and that label reaches `clean_memo.json` and the deck cover.
+        # A reader seeing "placeholder" discounts a number that was computed
+        # properly; worse, on the runs where the base genuinely IS trailing the
+        # same string gave no way to tell the two apart.
+        #
+        # What is still missing for a commodity name is a mid-cycle PRICE deck:
+        # a five-year median FCF margin averages over whatever prices prevailed,
+        # which is not the same as marking to a normalized commodity price. That
+        # needs a price-history source this system does not have, so it stays
+        # disclosed in `warnings` and pinned at `confidence: low` rather than
+        # papered over with a method name that implies more than was done.
+        dcf["method"] = (
+            "cycle_normalized_fcf_dcf"
+            if applied and applied != "ttm"
+            else "cycle_normalized_fcf_dcf_trailing_base"
+        )
 
     # Prefer canonical metrics net-debt (ex-ST) when applicable.
     by_id = cm.get("by_id") if isinstance(cm, dict) else None
@@ -1934,6 +2188,30 @@ def _corner_ends(
     return (lo, hi) if f_lo <= f_hi else (hi, lo)
 
 
+def _warn_on_wrong_model_dials(
+    method: Optional[str], argued: dict[str, Any], warnings: list[str]
+) -> None:
+    """Disclose arguments aimed at a model that is not the one running.
+
+    Replaces the silent reinterpretation the shim performed. A dial that
+    belongs to another method is dropped and *said out loud*, so a reader can
+    see the critique missed rather than seeing its reasoning attached to a
+    quantity it was not written about.
+    """
+    consumed = set(argued_dials_for_method(method))
+    stray = sorted(
+        name
+        for name in argued
+        if name in ARGUED_DIAL_DEFINITIONS and name not in consumed
+    )
+    if stray:
+        warnings.append(
+            f"Argued inputs {stray} were not applied: the {method} model does "
+            f"not use them (it takes {list(argued_dials_for_method(method))}). "
+            "They were dropped, not reinterpreted — the engine default stands."
+        )
+
+
 def _non_fcf_ranges(
     base: dict[str, Any], argued: dict[str, Any]
 ) -> tuple[dict[str, Any], dict[str, list[Any]], list[str]]:
@@ -1955,19 +2233,21 @@ def _non_fcf_ranges(
             if isinstance(entry, dict) and isinstance(entry.get("argued_range"), list):
                 ranges[parameter] = list(entry["argued_range"])
 
-        # Compatibility for the committed 2026-07-30 critiques. They were
-        # generated before native non-FCF dials existed: WACC meant cost of
-        # equity, and g_high reasoning explicitly described book-value growth.
-        if "cost_of_equity" not in ranges and isinstance(argued.get("wacc"), dict):
-            ranges["cost_of_equity"] = list(argued["wacc"]["argued_range"])
-        if "plowback" not in ranges and isinstance(argued.get("g_high"), dict):
-            growth = argued["g_high"].get("argued_range")
-            roe = defaults["sustainable_roe"]
-            if isinstance(growth, list) and roe:
-                ranges["plowback"] = [
-                    max(0.0, min(1.0, float(growth[0]) / roe)),
-                    max(0.0, min(1.0, float(growth[1]) / roe)),
-                ]
+        # The `wacc → cost_of_equity` / `g_high → plowback` shim that used to
+        # sit here is deleted (VAL-23). It was labelled back-compat for the
+        # committed 2026-07-30 critiques, but its guard (`if "cost_of_equity"
+        # not in ranges`) could never be false: nothing offered the native
+        # dials, so nothing could populate them, and every live bank and
+        # insurer run went through the reinterpretation. Silently renaming an
+        # argument is worse than dropping it — a dropped argument is disclosed
+        # in `clamp_warnings` and the default stands, while a renamed one
+        # publishes reasoning about a discount rate under a number that is a
+        # required equity return, and passes the evidence check while doing it.
+        #
+        # Nothing replays stored critiques into a new run: `prior_run_context`
+        # is prompt text (`format_prior_run_for_prompt`), never structured
+        # argued inputs, so deleting this strands no memory path.
+        _warn_on_wrong_model_dials(method, argued, warnings)
         return defaults, ranges, warnings, ("argued" if ranges else "convention")
 
     defaults = {
@@ -1980,6 +2260,7 @@ def _non_fcf_ranges(
         entry = argued.get(parameter)
         if isinstance(entry, dict) and isinstance(entry.get("argued_range"), list):
             ranges[parameter] = list(entry["argued_range"])
+    _warn_on_wrong_model_dials(method, argued, warnings)
     if not ranges:
         # No FFO/NAV dial was argued. Produce filing/market-anchored recomputed
         # cases without pretending an FCF-basis argument changes FFO. These are
@@ -2123,10 +2404,11 @@ def _compute_non_fcf_with_argued_inputs(
 def compute_dcf_with_argued_inputs(state: dict, argued: dict) -> dict[str, Any]:
     """Re-run the deterministic DCF at both accepted argued-range corners."""
     base = compute_dcf_from_state(state)
-    if base.get("method") not in {
-        "multi_stage_fcf_dcf",
-        "cycle_normalized_fcf_dcf_placeholder_trailing_base",
-    }:
+    # Every FCF-shaped method must be listed here. The cyclical-commodity names
+    # were split in two on 2026-08-05 (normalized vs genuinely trailing base);
+    # both are still FCF DCFs and both take argued FCF dials. Dropping either
+    # would silently route CVX down the non-FCF branch and discard its critique.
+    if base.get("method") not in _FCF_DCF_METHODS:
         return _compute_non_fcf_with_argued_inputs(base, argued)
 
     assumptions = base.get("assumptions") or {}
